@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build & Test (macOS 26)
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 27
+        run: sudo xcode-select -s /Applications/Xcode_27.0.app/Contents/Developer
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build Debug (zero-warning gate)
+        run: |
+          set -o pipefail
+          xcodebuild -project SuperDownloadManager.xcodeproj \
+                     -scheme SuperDownloadManager \
+                     -configuration Debug \
+                     -derivedDataPath build build 2>&1 \
+            | tee build.log
+          # Treat warnings as errors in source files (appintentsmetadataprocessor
+          # noise from the SDK is filtered out — it's not a source warning).
+          if grep -E "warning:|error:" build.log \
+              | grep -v "appintentsmetadataprocessor" \
+              | grep -vE "^\\s*\\^" \
+              | grep -v "xcodebuild: WARNING: Using the first of multiple matching destinations" \
+              | grep -q .; then
+            echo "::error::Source warning(s) detected:"
+            grep -E "warning:|error:" build.log \
+              | grep -v "appintentsmetadataprocessor" \
+              | head -20
+            exit 1
+          fi
+          grep -q "BUILD SUCCEEDED" build.log
+
+      - name: Build Release
+        run: |
+          xcodebuild -project SuperDownloadManager.xcodeproj \
+                     -scheme SuperDownloadManager \
+                     -configuration Release \
+                     -derivedDataPath build_release build 2>&1 \
+            | tee release.log
+          if grep -E "warning:|error:" release.log \
+              | grep -v "appintentsmetadataprocessor" \
+              | grep -vE "^\\s*\\^" \
+              | grep -v "xcodebuild: WARNING: Using the first of multiple matching destinations" \
+              | grep -q .; then
+            echo "::error::Release-build source warning(s) detected:"
+            grep -E "warning:|error:" release.log \
+              | grep -v "appintentsmetadataprocessor" \
+              | head -20
+            exit 1
+          fi
+          grep -q "BUILD SUCCEEDED" release.log
+
+      - name: Run tests
+        run: |
+          set -o pipefail
+          xcodebuild test -project SuperDownloadManager.xcodeproj \
+                          -scheme SuperDownloadManager \
+                          -destination 'platform=macOS' \
+                          -derivedDataPath build 2>&1 \
+            | tee test.log | grep -E "Test Case|Test Suite|Executed [0-9]+ tests"
+          # xcodebuild test exits non-zero on any test failure
+          grep -q "Test Suite 'All tests' passed" test.log
+
+      - name: Verify .app bundle
+        run: |
+          APP="build/Build/Products/Debug/SuperDownloadManager.app"
+          test -d "$APP"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist"
+          codesign -dv "$APP" 2>&1 | grep -E "Identifier|Signature"
+          plutil -lint "$APP/Contents/Info.plist"
+          test -f "$APP/Contents/Resources/com.superdownloadmanager.daemon.plist"
+          test -f "$APP/Contents/Resources/install.sh"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SDM-Debug
+          path: |
+            build/Build/Products/Debug/SuperDownloadManager.app
+            build/Build/Products/Release/SuperDownloadManager.app
+          if-no-files-found: warn
+          retention-days: 7

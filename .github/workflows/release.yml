@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Tag to release (e.g. v1.0.0); required for ad-hoc dispatch'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, sign, draft release
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode 27
+        run: sudo xcode-select -s /Applications/Xcode_27.0.app/Contents/Developer
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build Release
+        run: |
+          xcodebuild -project SuperDownloadManager.xcodeproj \
+                     -scheme SuperDownloadManager \
+                     -configuration Release \
+                     -derivedDataPath build_release clean build 2>&1 \
+            | tee release.log
+          if grep -E "warning:|error:" release.log \
+              | grep -v "appintentsmetadataprocessor" \
+              | grep -vE "^\\s*\\^" \
+              | grep -v "xcodebuild: WARNING: Using the first of multiple matching destinations" \
+              | grep -q .; then
+            echo "::error::Release build had warnings/errors"
+            grep -E "warning:|error:" release.log | grep -v "appintentsmetadataprocessor" | head -20
+            exit 1
+          fi
+          grep -q "BUILD SUCCEEDED" release.log
+
+      - name: Run tests (Release)
+        run: |
+          xcodebuild test -project SuperDownloadManager.xcodeproj \
+                          -scheme SuperDownloadManager \
+                          -destination 'platform=macOS' \
+                          -derivedDataPath build_release 2>&1 \
+            | tee test.log | grep -E "Executed [0-9]+ tests"
+          grep -q "Test Suite 'All tests' passed" test.log
+
+      - name: Build DMG (P7 enables; P0+ safe-if-missing)
+        run: |
+          if [ -x "scripts/make-dmg.sh" ]; then
+            bash scripts/make-dmg.sh
+          else
+            echo "make-dmg.sh not present yet — skipping DMG"
+          fi
+
+      - name: Stage artifacts
+        id: stage
+        run: |
+          mkdir -p artifacts
+          cp -R build_release/Build/Products/Release/SuperDownloadManager.app artifacts/
+          shasum -a 256 artifacts/SuperDownloadManager.app.zip 2>/dev/null || true
+          # zip for download
+          cd artifacts && zip -qr SuperDownloadManager.app.zip SuperDownloadManager.app
+          ls -la
+          echo "artifact_path=artifacts/SuperDownloadManager.app.zip" >> $GITHUB_OUTPUT
+
+      - name: Extract version
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          elif [ -n "${{ inputs.version }}" ]; then
+            echo "tag=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            # Workflow dispatch without input — derive from plist
+            TAG=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+                    build_release/Build/Products/Release/SuperDownloadManager.app/Contents/Info.plist)
+            echo "tag=v${TAG}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Pre-release draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.ver.outputs.tag }}" \
+            --prerelease \
+            --draft=false \
+            --title "${{ steps.ver.outputs.tag }}" \
+            --generate-notes \
+            artifacts/SuperDownloadManager.app.zip
+
+      - name: Notify (console)
+        run: |
+          echo "::notice::Pre-release ${{ steps.ver.outputs.tag }} published as **Pre-release**."
+          echo "::notice::星空喵 must run the build, confirm manually, then the agent flips --prerelease=false."
+
+      - name: Upload artifact checksum
+        run: |
+          shasum -a 256 artifacts/SuperDownloadManager.app.zip \
+            | tee artifacts/SuperDownloadManager.app.zip.sha256
