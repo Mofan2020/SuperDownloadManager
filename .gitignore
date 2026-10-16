@@ -1,0 +1,23 @@
+# Build artifacts
+build/
+DerivedData/
+*.xcodeproj
+xcuserdata/
+*.xcuserstate
+*.xcworkspace
+
+# Swift Package Manager
+.swiftpm/
+.build/
+Package.resolved
+
+# macOS
+.DS_Store
+*.swp
+*.swo
+*~
+
+# App-specific
+*.sdm          # Resume state sidecar (dev convenience)
+downloads/     # dev downloads dir
+*.partial

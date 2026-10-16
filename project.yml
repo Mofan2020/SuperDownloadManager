@@ -1,0 +1,95 @@
+name: SuperDownloadManager
+options:
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+  groupSortPosition: top
+  developmentLanguage: en
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    ENABLE_HARDENED_RUNTIME: "NO"
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+    GCC_TREAT_WARNINGS_AS_ERRORS: "YES"
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: "YES"
+    ALWAYS_SEARCH_USER_PATHS: "NO"
+    CLANG_ENABLE_OBJC_ARC: "YES"
+    OTHER_SWIFT_FLAGS: "-Xfrontend -warn-long-expression-type-checking=200"
+    PRODUCT_NAME: SuperDownloadManager
+    INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
+    INFOPLIST_KEY_LSUIElement: "NO"
+    INFOPLIST_KEY_CFBundleLocalizations: ["en", "zh-Hans"]
+    INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Skyc8266. MIT License."
+    INFOPLIST_KEY_NSMainStoryboardFile: ""
+    INFOPLIST_KEY_NSPrincipalClass: "NSApplication"
+
+targets:
+  SuperDownloadManager:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+      - path: Engine
+        excludes:
+          - "**/.DS_Store"
+      - path: Daemon
+        excludes:
+          - "**/.DS_Store"
+      - path: Resources
+        type: folder
+        buildPhase: resources
+        excludes:
+          - "**/.DS_Store"
+      # Non-source files that must be bundled. Listing under `sources`
+      # with `buildPhase: resources` is the XcodeGen-idiomatic way;
+      # a top-level `resources:` block is silently ignored (per skill
+      # skill `templates/project.yml`).
+      - path: Launcher/templates/com.superdownloadmanager.daemon.plist
+        buildPhase: resources
+      - path: scripts/install.sh
+        buildPhase: resources
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleName: SuperDownloadManager
+        CFBundleDisplayName: Super Download Manager
+        CFBundleIdentifier: com.superdownloadmanager.app
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        LSMinimumSystemVersion: "26.0"
+        NSHumanReadableCopyright: "Copyright © 2026 Skyc8266. MIT License."
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: "SDM listens on a local socket for browser extensions to dispatch downloads."
+    entitlements:
+      path: App/SuperDownloadManager.entitlements
+      properties:
+        com.apple.security.network.client: true
+        com.apple.security.network.server: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.superdownloadmanager.app
+        GENERATE_INFOPLIST_FILE: "NO"
+
+  SuperDownloadManagerTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+      # Tests target compiles App/Engine/Daemon sources directly into
+      # its own module so that test types and production types live in
+      # the same module — required for `internal` access from tests and
+      # to avoid the duplicate swiftmodule copy issue under Xcode 27.
+      - path: App
+      - path: Engine
+      - path: Daemon
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.superdownloadmanager.tests
+        GENERATE_INFOPLIST_FILE: "YES"
