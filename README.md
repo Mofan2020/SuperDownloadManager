@@ -1,47 +1,58 @@
 # Super Download Manager (SDM)
 
-自研 macOS 多线程下载器。
+> **A native macOS multi-threaded downloader written from scratch in Swift.** No Electron, no aria2, no third-party runtime. Just an `.app` you drag into `/Applications`.
 
-- 全自研 Swift 实现
-- 默认 32 段动态并行，上限 128
-- 智能限速 + 时间段规则
-- 自动文件分类
-- 浏览器接管（Firefox 完整接管；Safari 嗅探+派单，受 macOS 限制）
-- 命令行 `sdmdm`（自动加入 `~/.local/bin`）
-- 后台常驻，开机自启
-- 链接过期可续传（保留已下载分段）
+IDM does it on Windows. There's no good equivalent on macOS. So I wrote one.
 
-## 系统要求
+![Platform](https://img.shields.io/badge/Platform-macOS%2026%2B-blue.svg)
+![Swift](https://img.shields.io/badge/Swift-5.9-orange.svg)
+![License](https://img.shields.io/badge/License-MIT-yellow.svg)
+![Architecture](https://img.shields.io/badge/Arch-Apple%20Silicon%20%7C%20Intel-lightgrey.svg)
 
-- macOS 26.0+
-- Apple Silicon 或 Intel Mac
+[中文文档](./README.zh-CN.md)
 
-## 安装
+## Highlights
 
-下载最新 `SuperDownloadManager.dmg`，双击，把 `SuperDownloadManager.app` 拖进 `/Applications`。
+- **From-scratch Swift implementation.** No Electron shell, no embedded browser, no external runtime. The download engine, segment scheduler, GUI, and CLI all live in the same `.app`.
+- **32 dynamic segments by default, up to 128.** Adaptive segment count based on server behavior; no manual tuning required.
+- **Smart speed limiting with time-of-day rules.** Throttle at night, unthrottle during the day, or schedule per-task caps.
+- **Automatic file categorization.** Downloads land in `~/Downloads/Video/`, `~/Downloads/Archives/`, etc. Extension-less `.dmg` / `.zip` are detected via magic bytes.
+- **Browser takeover.** Firefox extension intercepts downloads natively. Safari extension sniffs links and hands them off (macOS does not allow Safari download interception, so SDM does what it can).
+- **`sdmdm` CLI, auto-installed to `~/.local/bin`.** Every command returns a single line of JSON — designed to be called by AI agents and shell scripts.
+- **Background daemon with auto-start.** LaunchAgent registers on first launch; survives logout, reboots silently.
+- **Resume from expired links.** When a server returns 403/410/451 mid-download, SDM pauses the task, validates ETag / Content-Length of the replacement URL, and continues from the existing segments.
 
-打开一次应用以触发 LaunchAgent 注册：
+## Requirements
+
+- macOS 26.0 or later
+- Apple Silicon or Intel Mac
+
+## Install
+
+Download the latest `SuperDownloadManager.dmg` from [Releases](https://github.com/Mofan2020/SuperDownloadManager/releases), double-click it, and drag `SuperDownloadManager.app` into `/Applications`.
+
+Open the app once to trigger LaunchAgent registration:
 
 ```sh
 open /Applications/SuperDownloadManager.app
-# 首次启动自动调用 install.sh 注册 daemon
+# First launch automatically runs install.sh to register the daemon.
 ```
 
-或手动：
+Or do it manually:
 
 ```sh
 sh /Applications/SuperDownloadManager.app/Contents/Resources/install.sh
 ```
 
-完成后：
+Verify the daemon:
 
 ```sh
 sdmdm ping
 ```
 
-应返回 `{"ok":true, "result":{"pong":true}}`。
+Should return `{"ok":true, "result":{"pong":true}}`.
 
-## 命令行
+## CLI
 
 ```
 sdmdm add <url> [--referer R] [--filename F] [--category C] [--threads N]
@@ -52,48 +63,48 @@ sdmdm config speed <bytes/sec> | config threads <count>
 sdmdm ping
 ```
 
-每个命令返回一行 JSON。AI agent 可直接调用。
+Every command returns one line of JSON. Designed for direct AI agent invocation.
 
-## 浏览器扩展
+## Browser Extensions
 
-详见 [`docs/extension-install.md`](docs/extension-install.md)。
+See [`docs/extension-install.md`](docs/extension-install.md).
 
-- **Firefox**：临时加载 manifest.json；接管下载
-- **Safari**：手动允许未签名扩展；只做嗅探+派单（Apple 限制 Safari 不能拦截下载）
+- **Firefox** — Load `manifest.json` as a temporary add-on; full download interception.
+- **Safari** — Allow the unsigned extension manually; link sniffing + handoff only (Apple's restrictions prevent Safari download interception).
 
-## 文件分类
+## File Categorization
 
-下载完成后按以下规则落盘（用户可在 Settings 修改）：
+Downloads land in these folders after completion (paths are configurable in Settings):
 
-| 类别 | 路径 |
-|---|---|
-| 视频 | `~/Downloads/Video/` |
-| 图片 | `~/Downloads/Pictures/` |
-| 音频 | `~/Downloads/Audio/` |
-| 归档 (zip/dmg/7z/...) | `~/Downloads/Archives/` |
-| 文档 (PDF/DOCX/...) | `~/Downloads/Documents/` |
-| 可执行 | `~/Downloads/Software/` |
-| 其它 | `~/Downloads/` |
+| Category | Path |
+| --- | --- |
+| Video | `~/Downloads/Video/` |
+| Pictures | `~/Downloads/Pictures/` |
+| Audio | `~/Downloads/Audio/` |
+| Archives (zip/dmg/7z/...) | `~/Downloads/Archives/` |
+| Documents (PDF/DOCX/...) | `~/Downloads/Documents/` |
+| Executables | `~/Downloads/Software/` |
+| Other | `~/Downloads/` |
 
-无扩展名的 `.dmg` / `.zip` 通过 magic byte 嗅探识别。
+Files without extensions (`.dmg`, `.zip`) are identified by magic bytes.
 
-## 链接过期续传
+## Resume from Expired Links
 
-下载过程中如服务端返回 403/410/451，SDM 标记任务为「等待新链接」：
+If the server returns 403/410/451 mid-download, SDM marks the task as "waiting for new link":
 
-1. GUI 顶部出现橙色 banner
-2. 点 "刷新链接"，粘贴新 URL
-3. SDM 验证 ETag / Content-Length 一致 → 从已完成分段续传
+1. An orange banner appears at the top of the GUI.
+2. Click "Refresh link" and paste the new URL.
+3. SDM validates ETag / Content-Length match, then resumes from the already-downloaded segments.
 
-CLI 路径：`sdmdm relink <task_id> <new_url>`
+CLI path: `sdmdm relink <task_id> <new_url>`.
 
-## 自动更新
+## Auto-Update
 
-应用内"检查更新…"调起 Sparkle。更新发布于 GitHub Releases，全部经 edDSA 签名验证。
+The in-app "Check for Updates..." entry uses Sparkle. Updates are published to GitHub Releases and verified with edDSA signatures.
 
-## 构建（开发者）
+## Build (Developers)
 
-需要 macOS 26+，Xcode 27，`brew install xcodegen`。
+Requires macOS 26+, Xcode 27, and `brew install xcodegen`.
 
 ```sh
 xcodegen generate
@@ -104,26 +115,26 @@ xcodebuild -project SuperDownloadManager.xcodeproj \
 open build/Build/Products/Debug/SuperDownloadManager.app
 ```
 
-跑测试：
+Run tests:
 
 ```sh
 xcodebuild test -scheme SDMSelfTest -destination 'platform=macOS' -derivedDataPath build
 ```
 
-打包 Release：
+Package a Release build:
 
 ```sh
 xcodebuild -configuration Release -derivedDataPath build_release build
 bash scripts/make-dmg.sh
 ```
 
-## 仓库约定
+## Repository Conventions
 
-- 自动 commit + 自动 push（CI 编译 + tag 触发 release）
-- `docs/notes.md` 记录 "没动的与原因"
-- 公开文本简洁直接；技术细节进 `docs/release.md` 与 `docs/notes.md`
-- 借用第三方算法时：**算法可鉴，源码不抄**；声明三处
+- Auto-commit + auto-push (CI builds + tag triggers release).
+- `docs/notes.md` records "what was deliberately not changed, and why."
+- Public docs stay short and direct; technical depth lives in `docs/release.md` and `docs/notes.md`.
+- When borrowing algorithms from third parties: **study the algorithm, never copy the source**; document three places.
 
-## 许可证
+## License
 
-MIT。详见 [LICENSE](./LICENSE)。
+MIT. See [LICENSE](./LICENSE).
