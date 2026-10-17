@@ -83,6 +83,14 @@ targets:
         buildPhase: resources
       - path: scripts/install.sh
         buildPhase: resources
+      # v1.0.1: bilingual string catalogs copied into the app's
+      # main bundle so `NSLocalizedString` (which uses Bundle.main)
+      # can resolve keys at runtime. The same files also ship
+      # inside the framework for callers outside the app context.
+      - path: Engine/Resources/en.lproj
+        buildPhase: resources
+      - path: Engine/Resources/zh-Hans.lproj
+        buildPhase: resources
     dependencies:
       - target: SuperDownloadManagerCore
     info:
@@ -113,6 +121,14 @@ targets:
     platform: macOS
     sources:
       - path: Tests
+      # v1.0.1: ship the .lproj catalogs into the test bundle so
+      # `Bundle(for: L10nTests.self).path(forResource: ...)` can
+      # find them and `NSLocalizedString` uses them when the test
+      # process is the main bundle (no .app involved).
+      - path: Engine/Resources/en.lproj
+        buildPhase: resources
+      - path: Engine/Resources/zh-Hans.lproj
+        buildPhase: resources
     dependencies:
       - target: SuperDownloadManagerCore
     settings:

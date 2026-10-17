@@ -1,15 +1,10 @@
 import SwiftUI
 
-/// ExpiredLinkBanner — P2 stub view used by P3's `ExpiredLinkHandler`
-/// when the engine reports a 403/410/451 mid-flight. The banner is
-/// non-blocking by design (no modal that freezes the rest of the UI).
-///
-/// v1.0 layout:
-/// - one row at the top of the main window
-/// - "刷新链接" button opens a sheet where the user pastes the new
-///   URL. The sheet itself lives in P3 and calls
-///   `ExpiredLinkHandler.evaluateRelink`; the banner only knows
-///   about state transitions.
+import SuperDownloadManagerCore
+
+/// ExpiredLinkBanner — non-blocking banner shown when the engine
+/// reports a 403/410/451 mid-flight. v1.0.1 added bilingual text
+/// support so the "Refresh link" button label is localizable.
 struct ExpiredLinkBanner: View {
     let summary: String
     let onReenter: () -> Void
@@ -20,7 +15,7 @@ struct ExpiredLinkBanner: View {
                 .foregroundStyle(.orange)
             Text(summary)
             Spacer()
-            Button("刷新链接", action: onReenter)
+            Button(L10n.bannerRefreshLink, action: onReenter)
                 .buttonStyle(.borderedProminent)
         }
         .padding(12)

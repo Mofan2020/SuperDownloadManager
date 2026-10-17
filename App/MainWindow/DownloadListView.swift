@@ -1,6 +1,8 @@
 import SwiftUI
 
-/// DownloadListView — P2 main window's primary pane.
+import SuperDownloadManagerCore
+
+/// DownloadListView — main window's primary pane.
 ///
 /// Renders the engine's task list. Each row is a `TaskRow` with
 /// filename, progress bar, current speed, ETA, and status badge.
@@ -8,9 +10,14 @@ import SwiftUI
 /// snapshots from `SDMEngine`) so a running download refreshes in
 /// place without manual re-renders.
 ///
-/// v1.0 deliberately keeps the view dumb — all state flows through
-/// the store; the row view does not own timers, URLSessions, or any
-/// side effects.
+/// v1.0.1: state strings are localized via `L10n.state<...>` —
+/// the raw `"downloading"` / `"completed"` engine state IDs are
+/// still emitted from `SDMEngine.snapshot()`, but the row view
+/// translates them at render time. The eta/speed formatters
+/// stay in `ByteRateFormatter` / `TimeFormatter` and use the
+/// Unicode `U+00B7 MIDDLE DOT` separator in both locales (we
+/// only translate them through `Localizable.strings` if the
+/// UI later surfaces them prominently).
 struct DownloadListView: View {
     @ObservedObject var store: DownloadListStore
 
@@ -44,7 +51,7 @@ private struct TaskRow: View {
                         Text(eta)
                     }
                     Text("·")
-                    Text(task.state)
+                    Text(localizedState(task.state))
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -55,12 +62,23 @@ private struct TaskRow: View {
 
     private func iconName(for state: String) -> String {
         switch state {
-        case "downloading":   return "arrow.down.circle.fill"
-        case "completed":     return "checkmark.circle.fill"
+        case "downloading":      return "arrow.down.circle.fill"
+        case "completed":        return "checkmark.circle.fill"
         case "awaiting_new_link": return "link.badge.plus"
-        case "failed":        return "xmark.octagon.fill"
-        case "paused":        return "pause.circle.fill"
-        default:              return "circle.dashed"
+        case "failed":           return "xmark.octagon.fill"
+        case "paused":           return "pause.circle.fill"
+        default:                 return "circle.dashed"
+        }
+    }
+
+    private func localizedState(_ state: String) -> LocalizedStringKey {
+        switch state {
+        case "downloading":      return L10n.stateDownloading
+        case "completed":        return L10n.stateCompleted
+        case "awaiting_new_link": return L10n.stateAwaitingLink
+        case "failed":           return L10n.stateFailed
+        case "paused":           return L10n.statePaused
+        default:                 return L10n.stateUnknown
         }
     }
 }

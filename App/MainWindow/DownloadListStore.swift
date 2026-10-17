@@ -1,4 +1,6 @@
 import SwiftUI
+
+import SuperDownloadManagerCore
 import Combine
 import SuperDownloadManagerCore
 

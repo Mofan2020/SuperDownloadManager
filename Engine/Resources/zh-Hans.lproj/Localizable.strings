@@ -1,0 +1,47 @@
+/* SDM v1.0.1 简体中文翻译。每加一条 key 必须同步 zh-Hans.lproj。*/
+
+/* 菜单栏 */
+"menu.openMainWindow" = "打开主窗口";
+"menu.downloads"       = "下载列表…";
+"menu.settings"        = "设置…";
+"menu.quit"            = "退出 SDM";
+
+/* 主窗口 */
+"window.main.title" = "下载列表";
+
+/* 设置 — 默认 */
+"settings.section.defaults"   = "默认";
+"settings.defaultThreads"      = "默认线程数：%lld";
+"settings.bandwidth"           = "带宽限制";
+"settings.bandwidth.hint"      = "0 = 不限速（最小 100 KB/s）";
+"settings.kbps"                = "KB/s";
+
+/* 设置 — 分类 */
+"settings.section.categories"  = "分类";
+"settings.categories.link"     = "文件分类规则";
+"settings.categories.placeholder" = "分类规则编辑器（v1.1 接入）";
+
+/* 设置 — 启动 */
+"settings.section.startup"      = "启动";
+"settings.openAtLogin"          = "开机自启";
+"settings.updateChannel"       = "更新通道";
+"settings.update.stable"        = "正式版";
+"settings.update.prerelease"    = "预发布";
+
+/* 设置 — 通用 */
+"settings.section.general"      = "通用";
+"settings.language"             = "语言";
+"settings.language.system"      = "跟随系统";
+"settings.language.en"          = "English";
+"settings.language.zh-Hans"     = "简体中文";
+
+/* 链接过期 banner */
+"banner.refreshLink"            = "刷新链接";
+
+/* 状态 */
+"state.downloading"   = "下载中";
+"state.completed"     = "已完成";
+"state.awaiting_link" = "等待新链接";
+"state.failed"        = "失败";
+"state.paused"        = "已暂停";
+"state.unknown"       = "空闲";
