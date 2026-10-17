@@ -68,13 +68,21 @@ jobs:
           # has been observed to hang on macos-latest; keeping the
           # release pipeline to non-e2e tests makes the gate fast.
           set -o pipefail
+          # Capture full xcodebuild output to test.log, then grep for
+          # status lines afterwards. (Piping first discards them and
+          # the `grep -q` step below can't see them.)
           xcodebuild test -project SuperDownloadManager.xcodeproj \
                           -scheme SuperDownloadManager \
                           -destination 'platform=macOS' \
                           -skip-testing:SuperDownloadManagerTests/DownloadFlowEndToEndTests \
-                          -derivedDataPath build_release 2>&1 \
-            | tee test.log | grep -E "Executed [0-9]+ tests|passed|failed"
-          grep -q "Test Suite 'All tests' passed" test.log
+                          -derivedDataPath build_release \
+            > test.log 2>&1 || true
+          grep -E "Executed [0-9]+ tests|passed|failed" test.log | tail -10
+          if ! grep -q "Test Suite 'All tests' passed" test.log; then
+            echo "::error::Test suite did not pass; tail of test.log:"
+            tail -30 test.log
+            exit 1
+          fi
 
       - name: Build DMG (P7 enables; P0+ safe-if-missing)
         run: |

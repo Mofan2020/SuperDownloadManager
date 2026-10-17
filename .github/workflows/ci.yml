@@ -90,9 +90,14 @@ jobs:
           xcodebuild test -project SuperDownloadManager.xcodeproj \
                           -scheme SuperDownloadManager \
                           -destination 'platform=macOS' \
-                          -derivedDataPath build 2>&1 \
-            | tee test.log | grep -E "Test Case|Test Suite|Executed [0-9]+ tests"
-          grep -q "Test Suite 'All tests' passed" test.log
+                          -derivedDataPath build \
+            > test.log 2>&1 || true
+          grep -E "Test Case|Test Suite|Executed [0-9]+ tests" test.log | tail -10
+          if ! grep -q "Test Suite 'All tests' passed" test.log; then
+            echo "::error::Test suite did not pass; tail of test.log:"
+            tail -30 test.log
+            exit 1
+          fi
 
       - name: Verify .app bundle
         run: |
