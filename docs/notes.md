@@ -2,6 +2,14 @@
 
 按星空喵硬偏好："项目文档是给所有维护者看的，包括人类，不要把只对 AI 助手有意义的指令写进仓库文档"。本文件只记录**项目级决策与未做事项 + 原因**，给任何人类/AI 维护者看。
 
+## v1.0.0 状态
+
+仓库里的 v1.0.0 已经由 GitHub Actions 发布为 **Pre-release**：
+
+> https://github.com/Mofan2020/SuperDownloadManager/releases/tag/v1.0.0
+
+asset 是 `SuperDownloadManager.app.zip`（ad-hoc 签名、解压拖 `/Applications` 即可）。按星空喵硬性偏好 **未经手测只发 Pre-release** ——星空喵下载手测通过后，agent 把 `gh release edit v1.0.0 --prerelease=false`。
+
 ## v1.0 暂不做
 
 | # | 项 | 原因 |
