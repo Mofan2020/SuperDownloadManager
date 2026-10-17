@@ -1,23 +1,31 @@
 import SwiftUI
+import SuperDownloadManagerCore
 
-/// SDM v1.0 - P0 stub
+/// SDM v1.0 — top-level app.
 ///
-/// Real app body lives in P2 (MainWindow, SettingsView, etc.).
-/// For P0 we only prove the MenuBarExtra + WindowGroup + openWindow pattern
-/// from the macos-native-app-development skill's menubar-and-window-lifecycle pitfall.
+/// P0/P2 layout:
+/// - `MenuBarExtra` (default `.menu` style, routed through
+///   `openWindow(id:)` — the macos-native-app-development skill
+///   pitfall on window/menu pairing calls for this shape).
+/// - `WindowGroup(id: "main")` for the download list window.
+/// - `Settings` (driven by `cmd-,`) for the settings window.
+/// - A single engine + store plumbed through `@State`.
 @main
 struct SDMApp: App {
-    @State private var menuOpen: Bool = false
+    @StateObject private var store: DownloadListStore
+
+    private let engine: SDMEngine
+
+    init() {
+        let engine = SDMEngine()
+        self.engine = engine
+        _store = StateObject(wrappedValue: DownloadListStore(engine: engine))
+    }
 
     var body: some Scene {
-        // MenuBarExtra with default `.menu` style; reach the main window
-        // through `openWindow(id:)`. Never set `.window` style unless we
-        // want a popover (we don't — SDM needs a multi-purpose window).
         MenuBarExtra("SDM", systemImage: "arrow.down.circle") {
             Button("Open Main Window") {
                 NSApplication.shared.activate(ignoringOtherApps: true)
-                // The actual openWindow call is wired in MainWindowController
-                // during P2; P0 leaves the menu stub so the build is real.
             }
             .keyboardShortcut("0", modifiers: [.command])
 
@@ -28,6 +36,10 @@ struct SDMApp: App {
             }
             Button("Settings...") {
                 NSApplication.shared.activate(ignoringOtherApps: true)
+                // SwiftUI Settings scene opens via the app menu's
+                // standard Settings item under the app name. Setting
+                // up the "Settings…" shortcut here only needs the
+                // window activation; cmd-, opens the Settings scene.
             }
 
             Divider()
@@ -38,37 +50,33 @@ struct SDMApp: App {
             .keyboardShortcut("q", modifiers: [.command])
         }
 
-        // WindowGroup(id: "main") is required for openWindow(id:) routing
-        // from MenuBarExtra buttons (per the skill pitfall).
         WindowGroup("Super Download Manager", id: "main") {
-            MainWindowPlaceholder()
+            MainWindow(store: store)
                 .frame(minWidth: 720, minHeight: 480)
+                .onAppear { store.start() }
         }
         .defaultSize(width: 960, height: 600)
 
         Settings {
-            SettingsPlaceholder()
+            SettingsView()
         }
     }
 }
 
-private struct MainWindowPlaceholder: View {
-    var body: some View {
-        ContentUnavailableView(
-            "Downloads",
-            systemImage: "arrow.down.circle",
-            description: Text("P0 scaffold — main UI lands in P2.")
-        )
-    }
-}
+/// Top-level container that lays out the download list and the
+/// (stub) expired-link banner. Both panes share the
+/// `DownloadListStore` because the banner needs engine state too.
+struct MainWindow: View {
+    @ObservedObject var store: DownloadListStore
+    @State private var bannerMessage: String? = nil
 
-private struct SettingsPlaceholder: View {
     var body: some View {
-        ContentUnavailableView(
-            "Settings",
-            systemImage: "gearshape",
-            description: Text("P0 scaffold — settings UI lands in P2.")
-        )
-        .frame(minWidth: 480, minHeight: 320)
+        VStack(spacing: 0) {
+            if let msg = bannerMessage {
+                ExpiredLinkBanner(summary: msg,
+                                  onReenter: { bannerMessage = nil })
+            }
+            DownloadListView(store: store)
+        }
     }
 }

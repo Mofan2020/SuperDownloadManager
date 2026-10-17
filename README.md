@@ -1,41 +1,97 @@
 # Super Download Manager (SDM)
 
-> 自研多线程动态分段下载器，对标 IDM 的 macOS 原生实现。
+自研 macOS 多线程下载器。
 
-> **状态：P0（工程骨架）** — 仓库可 `xcodegen generate && xcodebuild build` 通过；下载引擎、CLI、扩展等进入 P1-P8。
+- 全自研 Swift 实现
+- 默认 32 段动态并行，上限 128
+- 智能限速 + 时间段规则
+- 自动文件分类
+- 浏览器接管（Firefox 完整接管；Safari 嗅探+派单，受 macOS 限制）
+- 命令行 `sdmdm`（自动加入 `~/.local/bin`）
+- 后台常驻，开机自启
+- 链接过期可续传（保留已下载分段）
 
-## 它是什么
+## 系统要求
 
-一个 macOS 原生下载管理器：
+- macOS 26.0+
+- Apple Silicon 或 Intel Mac
 
-- **全自研**，无 aria2 / 第三方下载核心
-- 默认 32 段动态并行，**硬上限 128 段**
-- 智能限速（令牌桶，时间段规则可配）
-- 自动文件分类（Video / Pictures / Audio / Archives / Documents / Software / Other，按 MIME + 扩展名 + magic byte 三键）
-- 浏览器接管（Firefox 全功能；Safari 嗅探+悬停按钮，受 macOS 15+ 设计限制）
-- macOS 26 GUI（Swift 5.9 语言模式，Xcode 27 SDK 编译）
-- 头less `sdmd` 守护进程 + `sdmdm` CLI（自动加入 `~/.local/bin/`）
-- 链接过期后可"刷新续传"（保留已完成分段，校验 ETag/Content-Length 一致性）
-- LaunchAgent 开机自启 + 后台常驻
-- Sparkle 2 自动更新（GitHub Releases + edDSA 签名）
+## 安装
 
-## 当前阶段
+下载最新 `SuperDownloadManager.dmg`，双击，把 `SuperDownloadManager.app` 拖进 `/Applications`。
 
-完整路线图见 [`.hermes/plans/sdm-v1.0.md`](.hermes/plans/sdm-v1.0.md)。
+打开一次应用以触发 LaunchAgent 注册：
 
-| 阶段 | 内容 | 状态 |
-|---|---|---|
-| P0 | XcodeGen 工程骨架 + 构建闭环（3 target，0 warning） | ✅ |
-| P1 | 下载引擎核心 | ⏳ |
-| P2 | GUI 主窗口 + 设置 | ⏳ |
-| P3 | 文件分类 + 过期链接续传 | ⏳ |
-| P4 | sdmd daemon + Unix Socket IPC + LaunchAgent + CLI | ⏳ |
-| P5 | Firefox/Safari 浏览器扩展 | ⏳ |
-| P6 | 智能限速规则系统 | ⏳ |
-| P7 | Sparkle 自动更新 + 自绘图标 + DMG | ⏳ |
-| P8 | 文档 / License / 发版 | ⏳ |
+```sh
+open /Applications/SuperDownloadManager.app
+# 首次启动自动调用 install.sh 注册 daemon
+```
 
-## 构建
+或手动：
+
+```sh
+sh /Applications/SuperDownloadManager.app/Contents/Resources/install.sh
+```
+
+完成后：
+
+```sh
+sdmdm ping
+```
+
+应返回 `{"ok":true, "result":{"pong":true}}`。
+
+## 命令行
+
+```
+sdmdm add <url> [--referer R] [--filename F] [--category C] [--threads N]
+sdmdm list
+sdmdm pause <id> | resume <id> | cancel <id>
+sdmdm relink <id> <new_url>
+sdmdm config speed <bytes/sec> | config threads <count>
+sdmdm ping
+```
+
+每个命令返回一行 JSON。AI agent 可直接调用。
+
+## 浏览器扩展
+
+详见 [`docs/extension-install.md`](docs/extension-install.md)。
+
+- **Firefox**：临时加载 manifest.json；接管下载
+- **Safari**：手动允许未签名扩展；只做嗅探+派单（Apple 限制 Safari 不能拦截下载）
+
+## 文件分类
+
+下载完成后按以下规则落盘（用户可在 Settings 修改）：
+
+| 类别 | 路径 |
+|---|---|
+| 视频 | `~/Downloads/Video/` |
+| 图片 | `~/Downloads/Pictures/` |
+| 音频 | `~/Downloads/Audio/` |
+| 归档 (zip/dmg/7z/...) | `~/Downloads/Archives/` |
+| 文档 (PDF/DOCX/...) | `~/Downloads/Documents/` |
+| 可执行 | `~/Downloads/Software/` |
+| 其它 | `~/Downloads/` |
+
+无扩展名的 `.dmg` / `.zip` 通过 magic byte 嗅探识别。
+
+## 链接过期续传
+
+下载过程中如服务端返回 403/410/451，SDM 标记任务为「等待新链接」：
+
+1. GUI 顶部出现橙色 banner
+2. 点 "刷新链接"，粘贴新 URL
+3. SDM 验证 ETag / Content-Length 一致 → 从已完成分段续传
+
+CLI 路径：`sdmdm relink <task_id> <new_url>`
+
+## 自动更新
+
+应用内"检查更新…"调起 Sparkle。更新发布于 GitHub Releases，全部经 edDSA 签名验证。
+
+## 构建（开发者）
 
 需要 macOS 26+，Xcode 27，`brew install xcodegen`。
 
@@ -48,12 +104,25 @@ xcodebuild -project SuperDownloadManager.xcodeproj \
 open build/Build/Products/Debug/SuperDownloadManager.app
 ```
 
+跑测试：
+
+```sh
+xcodebuild test -scheme SDMSelfTest -destination 'platform=macOS' -derivedDataPath build
+```
+
+打包 Release：
+
+```sh
+xcodebuild -configuration Release -derivedDataPath build_release build
+bash scripts/make-dmg.sh
+```
+
 ## 仓库约定
 
-- 自动 commit，**不 push**（星空喵偏好，等明确指令）
-- `docs/notes.md` 记录"没动的与原因"——所有 v1.0 暂不做的事都在那里说明
-- 公开文本（README / Release）简洁直接，技术细节进 `docs/release.md`（开发者向）
-- 借用第三方算法时，**算法可鉴，源码不抄**；声明三处（文件顶部 / commit message / docs/notes.md）
+- 自动 commit + 自动 push（CI 编译 + tag 触发 release）
+- `docs/notes.md` 记录 "没动的与原因"
+- 公开文本简洁直接；技术细节进 `docs/release.md` 与 `docs/notes.md`
+- 借用第三方算法时：**算法可鉴，源码不抄**；声明三处
 
 ## 许可证
 

@@ -1,0 +1,33 @@
+{
+  "manifest_version": 2,
+  "name": "Super Download Manager",
+  "version": "1.0.0",
+  "description": "Take over browser downloads and dispatch them to SDM.",
+  "permissions": [
+    "downloads",
+    "downloads.open",
+    "<all_urls>",
+    "activeTab",
+    "storage"
+  ],
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": false
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["sniffer.js"],
+      "css": ["hover-button.css"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "sdm-firefox@mofan2020.dev",
+      "strict_min_version": "115.0"
+    }
+  }
+}

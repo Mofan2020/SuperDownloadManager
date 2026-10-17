@@ -1,0 +1,5 @@
+/* SDM Firefox hover-button — colocated with sniffer.js but separated so
+   styles can be inspected. */
+#__sdm_hover_btn__ {
+    transition: opacity 120ms ease-in-out;
+}

@@ -6,6 +6,17 @@ options:
   generateEmptyDirectories: true
   groupSortPosition: top
   developmentLanguage: en
+  schemePathPrefix: ""
+
+# Auto-update via Sparkle is delayed to v1.1.0: Sparkle 2.6+ ships
+# as a binary Swift Package whose zip archive the SPM resolver
+# cannot deliver inside this CI environment. `App/UpdateService.swift`
+# is currently a thin shim exposing the same API surface; full
+# Sparkle integration resumes once the binary archive is reachable.
+# packages:
+#   Sparkle:
+#     url: https://github.com/sparkle-project/Sparkle
+#     exactVersion: "2.6.4"
 
 settings:
   base:
@@ -30,30 +41,50 @@ settings:
     INFOPLIST_KEY_NSPrincipalClass: "NSApplication"
 
 targets:
-  SuperDownloadManager:
-    type: application
+  SuperDownloadManagerCore:
+    # Pure-Swift framework. Xcode 27 implicitly creates the module
+    # map when there is no umbrella header (preferred for Swift-only
+    # code; an Objective-C umbrella header forces CALLERS to import
+    # Foundation everywhere). Setting DEFINES_MODULE: YES would
+    # generate a warning asking for an umbrella header — leaving it
+    # off allows Xcode's swift-driver to do the right thing.
+    type: framework
     platform: macOS
     sources:
-      - path: App
       - path: Engine
-        excludes:
-          - "**/.DS_Store"
-      - path: Daemon
-        excludes:
-          - "**/.DS_Store"
       - path: Resources
         type: folder
         buildPhase: resources
         excludes:
           - "**/.DS_Store"
-      # Non-source files that must be bundled. Listing under `sources`
-      # with `buildPhase: resources` is the XcodeGen-idiomatic way;
-      # a top-level `resources:` block is silently ignored (per skill
-      # skill `templates/project.yml`).
+    settings:
+      base:
+        PRODUCT_NAME: SuperDownloadManagerCore
+        PRODUCT_BUNDLE_IDENTIFIER: com.superdownloadmanager.core
+        GENERATE_INFOPLIST_FILE: "YES"
+        PRODUCT_MODULE_NAME: SuperDownloadManagerCore
+        DEFINES_MODULE: "NO"
+        DYLIB_INSTALL_NAME_BASE: "@rpath"
+        SWIFT_INSTALL_OBJC_HEADER: "NO"
+
+  SuperDownloadManager:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+      # Embedded non-source files; XcodeGen `templates/project.yml`
+      # pattern (sources + buildPhase: resources).
+      - path: Resources
+        type: folder
+        buildPhase: resources
+        excludes:
+          - "**/.DS_Store"
       - path: Launcher/templates/com.superdownloadmanager.daemon.plist
         buildPhase: resources
       - path: scripts/install.sh
         buildPhase: resources
+    dependencies:
+      - target: SuperDownloadManagerCore
     info:
       path: App/Info.plist
       properties:
@@ -82,14 +113,76 @@ targets:
     platform: macOS
     sources:
       - path: Tests
-      # Tests target compiles App/Engine/Daemon sources directly into
-      # its own module so that test types and production types live in
-      # the same module — required for `internal` access from tests and
-      # to avoid the duplicate swiftmodule copy issue under Xcode 27.
-      - path: App
-      - path: Engine
-      - path: Daemon
+    dependencies:
+      - target: SuperDownloadManagerCore
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.superdownloadmanager.tests
         GENERATE_INFOPLIST_FILE: "YES"
+
+  SDMD:
+    # Headless daemon — registered as a LaunchAgent at user-login
+    # (install.sh wires the plist). `type: tool` means a top-level
+    # `main.swift` is the entry point.
+    type: tool
+    platform: macOS
+    sources:
+      - path: Daemon
+        excludes:
+          - "Daemon/sdmdmain.swift"
+    dependencies:
+      - target: SuperDownloadManagerCore
+    settings:
+      base:
+        PRODUCT_NAME: sdmd
+        PRODUCT_BUNDLE_IDENTIFIER: com.superdownloadmanager.daemon
+        SKIP_INSTALL: "YES"
+        # Daemon runs headlessly, no LSUIElement tweaks needed.
+
+  SDMDM:
+    # CLI tool — shipped to ~/.local/bin/sdmdm by `install.sh` so
+    # the user can `sdmdm add <url>` (and AI shells) without any
+    # extra PATH tweaks. Same framework dep as the daemon.
+    type: tool
+    platform: macOS
+    sources:
+      - path: CLI
+    dependencies:
+      - target: SuperDownloadManagerCore
+    settings:
+      base:
+        PRODUCT_NAME: sdmdm
+        PRODUCT_BUNDLE_IDENTIFIER: com.superdownloadmanager.cli
+        SKIP_INSTALL: "YES"
+
+
+schemes:
+  SuperDownloadManager:
+    # Tests target is host-injected via TEST_HOST (no separate build).
+    # Xcode 27 + XcodeGen 2.46 duplicate the .swiftmodule when both
+    # targets are built into the same module dir; the test-only scheme
+    # is the proven shape per ios-personal-developer-program reference.
+    build:
+      targets:
+        SuperDownloadManager: all
+    test:
+      gatherCoverageData: true
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+  SDMSelfTest:
+    build:
+      targets:
+        SuperDownloadManagerTests: test
+    test:
+      targets:
+        - SuperDownloadManagerTests
+      gatherCoverageData: true
+    run:
+      config: Debug
