@@ -114,8 +114,8 @@ v1.0.6: `ProgressChannel` (`AsyncStream<Int64>`, 50ms coalesce, `.bufferingNewes
 
 ## 没做
 
+- **Move to Trash**: 不做。星空喵明确要彻底移除不留恢复路径。现状: `FileManager.removeItem` 直接删除 (没 NSWorkspace/Trash API), v1.0.5 launch 清理 + v1.0.6 cancel unlink + 下载完成 rename 全是 rm 路径
 - Sparkle: UpdateService.swift 还是 stub (CI 拉不到 SPM binary archive)
 - macOS 27 sparkle 2.6.4: 需要等 CI 支持 Apple Silicon + SDK 27 才能升
-- "Move to Trash" vs 删除 (现在是直接 rm): 星空喵没明确, 不擅自加 Finder trash API
 - Range fallback e2e test (要真实 server 才能跑)
 - chunk status UI e2e test (要真实 Range 进程才能跑)
