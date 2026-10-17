@@ -29,6 +29,10 @@ public final class DownloadListStore: ObservableObject {
     private var dispatchServer: DispatchServer?
     private var notifiedCompletionIDs: Set<UUID> = []
     private var notifiedFailureIDs: Set<UUID> = []
+    // v1.0.5: EWMA-smoothed speed per task. The raw sample is
+    // a tick-to-tick delta; the smoothed value is what the UI
+    // shows. Keyed by task id.
+    private var smoothedSpeed: [UUID: Double] = [:]
 
     public init(engine: SDMEngine) {
         self.engine = engine
@@ -45,6 +49,7 @@ public final class DownloadListStore: ObservableObject {
         startClipboardMonitor()
         startDispatchServer()
         requestNotificationPermission()
+        cleanupOrphanedPartFiles()
     }
 
     public func stop() {
@@ -55,10 +60,24 @@ public final class DownloadListStore: ObservableObject {
 
     private func tick() async {
         let raw = await engine.snapshot()
+        var lastByID: [UUID: Int64] = [:]
+        for t in tasks { lastByID[t.id] = t.bytesDone }
+        let now = Date()
         let mapped = raw
             .sorted { $0.id.uuidString < $1.id.uuidString }
             .map { r in
-                TaskSummary(
+                let prev = lastByID[r.id] ?? 0
+                let deltaBytes = max(0, r.bytesDone - prev)
+                let rawSpeed = r.speedBytesPerSec > 0
+                    ? r.speedBytesPerSec
+                    : Double(deltaBytes) / 0.2  // 200ms tick
+                let prevE = smoothedSpeed[r.id] ?? 0
+                let alpha = 0.4
+                let smoothed = (prevE == 0) ? rawSpeed
+                    : (alpha * rawSpeed + (1 - alpha) * prevE)
+                smoothedSpeed[r.id] = smoothed
+                _ = now
+                return TaskSummary(
                     id: r.id,
                     filename: r.destination.lastPathComponent,
                     urlString: r.url.absoluteString,
@@ -66,15 +85,19 @@ public final class DownloadListStore: ObservableObject {
                     state: r.state,
                     bytesDone: r.bytesDone,
                     totalBytes: r.totalBytes,
-                    speedBytesPerSec: r.speedBytesPerSec,
+                    speedBytesPerSec: smoothed,
                     destinationPath: r.destination.path,
                     errorMessage: r.errorMessage,
                     category: classifyEnabled
                         ? DownloadCategory.from(url: r.url) : .other
                 )
             }
+        // Drop EWMA for tasks that no longer exist.
+        let liveIDs = Set(raw.map { $0.id })
+        for id in smoothedSpeed.keys where !liveIDs.contains(id) {
+            smoothedSpeed.removeValue(forKey: id)
+        }
         if mapped != tasks {
-            // Fire notifications for newly-completed / failed tasks.
             if notifyOnComplete {
                 for t in mapped {
                     if t.state == "completed" && !notifiedCompletionIDs.contains(t.id) {
@@ -109,7 +132,19 @@ public final class DownloadListStore: ObservableObject {
         Task { [engine] in await engine.resume(id: id) }
     }
     public func cancel(id: UUID) {
-        Task { [engine] in await engine.cancel(id: id) }
+        Task { [engine] in
+            await engine.cancel(id: id)
+            await MainActor.run {
+                if let t = self.tasks.first(where: { $0.id == id }) {
+                    // Immediately unlink the partial file so the
+                    // next start() doesn't see stale bytes and so
+                    // the user doesn't have to wait 7 days for the
+                    // orphan-cleanup pass.
+                    try? FileManager.default.removeItem(
+                        atPath: t.destinationPath + ".part")
+                }
+            }
+        }
     }
     public func remove(id: UUID) {
         Task { [engine] in await engine.remove(id: id) }
@@ -130,6 +165,46 @@ public final class DownloadListStore: ObservableObject {
             NSWorkspace.shared.activateFileViewerSelecting(
                 [URL(fileURLWithPath: t.destinationPath)])
         }
+    }
+
+    /// v1.0.5: walk all the configured download directories
+    /// and unlink `.part` files older than 7 days that aren't
+    /// referenced by any active task. Cleans up crashes, force-
+    /// quits, and failed downloads that left orphans behind.
+    private func cleanupOrphanedPartFiles() {
+        let fm = FileManager.default
+        let cutoff = Date().addingTimeInterval(-7 * 24 * 3600)
+        let activePaths = Set(tasks.map { $0.destinationPath + ".part" })
+        for dir in searchRoots() {
+            guard let enumerator = fm.enumerator(
+                at: dir, includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]) else { continue }
+            for case let url as URL in enumerator
+            where url.pathExtension == "part" {
+                if activePaths.contains(url.path) { continue }
+                let mtime = (try? url.resourceValues(
+                    forKeys: [.contentModificationDateKey])
+                    .contentModificationDate) ?? Date()
+                if mtime < cutoff {
+                    try? fm.removeItem(at: url)
+                }
+            }
+        }
+    }
+
+    private func searchRoots() -> [URL] {
+        let downloads = FileManager.default
+            .urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("Downloads")
+        return [downloads,
+                downloads.appendingPathComponent("Video"),
+                downloads.appendingPathComponent("Music"),
+                downloads.appendingPathComponent("Pictures"),
+                downloads.appendingPathComponent("Archives"),
+                downloads.appendingPathComponent("Documents"),
+                downloads.appendingPathComponent("Software"),
+                downloads.appendingPathComponent("Other")]
     }
 
     public func deleteFile(id: UUID) {

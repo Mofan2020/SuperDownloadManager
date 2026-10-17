@@ -1,13 +1,12 @@
 import SwiftUI
-
 import SuperDownloadManagerCore
 
 /// ExpiredLinkBanner — non-blocking banner shown when the engine
-/// reports a 403/410/451 mid-flight. v1.0.1 added bilingual text
-/// support so the "Refresh link" button label is localizable.
+/// reports a 403/410/451 mid-flight.
 struct ExpiredLinkBanner: View {
     let summary: String
     let onReenter: () -> Void
+    @Environment(\.strings) private var S
 
     var body: some View {
         HStack(spacing: 12) {
@@ -15,7 +14,7 @@ struct ExpiredLinkBanner: View {
                 .foregroundStyle(.orange)
             Text(summary)
             Spacer()
-            Button(L10n.bannerRefreshLink, action: onReenter)
+            Button("Refresh link", action: onReenter)
                 .buttonStyle(.borderedProminent)
         }
         .padding(12)

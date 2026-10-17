@@ -36,6 +36,7 @@ public struct DownloadFlow: Sendable {
     public let parallelismCap: Int
     public let limiter: SpeedLimiter
     public let downloader: HTTPDownloader
+    public let progressChannel: ProgressChannel
 
     public init(url: URL,
                 destination: URL,
@@ -49,6 +50,7 @@ public struct DownloadFlow: Sendable {
         self.parallelismCap = parallelismCap
         self.limiter = limiter ?? SpeedLimiter(rateBytesPerSec: 0)
         self.downloader = downloader
+        self.progressChannel = ProgressChannel()
     }
 
     public enum FlowError: Error, CustomStringConvertible {
@@ -102,6 +104,8 @@ public struct DownloadFlow: Sendable {
         // 3. Chunk workers in parallel — each one downloads its
         //    range and feeds bytes to the partial file. We use
         //    a TaskGroup so cancellation propagates cleanly.
+        //    v1.0.5: each worker reports its cumulative byte
+        //    total to the progress channel as it goes.
         do {
             try await withThrowingTaskGroup(of: Void.self) { group in
                 for chunk in activeChunks {
@@ -112,7 +116,11 @@ public struct DownloadFlow: Sendable {
                             let n = try await self.downloader.downloadChunk(
                                 url: url,
                                 chunk: chunkCopy,
-                                assembler: assembler)
+                                assembler: assembler,
+                                progress: { byteCount in
+                                    let cumulative = chunkCopy.start + byteCount
+                                    self.progressChannel.report(cumulative)
+                                })
                             await planner.consume(
                                 chunkID: chunkCopy.id,
                                 bytes: n)
@@ -123,7 +131,7 @@ public struct DownloadFlow: Sendable {
                         }
                     }
                 }
-                for try await _ in group {}
+                for try await _ in group { progressChannel.finish() }
             }
         } catch let e as FlowError {
             throw e
@@ -145,5 +153,48 @@ public struct DownloadFlow: Sendable {
         } catch {
             throw FlowError.sidecarFailed(error)
         }
+        progressChannel.finish()
+    }
+}
+
+/// ProgressChannel — in-process progress streaming for the
+/// DownloadFlow. v1.0.5 replaces the v1.0.4 disk poll (200ms
+/// `attributesOfItem(.size)`) with a real-time stream that the
+/// engine consumes to update the queue row. The flow's chunk
+/// workers call `report(_:)` after each successful write to the
+/// chunk's partial file; the stream coalesces events so the
+/// consumer sees at most one update per 50 ms.
+public final class ProgressChannel: @unchecked Sendable {
+    private let continuation: AsyncStream<Int64>.Continuation
+    public let stream: AsyncStream<Int64>
+    private var lastReportedAt: Date = .distantPast
+    private var pending: Int64?
+    private let lock = NSLock()
+
+    public init() {
+        var cont: AsyncStream<Int64>.Continuation!
+        self.stream = AsyncStream<Int64>(bufferingPolicy: .bufferingNewest(16)) { c in
+            cont = c
+        }
+        self.continuation = cont
+    }
+
+    public func report(_ bytes: Int64) {
+        lock.lock()
+        let now = Date()
+        if now.timeIntervalSince(lastReportedAt) < 0.05 {
+            pending = bytes
+            lock.unlock()
+            return
+        }
+        lastReportedAt = now
+        let toSend = pending ?? bytes
+        pending = nil
+        lock.unlock()
+        continuation.yield(toSend)
+    }
+
+    public func finish() {
+        continuation.finish()
     }
 }

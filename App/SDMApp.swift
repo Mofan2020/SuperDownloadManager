@@ -32,41 +32,43 @@ struct SDMApp: App {
     }
 
     private var resolvedLocale: Locale {
-        if locale == "zh-Hans" { return Locale(identifier: "zh-Hans") }
-        if locale == "en"      { return Locale(identifier: "en") }
-        return .autoupdatingCurrent
+        switch LocaleTag(rawValue: locale) ?? .system {
+        case .zhHans: return Locale(identifier: "zh-Hans")
+        case .en:     return Locale(identifier: "en")
+        case .system: return .autoupdatingCurrent
+        }
     }
+
+    private var strings: Strings { Strings(locale: LocaleTag(rawValue: locale) ?? .system) }
 
     var body: some Scene {
         // We do NOT use SwiftUI's `MenuBarExtra` — its popover
         // doesn't reliably inherit `\.openWindow` on macOS 26.
         // AppDelegate owns the real NSStatusItem and NSMenu.
         WindowGroup("Super Download Manager", id: "main") {
-            LocalizedRootView(locale: resolvedLocale) {
-                MainWindow(store: store, engine: engine)
-                    .frame(minWidth: 720, minHeight: 480)
-                    .onAppear { store.start() }
-            }
-            .background(WindowAccessor())
+            MainWindow(store: store, engine: engine)
+                .frame(minWidth: 720, minHeight: 480)
+                .onAppear { store.start() }
+                .environment(\.strings, strings)
+                .environment(\.locale, resolvedLocale)
+                .background(WindowAccessor())
         }
         .defaultSize(width: 960, height: 600)
         .commands {
-            // Surface the basic actions in the standard File
-            // menu so the menu-bar shortcut works.
             CommandGroup(replacing: .newItem) {
                 OpenMainWindowMenuItem(
-                    title: "Open Main Window",
+                    title: strings.menuOpenWindow,
                     shortcut: KeyEquivalent("0"),
                     modifiers: [.command]
                 )
-                AddURLMenuItem()
+                AddURLMenuItem(title: strings.toolbarAddURL)
             }
         }
 
         Settings {
-            LocalizedRootView(locale: resolvedLocale) {
-                SettingsView(engine: engine)
-            }
+            SettingsView(engine: engine)
+                .environment(\.strings, strings)
+                .environment(\.locale, resolvedLocale)
         }
     }
 }
@@ -255,7 +257,7 @@ extension Notification.Name {
 // MARK: - Standard menu items
 
 private struct OpenMainWindowMenuItem: View {
-    let title: LocalizedStringKey
+    let title: String
     let shortcut: KeyEquivalent
     let modifiers: SwiftUI.EventModifiers
     @Environment(\.openWindow) private var openWindow
@@ -270,8 +272,9 @@ private struct OpenMainWindowMenuItem: View {
 }
 
 private struct AddURLMenuItem: View {
+    let title: String
     var body: some View {
-        Button("Add URL…") {
+        Button(title) {
             NotificationCenter.default.post(name: .sdmShowAddSheet, object: nil)
             NSApp.activate(ignoringOtherApps: true)
         }
@@ -279,23 +282,10 @@ private struct AddURLMenuItem: View {
     }
 }
 
-// MARK: - LocalizedRootView
-
-private struct LocalizedRootView<Content: View>: View {
-    let locale: Locale
-    let content: () -> Content
-    var body: some View {
-        content()
-            .environment(\.locale, locale)
-    }
-}
-
 // MARK: - MainWindow
 
-/// Top-level container for the main window. v1.0.4: tabs for
-/// "Active" / "History" + a small schedule pill. The actual
-/// table view is in `DownloadListView` (active) and
-/// `HistoryView` (history).
+/// Top-level container for the main window. v1.0.5: bilingual
+/// tabs via `Strings`, `Active` / `History` / `Schedule`.
 struct MainWindow: View {
     @ObservedObject var store: DownloadListStore
     let engine: SDMEngine
@@ -303,20 +293,21 @@ struct MainWindow: View {
     @State private var showAddSheet = false
     @State private var selectedTab: Tab = .active
     @State private var historyVM = HistoryViewModel()
+    @Environment(\.strings) private var S
 
     enum Tab: String, CaseIterable, Identifiable {
-        case active = "Active"
-        case history = "History"
-        case schedule = "Schedule"
+        case active = "active"
+        case history = "history"
+        case schedule = "schedule"
         var id: String { rawValue }
     }
 
     var body: some View {
         VStack(spacing: 0) {
             Picker("", selection: $selectedTab) {
-                ForEach(Tab.allCases) { t in
-                    Text(t.rawValue).tag(t)
-                }
+                Text(S.tabActive).tag(Tab.active)
+                Text(S.tabHistory).tag(Tab.history)
+                Text(S.tabSchedule).tag(Tab.schedule)
             }
             .pickerStyle(.segmented)
             .padding(.horizontal, 12)
@@ -337,14 +328,9 @@ struct MainWindow: View {
         }
         .onReceive(NotificationCenter.default.publisher(
             for: .sdmShowAddSheet)) { _ in
-            // v1.0.4: forward menu events by switching to the
-            // active tab; the toolbar's + button opens the sheet.
             selectedTab = .active
         }
         .onChange(of: store.tasks) { _, new in
-            // Whenever a task transitions to a terminal state,
-            // write it to the history store. The view-model
-            // listens for refresh events and reloads.
             for t in new where t.isTerminal {
                 let entry = HistoryStore.Entry(
                     id: t.id,

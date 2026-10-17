@@ -19,6 +19,7 @@ struct DownloadListView: View {
     @State private var sortOrder: [KeyPathComparator<TaskSummary>] = [
         .init(\.state, order: .forward)
     ]
+    @Environment(\.strings) private var S
 
     var body: some View {
         VStack(spacing: 0) {
@@ -39,6 +40,7 @@ struct DownloadListView: View {
             handleDrop(providers: providers)
         }
         .sheet(isPresented: $showAddSheet) { addSheet }
+        .environment(\.strings, S)
     }
 
     // MARK: - Table
@@ -151,28 +153,28 @@ struct DownloadListView: View {
             case "downloading", "queued":
                 Button { store.pause(id: task.id) } label: {
                     Image(systemName: "pause.fill")
-                }.buttonStyle(.borderless).help("Pause")
+                }.buttonStyle(.borderless).help(S.rowPause)
                 Button { store.cancel(id: task.id) } label: {
                     Image(systemName: "xmark.circle.fill")
-                }.buttonStyle(.borderless).help("Cancel")
+                }.buttonStyle(.borderless).help(S.rowCancel)
             case "paused":
                 Button { store.resume(id: task.id) } label: {
                     Image(systemName: "play.fill")
-                }.buttonStyle(.borderless).help("Resume")
+                }.buttonStyle(.borderless).help(S.rowResume)
                 Button { store.cancel(id: task.id) } label: {
                     Image(systemName: "xmark.circle.fill")
-                }.buttonStyle(.borderless).help("Cancel")
+                }.buttonStyle(.borderless).help(S.rowCancel)
             case "failed", "cancelled":
                 Button { store.resume(id: task.id) } label: {
                     Image(systemName: "arrow.clockwise")
-                }.buttonStyle(.borderless).help("Retry")
+                }.buttonStyle(.borderless).help(S.rowRetry)
             case "completed":
                 Button { store.openFile(id: task.id) } label: {
                     Image(systemName: "arrow.up.forward.app")
-                }.buttonStyle(.borderless).help("Open")
+                }.buttonStyle(.borderless).help(S.rowOpen)
                 Button { store.revealInFinder(id: task.id) } label: {
                     Image(systemName: "folder")
-                }.buttonStyle(.borderless).help("Reveal in Finder")
+                }.buttonStyle(.borderless).help(S.rowReveal)
             default:
                 EmptyView()
             }
@@ -185,32 +187,32 @@ struct DownloadListView: View {
     @ViewBuilder
     private func rowContextMenu(_ task: TaskSummary) -> some View {
         if task.state == "completed" {
-            Button("Open") { store.openFile(id: task.id) }
-            Button("Reveal in Finder") { store.revealInFinder(id: task.id) }
+            Button(S.rowOpen) { store.openFile(id: task.id) }
+            Button(S.rowReveal) { store.revealInFinder(id: task.id) }
         }
         if task.state == "downloading" || task.state == "queued" {
-            Button("Pause") { store.pause(id: task.id) }
-            Button("Cancel") { store.cancel(id: task.id) }
+            Button(S.rowPause) { store.pause(id: task.id) }
+            Button(S.rowCancel) { store.cancel(id: task.id) }
         }
         if task.state == "paused" || task.state == "failed" || task.state == "cancelled" {
-            Button("Resume") { store.resume(id: task.id) }
+            Button(S.rowResume) { store.resume(id: task.id) }
         }
         Divider()
-        Button("Copy URL") {
+        Button(S.rowCopyURL) {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(task.urlString, forType: .string)
         }
         if let host = task.urlHost, let url = URL(string: "https://\(host)") {
-            Button("Open Source Page") { NSWorkspace.shared.open(url) }
+            Button(S.rowOpenSource) { NSWorkspace.shared.open(url) }
         }
         Divider()
-        Button("Limit speed…") { store.setSpeedLimit(id: task.id) }
+        Button(S.rowLimitSpeed) { store.setSpeedLimit(id: task.id) }
         if task.state == "completed" {
-            Button("Compute checksum") { store.computeChecksum(id: task.id) }
+            Button(S.rowChecksum) { store.computeChecksum(id: task.id) }
         }
         Divider()
-        Button("Remove from list") { store.remove(id: task.id) }
-        Button("Delete file") { store.deleteFile(id: task.id) }
+        Button(S.rowRemove) { store.remove(id: task.id) }
+        Button(S.rowDelete) { store.deleteFile(id: task.id) }
     }
 
     // MARK: - Toolbar
@@ -222,7 +224,7 @@ struct DownloadListView: View {
                 addFilename = ""
                 showAddSheet = true
             } label: {
-                Label("Add URL…", systemImage: "plus")
+                Label(S.toolbarAddURL, systemImage: "plus")
             }
             .keyboardShortcut("n", modifiers: [.command])
             .help("Add a new download URL (⌘N)")
@@ -239,31 +241,24 @@ struct DownloadListView: View {
                     $0.state == "downloading" || $0.state == "queued"
                 }.forEach { store.pause(id: $0.id) }
             } label: {
-                Label("Pause All", systemImage: "pause.circle")
+                Label(S.toolbarPauseAll, systemImage: "pause.circle")
             }
             .disabled(activeCount == 0)
-            .help(activeCount == 0
-                  ? "No active downloads"
-                  : "Pause \(activeCount) active download\(activeCount == 1 ? "" : "s")")
 
             Button {
                 store.tasks.filter { $0.state == "paused" }
                     .forEach { store.resume(id: $0.id) }
             } label: {
-                Label("Resume All", systemImage: "play.circle")
+                Label(S.toolbarResumeAll, systemImage: "play.circle")
             }
             .disabled(pausedCount == 0)
-            .help(pausedCount == 0
-                  ? "No paused downloads"
-                  : "Resume \(pausedCount) paused download\(pausedCount == 1 ? "" : "s")")
 
             Button {
                 store.clearCompleted()
             } label: {
-                Label("Clear Completed", systemImage: "trash")
+                Label(S.toolbarClearCompleted, systemImage: "trash")
             }
             .disabled(!store.tasks.contains { $0.state == "completed" })
-            .help("Remove completed downloads from the list")
         }
     }
 
@@ -271,14 +266,14 @@ struct DownloadListView: View {
 
     private var addSheet: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Add Download")
+            Text(S.addSheetTitle)
                 .font(.title3.weight(.semibold))
-            Text("Enter a URL. SDM will start a multi-threaded download immediately.")
+            Text(S.addSheetSubtitle)
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("URL")
+                Text(S.addSheetURLField)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 TextField("https://example.com/file.zip", text: $addURL)
@@ -287,11 +282,10 @@ struct DownloadListView: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Save as (optional)")
+                Text(S.addSheetFilenameField)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                TextField("Leave blank to use the server's filename",
-                          text: $addFilename)
+                TextField(S.addSheetFilenameHint, text: $addFilename)
                     .textFieldStyle(.roundedBorder)
             }
 
@@ -303,9 +297,9 @@ struct DownloadListView: View {
 
             HStack {
                 Spacer()
-                Button("Cancel") { showAddSheet = false }
+                Button(S.addSheetCancel) { showAddSheet = false }
                     .keyboardShortcut(.cancelAction)
-                Button("Add") { commitAdd() }
+                Button(S.addSheetAdd) { commitAdd() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(addURL.trimmingCharacters(in: .whitespaces).isEmpty)
             }
@@ -319,7 +313,7 @@ struct DownloadListView: View {
         guard let url = URL(string: trimmed),
               let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else {
-            addError = "Enter a valid http(s) URL."
+            addError = S.addSheetErrorBadURL
             return
         }
         let name = addFilename.trimmingCharacters(in: .whitespaces)
@@ -391,6 +385,8 @@ struct DownloadListView: View {
 
 /// Empty-state placeholder.
 struct EmptyStateView: View {
+    @Environment(\.strings) private var S
+
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: "arrow.down.circle")
@@ -398,14 +394,14 @@ struct EmptyStateView: View {
                 .foregroundStyle(.tint)
             Text("Super Download Manager")
                 .font(.title2.weight(.semibold))
-            Text("No downloads yet")
+            Text(S.emptyTitle)
                 .foregroundStyle(.secondary)
-            Text("Click + or press ⌘N to add a URL. Drop a download in Firefox/Safari to send it to SDM. From a terminal: `sdmdm add <url>`. Drag a URL onto this window.")
+            Text(S.emptyHint)
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
-            Text("Settings → Language to switch to 中文.")
+            Text(S.emptyTipLang)
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }

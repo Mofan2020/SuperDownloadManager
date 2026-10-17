@@ -116,21 +116,55 @@ public actor SDMEngine {
             t.state = "downloading"
         }
 
+        // Probe first to capture the real filename from
+        // Content-Disposition. If the server returns one and
+        // the user didn't override the filename, rename the
+        // destination to use it.
+        do {
+            let p = try await HTTPDownloader().probe(spec.url)
+            await queue.update(id: id) { t in
+                if let real = p.suggestedFilename, !real.isEmpty,
+                   spec.filenameOverride == nil {
+                    // Re-anchor: use server's filename in the
+                    // same category directory.
+                    let dir = t.destination.deletingLastPathComponent()
+                    let newDest = dir.appendingPathComponent(real)
+                    t.destination = newDest
+                }
+                t.totalBytes = p.contentLength
+            }
+        } catch {
+            // Probe failure: keep the URL-derived filename and
+            // let DownloadFlow's own probe + error path surface
+            // the problem to the user.
+        }
+
+        let realDest: URL
+        if let summary = await queue.get(id: id) {
+            realDest = summary.destination
+        } else {
+            realDest = destination
+        }
+
+        // Build the flow first so the in-process progress
+        // channel exists; then bridge its stream to the queue.
         let flow = DownloadFlow(
             url: spec.url,
-            destination: destination,
+            destination: realDest,
             strategy: strategy,
             parallelismCap: parallelismCap,
             limiter: limiter)
 
-        // Poll bytesDone from the on-disk `.part` file. Pragmatic
-        // for v1.0.3; replaced by an in-process channel in v1.0.4.
         let progressTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                await self?.refreshProgressFromDisk(id: id, destination: destination)
+            for await bytes in flow.progressChannel.stream {
+                await self?.queue.update(id: id) { t in
+                    t.bytesDone = bytes
+                }
             }
         }
+
+        // (Disk poll removed in v1.0.5 — the in-process progress
+        // channel above is the source of truth for bytesDone.)
 
         do {
             try await flow.run()

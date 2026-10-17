@@ -16,7 +16,7 @@ import Foundation
 public actor TaskQueue {
     public struct TaskSummary: Sendable, Identifiable {
         public let id: UUID
-        public let url: URL
+        public var url: URL
         public var state: String          // "queued" | "downloading" | "paused" | "completed" | "failed" | "cancelled"
         public var bytesDone: Int64
         public var totalBytes: Int64?

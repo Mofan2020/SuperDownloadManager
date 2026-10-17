@@ -1,93 +1,262 @@
 import SwiftUI
-
+import AppKit
 import SuperDownloadManagerCore
 
-/// SettingsView — P2 settings window with bilingual EN/中文.
+/// SettingsView — v1.0.5 rewrite. NavigationStack left-rail
+/// + detail-pane layout, bilingual in-code catalog (`Strings`),
+/// and live locale switcher (no app restart).
 ///
-/// All user-visible strings go through `LocalizedStringKey`
-/// constants in `L10n.swift`, looked up against
-/// `App/Resources/{en,zh-Hans}.lproj/Localizable.strings`.
+/// v1.0.4 had a single Form with three problems:
+///   1. `Text(L10n.settingsDefaultThreads)` rendered the literal
+///      `%lld` because SwiftUI's `LocalizedStringKey` doesn't
+///      substitute printf-style args.
+///   2. `NavigationLink` inside a Form shows up greyed out in
+///      macOS 14 — the row is read-only when the destination
+///      uses the same data scope, and the affordance for
+///      "click to drill in" was unclear.
+///   3. Switching language required an app restart.
 ///
-/// v1.0.1 added the language picker (Section "General"): users
-/// can either follow the system locale (default) or pin to
-/// English / 简体中文. The choice is persisted in `@AppStorage`
-/// under `sdm.locale`; the App re-reads it on next launch.
+/// v1.0.5 fixes all three: bilingual dictionary in `Strings`
+/// (no `%lld`), explicit `NavigationSplitView` with a left rail
+/// (so the "drill in" affordance is the whole row), and a
+/// `@AppStorage` tag read at every body re-evaluation so
+/// the picker takes effect on the next frame.
 struct SettingsView: View {
     let engine: SDMEngine?
     @AppStorage("sdm.threads.default") private var defaultThreads: Int = 32
     @AppStorage("sdm.bandwidth.bytesPerSec") private var bandwidth: Int = 0
     @AppStorage("sdm.openAtLogin") private var openAtLogin: Bool = false
     @AppStorage("sdm.updateChannel") private var updateChannel: String = "stable"
-    @AppStorage("sdm.locale") private var localeTag: String = "system"
+    @AppStorage("sdm.locale") private var localeTag: String = LocaleTag.system.rawValue
+    @AppStorage("sdm.classify.enabled") private var classifyEnabled: Bool = true
+    @AppStorage("sdm.capture.clipboard") private var clipboardCapture: Bool = true
+    @AppStorage("sdm.notify.onComplete") private var notifyOnComplete: Bool = true
 
     init(engine: SDMEngine? = nil) {
         self.engine = engine
     }
 
+    private var strings: Strings { Strings(locale: LocaleTag(rawValue: localeTag) ?? .system) }
+    private var locale: Locale {
+        switch LocaleTag(rawValue: localeTag) ?? .system {
+        case .zhHans: return Locale(identifier: "zh-Hans")
+        case .en:     return Locale(identifier: "en")
+        case .system: return .autoupdatingCurrent
+        }
+    }
+
     var body: some View {
-        Form {
-            Section {
-                Stepper(L10n.settingsDefaultThreads,
-                        value: $defaultThreads, in: 1...128, step: 1)
-                BandwidthField(value: $bandwidth)
-            } header: {
-                Text(L10n.settingsSectionDefaults)
+        NavigationSplitView {
+            List(SettingsSection.allCases, selection: $section) { sec in
+                Label(label(for: sec), systemImage: icon(for: sec))
+                    .tag(sec)
             }
+            .navigationSplitViewColumnWidth(min: 160, ideal: 180, max: 220)
+        } detail: {
+            detail
+                .frame(minWidth: 480, minHeight: 380)
+        }
+        .environment(\.locale, locale)
+        .environment(\.strings, strings)
+        .navigationTitle(strings.settingsAboutTitle)
+        .frame(width: 720, height: 480)
+    }
 
-            Section {
-                NavigationLink(L10n.settingsCategoriesLink) {
-                    CategoryRulesEditor()
-                }
-                NavigationLink("Site Rules") {
-                    SiteRulesView()
-                }
-            } header: {
-                Text(L10n.settingsSectionCategories)
-            }
+    @State private var section: SettingsSection = .general
 
-            Section {
-                Toggle(L10n.settingsOpenAtLogin, isOn: $openAtLogin)
-                Picker(L10n.settingsUpdateChannel, selection: $updateChannel) {
-                    Text(L10n.settingsUpdateStable).tag("stable")
-                    Text(L10n.settingsUpdatePrerelease).tag("pre")
-                }
-            } header: {
-                Text(L10n.settingsSectionStartup)
-            }
+    enum SettingsSection: String, CaseIterable, Identifiable {
+        case general, defaults, categories, siteRules, startup, about
+        var id: String { rawValue }
+    }
 
+    @ViewBuilder
+    private var detail: some View {
+        switch section {
+        case .general:    generalSection
+        case .defaults:   defaultsSection
+        case .categories: CategoryRulesEditor()
+        case .siteRules:  SiteRulesView()
+        case .startup:    startupSection
+        case .about:      aboutSection
+        }
+    }
+
+    private func label(for s: SettingsSection) -> String {
+        let S = strings
+        switch s {
+        case .general:    return S.settingsSidebarGeneral
+        case .defaults:   return S.settingsSidebarDefaults
+        case .categories: return S.settingsSidebarCategories
+        case .siteRules:  return S.settingsSidebarSiteRules
+        case .startup:    return S.settingsSidebarStartup
+        case .about:      return S.settingsSidebarAbout
+        }
+    }
+
+    private func icon(for s: SettingsSection) -> String {
+        switch s {
+        case .general:    return "gearshape"
+        case .defaults:   return "slider.horizontal.3"
+        case .categories: return "folder.badge.gearshape"
+        case .siteRules:  return "globe"
+        case .startup:    return "power"
+        case .about:      return "info.circle"
+        }
+    }
+
+    // MARK: - Sections
+
+    private var generalSection: some View {
+        let S = strings
+        return Form {
             Section {
-                Picker(L10n.settingsLanguage, selection: $localeTag) {
-                    Text(L10n.settingsLanguageSystem).tag("system")
-                    Text(L10n.settingsLanguageEn).tag("en")
-                    Text(L10n.settingsLanguageZh).tag("zh-Hans")
+                Picker(S.settingsLanguage, selection: $localeTag) {
+                    Text(S.settingsLanguageSystem).tag(LocaleTag.system.rawValue)
+                    Text(S.settingsLanguageEn).tag(LocaleTag.en.rawValue)
+                    Text(S.settingsLanguageZh).tag(LocaleTag.zhHans.rawValue)
                 }
+                .pickerStyle(.inline)
+                .labelsHidden()
             } header: {
-                Text(L10n.settingsSectionGeneral)
+                Text(S.settingsLanguage)
             } footer: {
-                // macOS 14+ footer text; will show beneath the picker.
-                // We keep the message here so the user knows
-                // restarting the app is required for the language
-                // switch to fully apply (system-level resource
-                // bundle hot-reload is not supported by SwiftUI).
-                Text("Restart the app for changes to take effect.")
+                Text(S.settingsLanguageHint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("Auto-categorize downloads", isOn: $classifyEnabled)
+                Toggle("Clipboard URL auto-capture", isOn: $clipboardCapture)
+                Toggle("System notifications on complete", isOn: $notifyOnComplete)
+            } header: {
+                Text("Behaviour")
+            } footer: {
+                Text("These take effect immediately.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
-        .frame(width: 540, height: 460)
+        .formStyle(.grouped)
+        .padding(20)
+    }
+
+    private var defaultsSection: some View {
+        let S = strings
+        return Form {
+            Section {
+                DefaultThreadsField(value: $defaultThreads)
+                    .environment(\.strings, S)
+            } header: {
+                Text(S.settingsSectionDefaults)
+            } footer: {
+                Text(S.settingsDefaultThreadsHint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                BandwidthField(value: $bandwidth)
+                    .environment(\.strings, S)
+            } header: {
+                Text("Bandwidth")
+            } footer: {
+                Text(S.settingsBandwidthHint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .padding(20)
+    }
+
+    private var startupSection: some View {
+        let S = strings
+        return Form {
+            Section {
+                Toggle(S.settingsOpenAtLogin, isOn: $openAtLogin)
+            } header: {
+                Text(S.settingsSectionStartup)
+            }
+            Section {
+                Picker(S.settingsUpdateChannel, selection: $updateChannel) {
+                    Text(S.settingsUpdateStable).tag("stable")
+                    Text(S.settingsUpdatePrerelease).tag("pre")
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            }
+        }
+        .formStyle(.grouped)
+        .padding(20)
+    }
+
+    private var aboutSection: some View {
+        let S = strings
+        return VStack(spacing: 12) {
+            Image(nsImage: NSImage(named: "AppIcon") ?? NSImage())
+                .resizable()
+                .frame(width: 96, height: 96)
+            Text(S.settingsAboutTitle).font(.title2.weight(.semibold))
+            HStack {
+                Text(S.settingsAboutVersion)
+                Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"]
+                     as? String ?? "?")
+            }
+            Text(S.settingsAboutLicense).foregroundStyle(.secondary)
+            Text(S.settingsAboutCopyright).foregroundStyle(.tertiary).font(.caption)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(20)
+    }
+}
+
+/// Default-threads field. v1.0.4 used a Stepper whose label
+/// rendered the literal `%lld`. v1.0.5 uses Slider + TextField
+/// so the value shows as a real number regardless of locale.
+private struct DefaultThreadsField: View {
+    @Binding var value: Int
+    @Environment(\.strings) private var S
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(S.settingsDefaultThreadsLabel)
+                Spacer()
+                HStack(spacing: 4) {
+                    Text(S.settingsDefaultThreadsValue(value))
+                        .font(.body.monospacedDigit().weight(.semibold))
+                    Text(S.threadUnit(value))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            HStack(spacing: 12) {
+                Slider(value: Binding(
+                    get: { Double(value) },
+                    set: { value = Int($0.rounded()) }),
+                    in: 1...128, step: 1)
+                TextField("", value: $value, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 64)
+                    .multilineTextAlignment(.trailing)
+            }
+        }
     }
 }
 
 private struct BandwidthField: View {
     @Binding var value: Int
+    @Environment(\.strings) private var S
 
     var body: some View {
         HStack {
-            Text(L10n.settingsBandwidth)
-            TextField("", value: $value, format: .number, prompt: Text(L10n.settingsBandwidthHint))
+            Text(S.settingsBandwidth)
+            Spacer()
+            TextField("", value: $value, format: .number,
+                      prompt: Text(S.settingsBandwidthHint))
+                .textFieldStyle(.roundedBorder)
                 .frame(width: 100)
                 .multilineTextAlignment(.trailing)
-            Text(L10n.settingsKbps)
+            Text(S.settingsKbps)
         }
     }
 }
@@ -97,9 +266,54 @@ private struct BandwidthField: View {
 /// rule table lives in `CategoryRulesEditor`; the actual download
 /// classification happens in P3.
 struct CategoryRulesEditor: View {
+    @Environment(\.strings) private var S
+    @AppStorage("sdm.classify.enabled") private var classifyEnabled: Bool = true
+
     var body: some View {
-        Text(L10n.settingsCategoriesPlaceholder)
-            .foregroundStyle(.secondary)
-            .frame(width: 480, height: 320)
+        let cats: [(DownloadCategory, [String])] = [
+            (.video,     ["mp4", "mov", "mkv", "webm", "avi", "flv", "m4v", "wmv", "ts"]),
+            (.music,     ["mp3", "flac", "wav", "aac", "ogg", "m4a", "opus"]),
+            (.pictures,  ["jpg", "jpeg", "png", "gif", "webp", "heic", "svg", "bmp", "tiff"]),
+            (.archives,  ["zip", "7z", "rar", "tar", "gz", "bz2", "xz", "iso", "tgz"]),
+            (.documents, ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+                          "txt", "md", "epub", "mobi", "rtf", "csv"]),
+            (.software,  ["exe", "msi", "deb", "rpm", "apk", "app", "dmg", "pkg"]),
+            (.other,     ["…"])
+        ]
+        return Form {
+            Section {
+                Toggle("Auto-categorize downloads", isOn: $classifyEnabled)
+            } header: {
+                Text("Behaviour")
+            } footer: {
+                Text("Downloads land in ~/Downloads/<Category>/ when " +
+                     "auto-categorization is on. Disabling this drops " +
+                     "everything into ~/Downloads/.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                ForEach(cats, id: \.0) { (cat, exts) in
+                    HStack(alignment: .top) {
+                        Label(cat.folderName, systemImage: cat.iconName)
+                            .frame(width: 130, alignment: .leading)
+                            .foregroundStyle(cat.tint)
+                        Text(exts.joined(separator: " "))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            } header: {
+                Text("Categories")
+            } footer: {
+                Text("Add / remove extensions in v1.0.5+. The v1.0 " +
+                     "table is read-only.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .padding(20)
     }
 }

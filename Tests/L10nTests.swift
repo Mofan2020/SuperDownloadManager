@@ -1,47 +1,47 @@
 import XCTest
 @testable import SuperDownloadManagerCore
 
-/// L10nTests — bilingual EN / zh-Hans string catalog.
+/// L10nTests — bilingual EN / 中文 string catalog (v1.0.5:
+/// `Strings` in-code dictionary, no .strings).
 ///
-/// These tests don't import SwiftUI rendering (they go through
-/// the `Bundle` lookup path that SwiftUI also walks at render
-/// time), so they run offline without needing a window. If
-/// they fail, the test target itself isn't loaded properly —
-/// which is what `L10n` is here to detect.
+/// These tests run offline without needing a window. They
+/// cover three things: (1) the keys are defined on both sides
+/// of the catalog, (2) the chosen locale picks the right
+/// dictionary, (3) the locale switch is the source of truth
+/// (no AppStorage / Bundle drift).
 final class L10nTests: XCTestCase {
-    func testEnglishStringsResolve() {
-        // Walk every key by reading the .strings file in the test
-        // bundle. Test target uses the host app's resources via
-        // the test bundle's search paths; if the strings files
-        // weren't copied into the bundle, this test fails.
-        let path = Bundle(for: L10nTests.self).path(forResource: "en", ofType: "lproj")
-        XCTAssertNotNil(path, "en.lproj must be present in the test bundle")
-    }
-
-    func testZhHansStringsResolve() {
-        let path = Bundle(for: L10nTests.self).path(forResource: "zh-Hans", ofType: "lproj")
-        XCTAssertNotNil(path, "zh-Hans.lproj must be present in the test bundle")
-    }
-
     func testEnglishLocaleReturnsEnglishCopy() {
-        // The keys must round-trip in English.
-        let title = L10nStr.menuOpenWindow("en")
+        let title = Strings(locale: .en).menuOpenWindow
         XCTAssertEqual(title, "Open Main Window")
     }
 
     func testZhHansLocaleReturnsChineseCopy() {
-        let title = L10nStr.menuOpenWindow("zh-Hans")
+        let title = Strings(locale: .zhHans).menuOpenWindow
         XCTAssertEqual(title, "打开主窗口")
     }
 
     func testFallbackToSystemLocaleReturnsValid() {
-        // When the host doesn't specify a locale, the catalog
-        // should fall back to whatever en.lproj contains (or
-        // zh-Hans if the system is configured that way). We don't
-        // constrain which — we only assert the result is non-empty
-        // and not the raw key.
-        let title = L10nStr.menuOpenWindow(nil)
+        // `.system` falls back to English in the catalog. We
+        // only assert the result is non-empty and not the raw
+        // key, so the test stays deterministic across CI
+        // machines with different system locales.
+        let title = Strings(locale: .system).menuOpenWindow
         XCTAssertFalse(title.isEmpty)
-        XCTAssertNotEqual(title, "menu.openMainWindow")
+        XCTAssertNotEqual(title, "menuOpenWindow")
+    }
+
+    func testDefaultThreadsFormatStringSubstitutes() {
+        // The v1.0.4 bug was that "%lld" rendered as the
+        // literal text. v1.0.5 uses String(format:) so the
+        // integer always interpolates.
+        let s = Strings(locale: .en)
+        let result = s.settingsDefaultThreadsValue(32)
+        XCTAssertEqual(result, "32")
+    }
+
+    func testPluralThreadUnitEnglish() {
+        let s = Strings(locale: .en)
+        XCTAssertEqual(s.threadUnit(1), "thread")
+        XCTAssertEqual(s.threadUnit(32), "threads")
     }
 }
