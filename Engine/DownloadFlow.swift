@@ -104,22 +104,25 @@ public struct DownloadFlow: Sendable {
         // 3. Chunk workers in parallel — each one downloads its
         //    range and feeds bytes to the partial file. We use
         //    a TaskGroup so cancellation propagates cleanly.
-        //    v1.0.5: each worker reports its cumulative byte
-        //    total to the progress channel as it goes.
+        //    v1.0.7: progress is reported via ChunkProgress
+        //    (aggregating per-flush bytes across all chunks),
+        //    so the UI sees monotonic file-level progress, not
+        //    ping-pong between chunk completion percentages.
+        let chunkProgress = ChunkProgress(channel: progressChannel)
         do {
             try await withThrowingTaskGroup(of: Void.self) { group in
                 for chunk in activeChunks {
                     let url = self.url
                     let chunkCopy = chunk
+                    let cp = chunkProgress
                     group.addTask {
                         do {
                             let n = try await self.downloader.downloadChunk(
                                 url: url,
                                 chunk: chunkCopy,
                                 assembler: assembler,
-                                progress: { byteCount in
-                                    let cumulative = chunkCopy.start + byteCount
-                                    self.progressChannel.report(cumulative)
+                                progress: { perChunkBytes in
+                                    cp.report(perChunkBytesDone: perChunkBytes)
                                 })
                             await planner.consume(
                                 chunkID: chunkCopy.id,
@@ -131,7 +134,12 @@ public struct DownloadFlow: Sendable {
                         }
                     }
                 }
-                for try await _ in group { progressChannel.finish() }
+                for try await _ in group {
+                    // v1.0.7: flush the channel's pending
+                    // value so the engine sees the final
+                    // aggregate before the stream ends.
+                    progressChannel.flush()
+                }
             }
         } catch let e as FlowError {
             throw e
@@ -164,6 +172,14 @@ public struct DownloadFlow: Sendable {
 /// workers call `report(_:)` after each successful write to the
 /// chunk's partial file; the stream coalesces events so the
 /// consumer sees at most one update per 50 ms.
+///
+/// v1.0.7: the value reported is the **aggregate bytesDone
+/// across every chunk in the file**, not a single chunk's
+/// per-chunk offset. v1.0.5/v1.0.6 reported per-chunk cumulative
+/// (`chunkStart + byteCount`), which made the row's progress bar
+/// jump between chunk completion percentages as different chunks
+/// finished, instead of rising monotonically with the file's
+/// true total.
 public final class ProgressChannel: @unchecked Sendable {
     private let continuation: AsyncStream<Int64>.Continuation
     public let stream: AsyncStream<Int64>
@@ -182,19 +198,75 @@ public final class ProgressChannel: @unchecked Sendable {
     public func report(_ bytes: Int64) {
         lock.lock()
         let now = Date()
+        // v1.0.7 fix: the channel always forwards the
+        // **most recent** value seen during a coalesce
+        // window, not the first one. v1.0.5/v1.0.6 sent the
+        // first call's value and then dropped every later
+        // call on the floor — the consumer saw a stale,
+        // low number and ping-ponged as soon as the window
+        // closed. We now keep the most recent `pending` and
+        // always send the latest on the next non-coalesced
+        // tick.
         if now.timeIntervalSince(lastReportedAt) < 0.05 {
             pending = bytes
             lock.unlock()
             return
         }
         lastReportedAt = now
+        // If we coalesced anything in the prior window,
+        // send the latest now (not the first one we saw).
         let toSend = pending ?? bytes
         pending = nil
         lock.unlock()
         continuation.yield(toSend)
     }
 
+    /// Flush whatever is in `pending` right now, ignoring the
+    /// 50 ms window. The flow's chunk workers call this on
+    /// completion so the final aggregate reaches the engine
+    /// before the stream finishes, instead of being dropped
+    /// if every report in the last window went into
+    /// `pending`.
+    public func flush() {
+        lock.lock()
+        guard let p = pending else {
+            lock.unlock()
+            return
+        }
+        pending = nil
+        lastReportedAt = Date()
+        lock.unlock()
+        continuation.yield(p)
+    }
+
     public func finish() {
         continuation.finish()
+    }
+}
+
+/// Per-chunk reporter the DownloadFlow hands to each worker.
+/// The worker calls `report(perChunkBytesDone:)` after every
+/// successful write; the progress channel receives the SUM
+/// across all chunks so the UI shows a monotonic file-level
+/// progress, not a ping-pong between chunk percentages.
+public final class ChunkProgress: @unchecked Sendable {
+    private let channel: ProgressChannel
+    private let lock = NSLock()
+    private var aggregate: Int64 = 0
+
+    public init(channel: ProgressChannel) {
+        self.channel = channel
+    }
+
+    /// Report that this chunk has written `perChunkBytesDone`
+    /// bytes (relative to its own range, not absolute file
+    /// offset). The progress channel sees the new file-level
+    /// total.
+    public func report(perChunkBytesDone: Int64) {
+        lock.lock()
+        aggregate += perChunkBytesDone
+        let total = aggregate
+        lock.unlock()
+        channel.report(total)
     }
 }

@@ -3,45 +3,71 @@ import AppKit
 import CryptoKit
 import SuperDownloadManagerCore
 
-/// TaskDetailView — v1.0.6. Sheet shown on row double-click
-/// (or "Show details" context-menu item). Exposes the full
-/// metadata the engine tracks: the original URL, the
-/// destination on disk, the ETag / Last-Modified the probe
-/// captured, the per-chunk breakdown (P4), the bytesDone
-/// total, the speed, ETA, error history, and a copy-all-data
-/// button for sharing in a bug report.
+/// TaskDetailView — v1.0.6, rewritten in v1.0.7 to be live.
+/// Sheet shown on row double-click (or "Show details"
+/// context-menu item). v1.0.7 takes `taskID + store` and
+/// re-resolves the live `TaskSummary` from the store on every
+/// render, so bytesDone / speed / ETA / progress bar update
+/// in real time while the sheet is open. v1.0.6 took a frozen
+/// `TaskSummary` snapshot at sheet open, so the displayed
+/// values never changed.
 struct TaskDetailView: View {
-    let task: TaskSummary
+    let taskID: UUID
+    @ObservedObject var store: DownloadListStore
     @Environment(\.strings) private var S
     @State private var chunks: [ChunkStatus] = []
     @State private var computingChecksum = false
     @State private var checksumResult: String? = nil
     @State private var showChunks = false
 
+    private var task: TaskSummary? {
+        store.tasks.first(where: { $0.id == taskID })
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            header
-            Divider()
-            metadata
-            Divider()
-            HStack {
-                Button(showChunks ? "Hide chunks" : "Show chunks (\(chunks.count))") {
-                    showChunks.toggle()
-                    if showChunks && chunks.isEmpty {
-                        loadChunks()
+        Group {
+            if let t = task {
+                VStack(alignment: .leading, spacing: 14) {
+                    header(t)
+                    Divider()
+                    metadata(t)
+                    Divider()
+                    HStack {
+                        Button(showChunks
+                               ? S.detailHideChunks
+                               : S.detailShowChunks(count: chunks.count)) {
+                            showChunks.toggle()
+                            if showChunks {
+                                // Always refresh the chunk view
+                                // from the live task; we don't
+                                // want a stale snapshot when the
+                                // user re-opens the section.
+                                loadChunks(from: t)
+                            }
+                        }
+                        if computingChecksum {
+                            ProgressView().controlSize(.small)
+                        }
+                        if let h = checksumResult {
+                            Text("SHA-256: \(h.prefix(16))…")
+                                .font(.caption.monospaced())
+                                .textSelection(.enabled)
+                        }
+                        Spacer()
+                        Button(S.detailCopyJSON) { copyJSON(t) }
+                    }
+                    if showChunks { chunksList }
+                }
+            } else {
+                VStack(spacing: 12) {
+                    Text(S.detailTaskGone)
+                        .foregroundStyle(.secondary)
+                    Button(S.detailClose) {
+                        NSApp.keyWindow?.sheetParent?
+                            .endSheet(NSApp.keyWindow!)
                     }
                 }
-                if computingChecksum { ProgressView().controlSize(.small) }
-                if let h = checksumResult {
-                    Text("SHA-256: \(h.prefix(16))…")
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
-                }
-                Spacer()
-                Button("Copy all as JSON") { copyJSON() }
-            }
-            if showChunks {
-                chunksList
+                .padding(40)
             }
         }
         .padding(20)
@@ -50,7 +76,7 @@ struct TaskDetailView: View {
 
     // MARK: - Header
 
-    private var header: some View {
+    private func header(_ task: TaskSummary) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: iconName(for: task.state))
                 .font(.system(size: 28))
@@ -65,11 +91,11 @@ struct TaskDetailView: View {
                     .truncationMode(.middle)
             }
             Spacer()
-            stateBadge
+            stateBadge(task)
         }
     }
 
-    private var stateBadge: some View {
+    private func stateBadge(_ task: TaskSummary) -> some View {
         Text(task.state.capitalized)
             .font(.caption.weight(.semibold))
             .padding(.horizontal, 10)
@@ -80,37 +106,37 @@ struct TaskDetailView: View {
 
     // MARK: - Metadata table
 
-    private var metadata: some View {
+    private func metadata(_ task: TaskSummary) -> some View {
         Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
             GridRow {
-                Text("Destination").foregroundStyle(.secondary)
+                Text(S.detailDestination).foregroundStyle(.secondary)
                 Text(task.destinationPath).font(.callout.monospaced())
                     .textSelection(.enabled)
             }
             GridRow {
-                Text("Size").foregroundStyle(.secondary)
-                Text(sizeString).monospacedDigit()
+                Text(S.detailSize).foregroundStyle(.secondary)
+                Text(sizeString(for: task)).monospacedDigit()
             }
             GridRow {
-                Text("Speed").foregroundStyle(.secondary)
+                Text(S.detailSpeed).foregroundStyle(.secondary)
                 Text(task.speedDescription).monospacedDigit()
             }
             if let eta = task.etaDescription {
                 GridRow {
-                    Text("ETA").foregroundStyle(.secondary)
+                    Text(S.detailETA).foregroundStyle(.secondary)
                     Text(eta).monospacedDigit()
                 }
             }
             if task.speedLimitBytesPerSec > 0 {
                 GridRow {
-                    Text("Per-task limit").foregroundStyle(.secondary)
+                    Text(S.detailPerTaskLimit).foregroundStyle(.secondary)
                     Text("\(Int((task.speedLimitBytesPerSec / 1024.0).rounded())) KB/s")
                         .monospacedDigit()
                 }
             }
             if let err = task.errorMessage, !err.isEmpty {
                 GridRow {
-                    Text("Error").foregroundStyle(.secondary)
+                    Text(S.detailError).foregroundStyle(.secondary)
                     Text(err).foregroundStyle(.red).lineLimit(3)
                 }
             }
@@ -150,7 +176,7 @@ struct TaskDetailView: View {
 
     // MARK: - Helpers
 
-    private var sizeString: String {
+    private func sizeString(for task: TaskSummary) -> String {
         if let total = task.totalBytes {
             let done = ByteCountFormatter.string(fromByteCount: task.bytesDone,
                                                   countStyle: .file)
@@ -162,12 +188,13 @@ struct TaskDetailView: View {
                                           countStyle: .file)
     }
 
-    private func loadChunks() {
-        // Synthesize a sensible chunk breakdown from the bytes
-        // already downloaded. The v1.0.6 source of truth for
-        // chunks lives in `RangePlanner`; here we approximate
-        // by dividing total into the engine's default chunk
-        // count and showing each chunk's progress bar.
+    private func loadChunks(from task: TaskSummary) {
+        // v1.0.7: synthesize chunk breakdown from the live
+        // bytesDone. RangeManager.snapshotChunks(id:) exists
+        // but the live planner API isn't surfaced yet; this
+        // approximation matches what the user actually sees
+        // (bytesDone vs totalBytes) and refreshes on every
+        // showChunks toggle.
         let total = task.totalBytes ?? 0
         guard total > 0 else { chunks = []; return }
         let n = max(1, min(32, Int(total / (2 * 1024 * 1024)) + 1))
@@ -189,7 +216,7 @@ struct TaskDetailView: View {
         chunks = out
     }
 
-    private func copyJSON() {
+    private func copyJSON(_ task: TaskSummary) {
         let json: [String: Any] = [
             "id": task.id.uuidString,
             "filename": task.filename,
@@ -260,7 +287,8 @@ struct TaskDetailView: View {
 /// exposes real chunk state through `RangePlanner`; for the
 /// v1.0.6 GUI we derive an approximation from total bytes +
 /// bytesDone so the user can see how the segments are laid
-/// out. v1.0.7 wires the live `ChunkState` from the planner.
+/// out. v1.0.7 refreshes the breakdown from the live task on
+/// every showChunks toggle.
 struct ChunkStatus: Identifiable {
     enum State: String { case pending, active, done, failed }
     let id: Int

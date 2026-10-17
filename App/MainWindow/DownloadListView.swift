@@ -3,6 +3,16 @@ import AppKit
 import UniformTypeIdentifiers
 import SuperDownloadManagerCore
 
+/// Tiny Identifiable wrapper around UUID so SwiftUI's
+/// `sheet(item:)` can be driven by a `UUID?` state. v1.0.7
+/// keeps only the task ID in `@State`; the live `TaskSummary`
+/// is resolved by `TaskDetailView` from the `DownloadListStore`
+/// on every render. v1.0.6 stored the full snapshot, which
+/// froze the displayed bytesDone / speed / ETA.
+private struct Identified: Identifiable {
+    let id: UUID
+}
+
 /// DownloadListView — main window's primary pane (v1.0.4 rewrite).
 ///
 /// v1.0.4: 7-column `Table` with sortable headers, multi-select,
@@ -19,7 +29,7 @@ struct DownloadListView: View {
     @State private var sortOrder: [KeyPathComparator<TaskSummary>] = [
         .init(\.state, order: .forward)
     ]
-    @State private var detailTask: TaskSummary? = nil
+    @State private var detailTaskID: UUID? = nil
     @Environment(\.strings) private var S
 
     var body: some View {
@@ -150,19 +160,20 @@ struct DownloadListView: View {
             // delivers the selection via SwiftUI's table
             // context-menu API; we open the detail sheet for
             // the first selected id (or the right-clicked one).
-            if let id = ids.first,
-               let t = store.tasks.first(where: { $0.id == id }) {
-                Button("Show details") { detailTask = t }
+            if let id = ids.first {
+                Button("Show details") { detailTaskID = id }
             }
         } primaryAction: { ids in
             // Double-click on a row.
-            if let id = ids.first,
-               let t = store.tasks.first(where: { $0.id == id }) {
-                detailTask = t
+            if let id = ids.first {
+                detailTaskID = id
             }
         }
-        .sheet(item: $detailTask) { t in
-            TaskDetailView(task: t)
+        .sheet(item: Binding(
+            get: { detailTaskID.map(Identified.init) },
+            set: { detailTaskID = $0?.id }
+        )) { identified in
+            TaskDetailView(taskID: identified.id, store: store)
         }
     }
 
@@ -212,7 +223,7 @@ struct DownloadListView: View {
 
     @ViewBuilder
     private func rowContextMenu(_ task: TaskSummary) -> some View {
-        Button("Show details") { detailTask = task }
+        Button("Show details") { detailTaskID = task.id }
         if task.state == "completed" {
             Button(S.rowOpen) { store.openFile(id: task.id) }
             Button(S.rowReveal) { store.revealInFinder(id: task.id) }

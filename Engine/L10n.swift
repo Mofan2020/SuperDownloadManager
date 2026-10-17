@@ -213,6 +213,30 @@ private enum Catalog {
         "Limit speed…", "限速…")
     static let rowChecksum: (String, String) = (
         "Compute checksum", "计算校验和")
+
+    // Task detail sheet
+    static let detailShowChunks: (String, String) = (
+        "Show chunks", "显示分段")
+    static let detailHideChunks: (String, String) = (
+        "Hide chunks", "隐藏分段")
+    static let detailCopyJSON: (String, String) = (
+        "Copy all as JSON", "复制全部为 JSON")
+    static let detailTaskGone: (String, String) = (
+        "Task no longer exists", "任务已不存在")
+    static let detailClose: (String, String) = (
+        "Close", "关闭")
+    static let detailDestination: (String, String) = (
+        "Destination", "保存路径")
+    static let detailSize: (String, String) = (
+        "Size", "大小")
+    static let detailSpeed: (String, String) = (
+        "Speed", "速度")
+    static let detailETA: (String, String) = (
+        "ETA", "剩余时间")
+    static let detailPerTaskLimit: (String, String) = (
+        "Per-task limit", "单任务限速")
+    static let detailError: (String, String) = (
+        "Error", "错误")
 }
 
 /// Resolve the current locale tag to a `Strings` locale.
@@ -340,6 +364,26 @@ public struct Strings {
     public var rowOpenSource: String { pick(Catalog.rowOpenSource) }
     public var rowLimitSpeed: String { pick(Catalog.rowLimitSpeed) }
     public var rowChecksum:   String { pick(Catalog.rowChecksum) }
+
+    // Task detail sheet
+    public var detailShowChunks:   String { pick(Catalog.detailShowChunks) }
+    public var detailHideChunks:   String { pick(Catalog.detailHideChunks) }
+    public var detailCopyJSON:     String { pick(Catalog.detailCopyJSON) }
+    public var detailTaskGone:     String { pick(Catalog.detailTaskGone) }
+    public var detailClose:        String { pick(Catalog.detailClose) }
+    public var detailDestination:  String { pick(Catalog.detailDestination) }
+    public var detailSize:         String { pick(Catalog.detailSize) }
+    public var detailSpeed:        String { pick(Catalog.detailSpeed) }
+    public var detailETA:          String { pick(Catalog.detailETA) }
+    public var detailPerTaskLimit: String { pick(Catalog.detailPerTaskLimit) }
+    public var detailError:        String { pick(Catalog.detailError) }
+
+    public func detailShowChunks(count: Int) -> String {
+        switch pair {
+        case .en: return "Show chunks (\(count))"
+        case .zh: return "显示分段 (\(count))"
+        }
+    }
 
     // MARK: - Format helpers
     public func settingsDefaultThreadsValue(_ n: Int) -> String {
