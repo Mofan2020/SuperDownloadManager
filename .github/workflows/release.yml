@@ -62,11 +62,18 @@ jobs:
 
       - name: Run tests (Release)
         run: |
+          # `xcodebuild test` can hang waiting for the linker to
+          # tear down the xctest bundle on macOS-latest runners;
+          # we add an explicit per-test timeout to prevent hangs.
+          set -o pipefail
           xcodebuild test -project SuperDownloadManager.xcodeproj \
                           -scheme SuperDownloadManager \
                           -destination 'platform=macOS' \
+                          -test-timeouts-enabled YES \
+                          -default-test-execution-time-allowance 60s \
+                          -default-test-time-compatibility-mode NO \
                           -derivedDataPath build_release 2>&1 \
-            | tee test.log | grep -E "Executed [0-9]+ tests"
+            | tee test.log | grep -E "Executed [0-9]+ tests|passed|failed"
           grep -q "Test Suite 'All tests' passed" test.log
 
       - name: Build DMG (P7 enables; P0+ safe-if-missing)

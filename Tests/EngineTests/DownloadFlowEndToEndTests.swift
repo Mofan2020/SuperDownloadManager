@@ -17,8 +17,20 @@ final class DownloadFlowEndToEndTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        // python3 is in /usr/bin/python3 on macOS by default; if
-        // it's missing we just skip the e2e tests entirely.
+        // End-to-end tests spawn a Python range-aware HTTP server.
+        // Local dev: opt-in via SDM_E2E=1 to keep routine tests fast.
+        // CI runners (GitHub Actions) get a full python3 install, so
+        // we run them by default there — unless the operator passes
+        // SDM_E2E=0 to skip. The CI runner image has python3 at
+        // /usr/bin/python3; if missing we still skip cleanly.
+        let optIn = ProcessInfo.processInfo.environment["SDM_E2E"]
+        let isCI = ProcessInfo.processInfo.environment["CI"] == "true"
+        if !isCI && optIn != "1" {
+            throw XCTSkip("DownloadFlow e2e opts in via SDM_E2E=1 (Python range server required).")
+        }
+        if isCI && optIn == "0" {
+            throw XCTSkip("DownloadFlow e2e skipped in CI (SDM_E2E=0).")
+        }
         guard FileManager.default.isExecutableFile(atPath: "/usr/bin/python3") else {
             throw XCTSkip("python3 not available; skipping e2e")
         }
