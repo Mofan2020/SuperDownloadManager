@@ -38,6 +38,9 @@ struct SettingsView: View {
                 NavigationLink(L10n.settingsCategoriesLink) {
                     CategoryRulesEditor()
                 }
+                NavigationLink("Site Rules") {
+                    SiteRulesView()
+                }
             } header: {
                 Text(L10n.settingsSectionCategories)
             }

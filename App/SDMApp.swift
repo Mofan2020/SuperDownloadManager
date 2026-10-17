@@ -292,30 +292,74 @@ private struct LocalizedRootView<Content: View>: View {
 
 // MARK: - MainWindow
 
-/// Top-level container for the main window. v1.0.3: a single
-/// `DownloadListView` which itself contains the toolbar,
-/// per-row controls, and the Add URL sheet.
+/// Top-level container for the main window. v1.0.4: tabs for
+/// "Active" / "History" + a small schedule pill. The actual
+/// table view is in `DownloadListView` (active) and
+/// `HistoryView` (history).
 struct MainWindow: View {
     @ObservedObject var store: DownloadListStore
     let engine: SDMEngine
     @State private var bannerMessage: String? = nil
     @State private var showAddSheet = false
+    @State private var selectedTab: Tab = .active
+    @State private var historyVM = HistoryViewModel()
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case active = "Active"
+        case history = "History"
+        case schedule = "Schedule"
+        var id: String { rawValue }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
+            Picker("", selection: $selectedTab) {
+                ForEach(Tab.allCases) { t in
+                    Text(t.rawValue).tag(t)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.bar)
             if let msg = bannerMessage {
                 ExpiredLinkBanner(summary: msg,
                                   onReenter: { bannerMessage = nil })
             }
-            DownloadListView(store: store)
+            switch selectedTab {
+            case .active:
+                DownloadListView(store: store)
+            case .history:
+                HistoryView(vm: historyVM, store: store)
+            case .schedule:
+                ScheduleView(store: store)
+            }
         }
         .onReceive(NotificationCenter.default.publisher(
             for: .sdmShowAddSheet)) { _ in
-            // v1.0.3: the toolbar's Add button is the primary
-            // entry. Forwarding the menu event to NSDocumentController
-            // is a no-op for non-document apps; we just rely on
-            // the user using the toolbar. v1.0.4 wires a global
-            // sheet controller so menu + toolbar converge.
+            // v1.0.4: forward menu events by switching to the
+            // active tab; the toolbar's + button opens the sheet.
+            selectedTab = .active
+        }
+        .onChange(of: store.tasks) { _, new in
+            // Whenever a task transitions to a terminal state,
+            // write it to the history store. The view-model
+            // listens for refresh events and reloads.
+            for t in new where t.isTerminal {
+                let entry = HistoryStore.Entry(
+                    id: t.id,
+                    url: t.urlString,
+                    filename: t.filename,
+                    destinationPath: t.destinationPath,
+                    totalBytes: t.totalBytes,
+                    bytesDone: t.bytesDone,
+                    state: t.state,
+                    errorMessage: t.errorMessage,
+                    startedAt: Date().addingTimeInterval(-60),
+                    finishedAt: Date(),
+                    sha256: nil)
+                Task { await historyVM.append(entry) }
+            }
         }
     }
 }

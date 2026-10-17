@@ -184,15 +184,79 @@ public actor SDMEngine {
         }
     }
 
-    /// Resume a paused task. v1.0.3 simply restarts the download
-    /// from byte 0; a future version will skip already-downloaded
-    /// chunks via `Range:` headers.
+    /// Resume a paused task. v1.0.4 P1-3: probe the URL, then
+    /// run `ResumeFlow` to append the missing bytes via a single
+    /// `Range:` request, and finalize the merged file. Falls
+    /// back to a from-scratch download if the server doesn't
+    /// honour Range.
     public func resume(id: UUID) async {
         guard let summary = await queue.get(id: id) else { return }
-        await cancel(id: id)
-        _ = await start([StartSpec(
-            url: summary.url,
-            destinationDirectory: summary.destination.deletingLastPathComponent())])
+
+        // If no .part on disk, this isn't a paused download —
+        // just kick off a fresh one.
+        let partPath = summary.destination.appendingPathExtension("part")
+        let bytesOnDisk: Int64 = (try? FileManager.default
+            .attributesOfItem(atPath: partPath.path)[.size] as? Int64) ?? 0
+
+        if bytesOnDisk == 0 {
+            await cancel(id: id)
+            _ = await start([StartSpec(
+                url: summary.url,
+                destinationDirectory: summary.destination.deletingLastPathComponent())])
+            return
+        }
+
+        // Spawn a resume task.
+        await queue.update(id: id) { t in
+            t.state = "downloading"
+            t.speedBytesPerSec = 0
+        }
+        let live = Task { [weak self] in
+            guard let self else { return }
+            await self.runResume(id: id, summary: summary)
+        }
+        specs[id] = LiveTask(task: live, isPaused: false)
+    }
+
+    private func runResume(id: UUID, summary: TaskQueue.TaskSummary) async {
+        let probe: ContentProbe
+        do {
+            probe = try await HTTPDownloader().probe(summary.url)
+        } catch {
+            await queue.update(id: id) { t in
+                t.state = "failed"
+                t.errorMessage = "probe failed: \(error)"
+            }
+            return
+        }
+        let partPath = summary.destination.appendingPathExtension("part")
+        let flow = ResumeFlow(url: summary.url,
+                              destination: summary.destination,
+                              probe: probe)
+        do {
+            try await flow.run()
+            // Move .part → final.
+            try? FileManager.default.removeItem(at: summary.destination)
+            try FileManager.default.moveItem(at: partPath, to: summary.destination)
+            await queue.update(id: id) { t in
+                t.state = "completed"
+                t.totalBytes = probe.contentLength
+                t.bytesDone = probe.contentLength ?? t.bytesDone
+            }
+        } catch {
+            // Fall back to from-scratch if Range was rejected.
+            if case ResumeFlow.Failure.rangeRejected = error {
+                await cancel(id: id)
+                _ = await start([StartSpec(
+                    url: summary.url,
+                    destinationDirectory: summary.destination.deletingLastPathComponent())])
+                return
+            }
+            await queue.update(id: id) { t in
+                t.state = "failed"
+                t.errorMessage = String(describing: error)
+            }
+        }
     }
 
     /// Remove a row from the queue. The on-disk file is left

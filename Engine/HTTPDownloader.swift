@@ -37,6 +37,39 @@ public struct HTTPDownloader: Sendable {
         self.userAgent = userAgent
     }
 
+    /// Apply a v1.0.4 P2-3 `SiteRule` (if any matches `url`) to
+    /// the request. Headers + cookies + basic auth are added
+    /// inline; the URLSession itself is shared.
+    public func apply(siteRule: SiteRule?, to req: inout URLRequest, for url: URL) {
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        guard let r = siteRule else { return }
+        if let referer = r.referer, !referer.isEmpty {
+            req.setValue(referer, forHTTPHeaderField: "Referer")
+        }
+        if let ua = r.userAgent, !ua.isEmpty {
+            req.setValue(ua, forHTTPHeaderField: "User-Agent")
+        }
+        if let cookies = r.cookies, !cookies.isEmpty {
+            req.setValue(cookies, forHTTPHeaderField: "Cookie")
+        }
+        if let u = r.basicAuthUser, let p = SiteRuleStore.shared.getPassword(
+            account: u, host: r.host) {
+            let raw = "\(u):\(p)"
+            if let token = raw.data(using: .utf8)?.base64EncodedString() {
+                req.setValue("Basic \(token)", forHTTPHeaderField: "Authorization")
+            }
+        }
+    }
+
+    /// Convenience: build a request for `url` with the matching
+    /// `SiteRule` applied.
+    public func request(for url: URL) -> URLRequest {
+        var req = URLRequest(url: url)
+        apply(siteRule: SiteRuleStore.shared.match(url: url),
+              to: &req, for: url)
+        return req
+    }
+
     /// Stream a single chunk to the supplied `FileAssembler`.
     /// Returns the total bytes successfully persisted.
     public func downloadChunk(
@@ -47,6 +80,8 @@ public struct HTTPDownloader: Sendable {
         progress: (@Sendable (Int64) -> Void)? = nil
     ) async throws -> Int64 {
         var req = URLRequest(url: url)
+        apply(siteRule: SiteRuleStore.shared.match(url: url),
+              to: &req, for: url)
         req.setValue(chunk.rangeHeader(), forHTTPHeaderField: "Range")
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = 60
