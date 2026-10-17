@@ -115,14 +115,15 @@ public final class DownloadListStore: ObservableObject {
             .map { r in
                 let prev = lastByID[r.id] ?? 0
                 let deltaBytes = max(0, r.bytesDone - prev)
-                let rawSpeed = r.speedBytesPerSec > 0
-                    ? r.speedBytesPerSec
-                    : Double(deltaBytes) / 0.2  // 200ms tick
                 let prevE = smoothedSpeed[r.id] ?? 0
-                let alpha = 0.4
-                let smoothed = (prevE == 0) ? rawSpeed
-                    : (alpha * rawSpeed + (1 - alpha) * prevE)
-                smoothedSpeed[r.id] = smoothed
+                let out = SpeedDisplay.compute(
+                    input: .init(
+                        state: r.state,
+                        engineSpeedBytesPerSec: r.speedBytesPerSec,
+                        deltaBytesSinceLastTick: deltaBytes,
+                        tickIntervalSeconds: 0.2),
+                    previousEMA: prevE)
+                smoothedSpeed[r.id] = out.nextEMA
                 _ = now
                 return TaskSummary(
                     id: r.id,
@@ -132,7 +133,7 @@ public final class DownloadListStore: ObservableObject {
                     state: r.state,
                     bytesDone: r.bytesDone,
                     totalBytes: r.totalBytes,
-                    speedBytesPerSec: smoothed,
+                    speedBytesPerSec: out.displayedSpeed,
                     destinationPath: r.destination.path,
                     errorMessage: r.errorMessage,
                     category: classifyEnabled

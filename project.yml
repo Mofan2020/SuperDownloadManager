@@ -105,8 +105,8 @@ targets:
         CFBundleName: SuperDownloadManager
         CFBundleDisplayName: Super Download Manager
         CFBundleIdentifier: com.superdownloadmanager.app
-        CFBundleShortVersionString: "1.0.8"
-        CFBundleVersion: "9"
+        CFBundleShortVersionString: "1.0.9"
+        CFBundleVersion: "10"
         # Asset Catalog "AppIcon.appiconset" — Xcode reads
         # CFBundleIconName and embeds Assets.car into the bundle
         # for free.
