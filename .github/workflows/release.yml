@@ -16,7 +16,7 @@ permissions:
 jobs:
   release:
     name: Build, sign, draft release
-    runs-on: macos-26
+    runs-on: macos-latest
     timeout-minutes: 45
 
     steps:
@@ -25,8 +25,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Select Xcode 27
-        run: sudo xcode-select -s /Applications/Xcode_27.0.app/Contents/Developer
+      - name: Select latest Xcode
+        run: |
+          set -e
+          if [ -d /Applications/Xcode_27.0.app ]; then
+            sudo xcode-select -s /Applications/Xcode_27.0.app/Contents/Developer
+          else
+            LATEST=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+            echo "Using Xcode at: $LATEST"
+            sudo xcode-select -s "$LATEST/Contents/Developer"
+          fi
 
       - name: Install XcodeGen
         run: brew install xcodegen
