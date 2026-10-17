@@ -62,25 +62,19 @@ jobs:
 
       - name: Run tests (Release)
         run: |
-          # Skip the e2e python-server-backed tests on this CI:
-          # they're opt-in locally via SDM_E2E=1. CI runners have
-          # /usr/bin/python3 + bindable ports, but the bundle teardown
-          # has been observed to hang on macos-latest; keeping the
-          # release pipeline to non-e2e tests makes the gate fast.
-          set -o pipefail
-          # Capture full xcodebuild output to test.log, then grep for
-          # status lines afterwards. (Piping first discards them and
-          # the `grep -q` step below can't see them.)
+          # Don't use `set -e`: we want to capture xcodebuild's
+          # exit code while still emitting useful diagnostics.
           xcodebuild test -project SuperDownloadManager.xcodeproj \
                           -scheme SuperDownloadManager \
                           -destination 'platform=macOS' \
                           -skip-testing:SuperDownloadManagerTests/DownloadFlowEndToEndTests \
                           -derivedDataPath build_release \
-            > test.log 2>&1 || true
-          grep -E "Executed [0-9]+ tests|passed|failed" test.log | tail -10
-          if ! grep -q "Test Suite 'All tests' passed" test.log; then
-            echo "::error::Test suite did not pass; tail of test.log:"
-            tail -30 test.log
+            > test.log 2>&1
+          xcodebuild_rc=$?
+          grep -E "Executed [0-9]+ tests|passed|failed" test.log | tail -10 || true
+          if [ "$xcodebuild_rc" -ne 0 ] || ! grep -q "Test Suite 'All tests' passed" test.log; then
+            echo "::error::xcodebuild exit=$xcodebuild_rc; tail of test.log:"
+            tail -50 test.log || true
             exit 1
           fi
 
