@@ -1,28 +1,24 @@
 import XCTest
 @testable import SuperDownloadManagerCore
 
-/// End-to-end download flow test using a real local HTTP server.
+/// DownloadFlowEndToEnd tests — drive the full pipeline through
+/// real `URLSession` bytes streams.
 ///
-/// This is the **honest integration test** for v1.0: it spins up a
-/// `python3`-based HTTP server with `Range` support, points a
-/// `DownloadFlow` at it, and verifies the actual bytes land on disk.
-/// Without this test, "tests pass" only proves the parts work —
-/// the whole pipeline can still be unwired, which is exactly the
-/// shape of the bug the project hit at the v1.0 hand-off.
+/// v1.0 has two coverage modes:
+/// - **Local**: opt-in via `SDM_E2E=1`. Spawns a Python range-aware
+///   server and runs actual end-to-end probes. Skipped by default
+///   to keep `swift test` cheap.
+/// - **CI (GitHub Actions)**: runs by default since the runner image
+///   ships with `/usr/bin/python3`. Pass `SDM_E2E=0` to disable.
 ///
-/// Tests skip if `python3` isn't available.
+/// These tests are the **honest integration check** that the wiring
+/// from `URLSession.bytes` → `FileAssembler` → `finalize()` is
+/// alive. Without them, "42 tests passed" only proves the parts
+/// work — the whole pipeline can still be unwired, which is the
+/// shape of the bug the project hit at v1.0 hand-off.
 final class DownloadFlowEndToEndTests: XCTestCase {
-    private var server: Task<URL, Error>?
-    private var serverPID: Int32?
-
     override func setUpWithError() throws {
         try super.setUpWithError()
-        // End-to-end tests spawn a Python range-aware HTTP server.
-        // Local dev: opt-in via SDM_E2E=1 to keep routine tests fast.
-        // CI runners (GitHub Actions) get a full python3 install, so
-        // we run them by default there — unless the operator passes
-        // SDM_E2E=0 to skip. The CI runner image has python3 at
-        // /usr/bin/python3; if missing we still skip cleanly.
         let optIn = ProcessInfo.processInfo.environment["SDM_E2E"]
         let isCI = ProcessInfo.processInfo.environment["CI"] == "true"
         if !isCI && optIn != "1" {
@@ -36,8 +32,11 @@ final class DownloadFlowEndToEndTests: XCTestCase {
         }
     }
 
+    private var serverPID: Int32?
+
     override func tearDownWithError() throws {
         if let pid = serverPID { kill(pid, SIGTERM) }
+        serverPID = nil
         try super.tearDownWithError()
     }
 
@@ -63,7 +62,6 @@ final class DownloadFlowEndToEndTests: XCTestCase {
         )
         try await flow.run()
 
-        // Bytes on disk == bytes the server claimed, byte-equal.
         let dataOnDisk = try Data(contentsOf: dest)
         let dataFromServer = try Data(contentsOf: url)
         XCTAssertEqual(dataOnDisk, dataFromServer)
@@ -139,9 +137,6 @@ final class DownloadFlowEndToEndTests: XCTestCase {
     // MARK: - Server helpers
 
     private func startServer(port: UInt16, totalBytes: Int) async throws -> URL {
-        // Range-aware server: returns Content-Length, Accept-Ranges,
-        // and 206 Partial Content for byte ranges; 200 for "0-0"
-        // so the probe still works.
         let script = """
         import http.server, socketserver, sys, os
         PORT = \(port)
@@ -192,7 +187,6 @@ final class DownloadFlowEndToEndTests: XCTestCase {
         process.standardError = Pipe()
         try process.run()
         serverPID = Int32(process.processIdentifier)
-        // Wait for server to bind.
         for _ in 0..<30 {
             try await Task.sleep(nanoseconds: 100_000_000)
             if await probeLocalhost(port: port) {
