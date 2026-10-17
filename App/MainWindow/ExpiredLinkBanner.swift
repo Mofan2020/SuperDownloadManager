@@ -14,7 +14,7 @@ struct ExpiredLinkBanner: View {
                 .foregroundStyle(.orange)
             Text(summary)
             Spacer()
-            Button("Refresh link", action: onReenter)
+            Button(S.expiredRefresh, action: onReenter)
                 .buttonStyle(.borderedProminent)
         }
         .padding(12)

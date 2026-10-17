@@ -8,6 +8,7 @@ import SuperDownloadManagerCore
 /// minimal: add URL + DatePicker + optional note.
 struct ScheduleView: View {
     @ObservedObject var store: DownloadListStore
+    @Environment(\.strings) private var S
     @State private var newURL: String = ""
     @State private var newDate: Date = Date().addingTimeInterval(60)
     @State private var newNote: String = ""
@@ -24,7 +25,7 @@ struct ScheduleView: View {
                            in: Date()...,
                            displayedComponents: [.date, .hourAndMinute])
                     .labelsHidden()
-                Button("Schedule") { commit() }
+                Button(S.scheduleAdd) { commit() }
                     .disabled(newURL.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             .padding(12)
@@ -38,10 +39,10 @@ struct ScheduleView: View {
                     Image(systemName: "alarm")
                         .font(.system(size: 36))
                         .foregroundStyle(.tertiary)
-                    Text("No scheduled downloads")
+                    Text(S.scheduleEmpty)
                         .font(.callout)
                         .foregroundStyle(.secondary)
-                    Text("Pick a URL and a future time above.")
+                    Text(S.scheduleHint)
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }

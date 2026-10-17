@@ -8,6 +8,7 @@ import SuperDownloadManagerCore
 struct HistoryView: View {
     @ObservedObject var vm: HistoryViewModel
     @ObservedObject var store: DownloadListStore
+    @Environment(\.strings) private var S
     @State private var searchText: String = ""
     @State private var selection: Set<UUID> = []
 
@@ -16,10 +17,10 @@ struct HistoryView: View {
             HStack {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
-                TextField("Search by filename or URL…", text: $searchText)
+                TextField(S.historyFilter, text: $searchText)
                     .textFieldStyle(.plain)
                 Spacer()
-                Text("\(filtered.count) entries")
+                Text(S.historyEntriesCount(filtered.count))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -32,11 +33,10 @@ struct HistoryView: View {
                     Image(systemName: "clock.arrow.circlepath")
                         .font(.system(size: 36))
                         .foregroundStyle(.tertiary)
-                    Text("No history yet")
+                    Text(S.historyNoEntries)
                         .font(.callout)
                         .foregroundStyle(.secondary)
-                    Text("Completed and failed downloads show up here. " +
-                         "30-day retention.")
+                    Text(S.historyExplanation)
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                         .multilineTextAlignment(.center)
@@ -45,7 +45,7 @@ struct HistoryView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 Table(of: HistoryStore.Entry.self, selection: $selection) {
-                    TableColumn("File") { e in
+                    TableColumn(S.historyColumnFile) { e in
                         VStack(alignment: .leading) {
                             Text(e.filename).lineLimit(1).truncationMode(.middle)
                             Text(e.url)
@@ -56,17 +56,17 @@ struct HistoryView: View {
                         }
                     }
                     .width(min: 180, ideal: 280)
-                    TableColumn("Size") { e in
+                    TableColumn(S.historyColumnSize) { e in
                         if let t = e.totalBytes {
                             Text(ByteCountFormatter.string(fromByteCount: t,
                                                             countStyle: .file))
                                 .monospacedDigit()
                         } else {
-                            Text("—").foregroundStyle(.tertiary)
+                            Text(S.listEmDash).foregroundStyle(.tertiary)
                         }
                     }
                     .width(70)
-                    TableColumn("Status") { e in
+                    TableColumn(S.historyColumnState) { e in
                         Text(e.state.capitalized)
                             .font(.caption)
                             .padding(.horizontal, 6)
@@ -75,7 +75,7 @@ struct HistoryView: View {
                             .foregroundStyle(stateColor(e.state))
                     }
                     .width(90)
-                    TableColumn("Finished") { e in
+                    TableColumn(S.historyColumnDate) { e in
                         Text(e.finishedAt, format: .dateTime.month().day().hour().minute())
                             .monospacedDigit()
                     }
@@ -86,18 +86,18 @@ struct HistoryView: View {
                                 if let u = URL(string: e.url) { store.add(url: u) }
                             } label: { Image(systemName: "arrow.down.circle") }
                             .buttonStyle(.borderless)
-                            .help("Download again")
+                            .help(S.historyActionRedownload)
                             if FileManager.default.fileExists(atPath: e.destinationPath) {
                                 Button {
                                     NSWorkspace.shared.open(
                                         URL(fileURLWithPath: e.destinationPath))
                                 } label: { Image(systemName: "arrow.up.forward.app") }
-                                .buttonStyle(.borderless).help("Open")
+                                .buttonStyle(.borderless).help(S.rowOpen)
                             }
                             Button {
                                 Task { await vm.remove(id: e.id) }
                             } label: { Image(systemName: "trash") }
-                            .buttonStyle(.borderless).help("Remove from history")
+                            .buttonStyle(.borderless).help(S.historyActionRemove)
                         }
                         .controlSize(.small)
                     }

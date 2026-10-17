@@ -17,9 +17,18 @@ import SuperDownloadManagerCore
 @MainActor
 public final class DownloadListStore: ObservableObject {
     @Published public private(set) var tasks: [TaskSummary] = []
+    /// v1.0.7: candidate surfaced from the clipboard watcher.
+    /// `nil` means no pending candidate. The view binds a
+    /// sheet to this; the user confirms (with optional
+    /// category / save-dir / max-threads overrides) or
+    /// dismisses. v1.0.6 auto-added every http(s) URL, which
+    /// meant the app would start downloading random text the
+    /// user just copied from a chat window.
+    @Published public var pendingClipboard: ClipboardCandidate? = nil
     @AppStorage("sdm.capture.clipboard") public var clipboardCapture: Bool = true
     @AppStorage("sdm.notify.onComplete") public var notifyOnComplete: Bool = true
     @AppStorage("sdm.classify.enabled") public var classifyEnabled: Bool = true
+    @AppStorage("sdm.threads.default") public var defaultThreads: Int = 32
 
     public let engine: SDMEngine
     private var pollTask: Task<Void, Never>?
@@ -161,6 +170,42 @@ public final class DownloadListStore: ObservableObject {
                 url: url,
                 destinationDirectory: dir,
                 filenameOverride: filenameOverride)])
+        }
+    }
+
+    /// v1.0.7: full-config add used by the clipboard
+    /// confirmation sheet and (in the future) the per-row
+    /// "Re-add with different options" menu. The category
+    /// override maps to a destination directory; an
+    /// override of `nil` falls back to the URL-derived
+    /// classification. `maxThreads` of `nil` uses the
+    /// engine's global cap.
+    public func addWithConfig(
+        url: URL,
+        category: DownloadCategory? = nil,
+        saveDirectory: URL? = nil,
+        filenameOverride: String? = nil,
+        maxThreads: Int? = nil
+    ) {
+        let dir: URL
+        if let saveDirectory {
+            dir = saveDirectory
+        } else {
+            let resolvedCategory = category ?? DownloadCategory.from(url: url)
+            let downloads = FileManager.default
+                .urls(for: .downloadsDirectory, in: .userDomainMask).first
+                ?? URL(fileURLWithPath: NSHomeDirectory())
+                    .appendingPathComponent("Downloads")
+            dir = downloads.appendingPathComponent(resolvedCategory.folderName)
+            try? FileManager.default.createDirectory(
+                at: dir, withIntermediateDirectories: true)
+        }
+        Task { [engine] in
+            _ = await engine.start([.init(
+                url: url,
+                destinationDirectory: dir,
+                filenameOverride: filenameOverride,
+                maxThreadsOverride: maxThreads)])
         }
     }
 
@@ -351,6 +396,12 @@ public final class DownloadListStore: ObservableObject {
               let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else { return }
 
+        // v1.0.7: only surface http(s) URLs that look like
+        // downloadable files. Bare hostname URLs and HTML
+        // pages (no extension) are ignored — auto-downloading
+        // them on every clipboard change was annoying.
+        guard DownloadCategory.isLikelyFileURL(url) else { return }
+
         // Dedupe within 5 minutes.
         if let last = lastSeenURLs[url.absoluteString],
            Date().timeIntervalSince(last) < 300 {
@@ -358,9 +409,9 @@ public final class DownloadListStore: ObservableObject {
         }
         lastSeenURLs[url.absoluteString] = Date()
 
-        // Don't add if the user is editing the AddSheet. The
-        // simplest way: if a download with this URL is already
-        // queued/active, skip.
+        // Don't surface a candidate that's already an active
+        // download. This avoids the sheet popping up for a
+        // URL we already started.
         if tasks.contains(where: {
             $0.urlString == url.absoluteString &&
             ($0.state == "queued" || $0.state == "downloading" || $0.state == "paused")
@@ -368,7 +419,14 @@ public final class DownloadListStore: ObservableObject {
             return
         }
 
-        add(url: url)
+        // Hand the URL to the view via the published
+        // pendingClipboard. The user confirms, edits, or
+        // dismisses.
+        let candidate = ClipboardCandidate(
+            url: url,
+            suggestedCategory: DownloadCategory.from(url: url),
+            defaultMaxThreads: defaultThreads)
+        pendingClipboard = candidate
     }
 
     // MARK: - P0-4: Dispatch server (browser extensions)

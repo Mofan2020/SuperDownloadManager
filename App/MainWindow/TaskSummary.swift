@@ -126,6 +126,19 @@ public enum DownloadCategory: String, CaseIterable, Codable, Equatable, Sendable
             return .other
         }
     }
+
+    /// v1.0.7: heuristic used by the clipboard watcher to
+    /// decide whether a URL looks like a downloadable file
+    /// (vs. a regular web page). A URL is a "file" if its
+    /// path extension maps to a non-`.other` category.
+    /// Returns false for paths like `/`, `/foo/`, `?query=…`
+    /// with no extension, since those almost always resolve
+    /// to HTML. Implementation lives in
+    /// `Engine/FileURLHeuristic.swift`; this method delegates
+    /// to it.
+    public static func isLikelyFileURL(_ url: URL) -> Bool {
+        FileURLHeuristic.isLikelyFileURL(url)
+    }
 }
 
 public enum ByteRateFormatter {
@@ -145,5 +158,24 @@ public enum TimeFormatter {
         let h = totalMin / 60
         let m = totalMin % 60
         return "\(h)h \(m)m"
+    }
+}
+
+/// v1.0.7: a candidate surfaced by the clipboard watcher.
+/// The view binds a sheet to `DownloadListStore.pendingClipboard`
+/// and offers Download / Skip. The user can override the
+/// destination category, the save directory, and the per-task
+/// thread cap before confirming.
+public struct ClipboardCandidate: Identifiable, Equatable {
+    public let id = UUID()
+    public let url: URL
+    public var suggestedCategory: DownloadCategory
+    public var defaultMaxThreads: Int
+    public init(url: URL,
+                suggestedCategory: DownloadCategory,
+                defaultMaxThreads: Int) {
+        self.url = url
+        self.suggestedCategory = suggestedCategory
+        self.defaultMaxThreads = defaultMaxThreads
     }
 }

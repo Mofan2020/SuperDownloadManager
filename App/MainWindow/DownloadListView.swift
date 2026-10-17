@@ -51,6 +51,9 @@ struct DownloadListView: View {
             handleDrop(providers: providers)
         }
         .sheet(isPresented: $showAddSheet) { addSheet }
+        .sheet(item: $store.pendingClipboard) { candidate in
+            ClipboardConfirmView(store: store, candidate: candidate)
+        }
         .environment(\.strings, S)
     }
 
@@ -161,7 +164,7 @@ struct DownloadListView: View {
             // context-menu API; we open the detail sheet for
             // the first selected id (or the right-clicked one).
             if let id = ids.first {
-                Button("Show details") { detailTaskID = id }
+                Button(S.listShowDetails) { detailTaskID = id }
             }
         } primaryAction: { ids in
             // Double-click on a row.
@@ -223,7 +226,7 @@ struct DownloadListView: View {
 
     @ViewBuilder
     private func rowContextMenu(_ task: TaskSummary) -> some View {
-        Button("Show details") { detailTaskID = task.id }
+        Button(S.listShowDetails) { detailTaskID = task.id }
         if task.state == "completed" {
             Button(S.rowOpen) { store.openFile(id: task.id) }
             Button(S.rowReveal) { store.revealInFinder(id: task.id) }
@@ -443,7 +446,7 @@ struct EmptyStateView: View {
             Image(systemName: "arrow.down.circle")
                 .font(.system(size: 56, weight: .light))
                 .foregroundStyle(.tint)
-            Text("Super Download Manager")
+            Text(S.listAppName)
                 .font(.title2.weight(.semibold))
             Text(S.emptyTitle)
                 .foregroundStyle(.secondary)

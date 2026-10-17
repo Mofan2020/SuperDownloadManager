@@ -58,7 +58,7 @@ struct SettingsView: View {
         }
         .environment(\.locale, locale)
         .environment(\.strings, strings)
-        .navigationTitle(strings.settingsAboutTitle)
+        .navigationTitle(strings.settingsWindowTitle)
         .frame(width: 720, height: 480)
     }
 
@@ -125,13 +125,13 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Section {
-                Toggle("Auto-categorize downloads", isOn: $classifyEnabled)
-                Toggle("Clipboard URL auto-capture", isOn: $clipboardCapture)
-                Toggle("System notifications on complete", isOn: $notifyOnComplete)
+                Toggle(S.settingsToggleAutoCategorize, isOn: $classifyEnabled)
+                Toggle(S.settingsToggleClipboardCapture, isOn: $clipboardCapture)
+                Toggle(S.settingsToggleSystemNotifications, isOn: $notifyOnComplete)
             } header: {
-                Text("Behaviour")
+                Text(S.settingsBehaviour)
             } footer: {
-                Text("These take effect immediately.")
+                Text(S.settingsBehaviourHint)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -158,7 +158,7 @@ struct SettingsView: View {
                 BandwidthField(value: $bandwidth)
                     .environment(\.strings, S)
             } header: {
-                Text("Bandwidth")
+                Text(S.settingsBandwidth)
             } footer: {
                 Text(S.settingsBandwidthHint)
                     .font(.caption)
@@ -270,6 +270,7 @@ struct CategoryRulesEditor: View {
     @AppStorage("sdm.classify.enabled") private var classifyEnabled: Bool = true
 
     var body: some View {
+        let S = self.S
         let cats: [(DownloadCategory, [String])] = [
             (.video,     ["mp4", "mov", "mkv", "webm", "avi", "flv", "m4v", "wmv", "ts"]),
             (.music,     ["mp3", "flac", "wav", "aac", "ogg", "m4a", "opus"]),
@@ -282,13 +283,11 @@ struct CategoryRulesEditor: View {
         ]
         return Form {
             Section {
-                Toggle("Auto-categorize downloads", isOn: $classifyEnabled)
+                Toggle(S.settingsToggleAutoCategorize, isOn: $classifyEnabled)
             } header: {
-                Text("Behaviour")
+                Text(S.settingsBehaviour)
             } footer: {
-                Text("Downloads land in ~/Downloads/<Category>/ when " +
-                     "auto-categorization is on. Disabling this drops " +
-                     "everything into ~/Downloads/.")
+                Text(S.settingsCategoryFolderHint)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -305,10 +304,9 @@ struct CategoryRulesEditor: View {
                     }
                 }
             } header: {
-                Text("Categories")
+                Text(S.settingsCategorySection)
             } footer: {
-                Text("Add / remove extensions in v1.0.5+. The v1.0 " +
-                     "table is read-only.")
+                Text(S.settingsCategoriesHint)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

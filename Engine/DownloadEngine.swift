@@ -21,13 +21,20 @@ public actor SDMEngine {
         public let url: URL
         public let destinationDirectory: URL
         public let filenameOverride: String?
+        /// v1.0.7: per-task thread override. `nil` = use the
+        /// engine's global `parallelismCap`. Used by the
+        /// clipboard confirmation sheet to let users cap a
+        /// single large download.
+        public let maxThreadsOverride: Int?
 
         public init(url: URL,
                     destinationDirectory: URL,
-                    filenameOverride: String? = nil) {
+                    filenameOverride: String? = nil,
+                    maxThreadsOverride: Int? = nil) {
             self.url = url
             self.destinationDirectory = destinationDirectory
             self.filenameOverride = filenameOverride
+            self.maxThreadsOverride = maxThreadsOverride
         }
     }
 
@@ -190,12 +197,17 @@ public actor SDMEngine {
         // that dedicated limiter instead of the global one.
         // The per-task limiter is exclusive — it doesn't
         // share tokens with the global bucket.
+        //
+        // v1.0.7: `cap` honours a per-task maxThreadsOverride
+        // from the StartSpec; falls back to the engine's
+        // global parallelismCap when the user didn't set one.
         let flowLimiter: SpeedLimiter = taskLimiters[id] ?? limiter
+        let cap = spec.maxThreadsOverride ?? parallelismCap
         let flow = DownloadFlow(
             url: spec.url,
             destination: realDest,
             strategy: strategy,
-            parallelismCap: parallelismCap,
+            parallelismCap: cap,
             limiter: flowLimiter)
 
         let progressTask = Task { [weak self] in

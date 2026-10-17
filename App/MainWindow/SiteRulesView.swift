@@ -6,6 +6,7 @@ import SuperDownloadManagerCore
 /// rules. Add a hostname, set Referer / User-Agent / Cookie /
 /// Basic Auth. The engine applies matching rules at request time.
 struct SiteRulesView: View {
+    @Environment(\.strings) private var S
     @State private var rules: [SiteRule] = SiteRuleStore.shared.load()
     @State private var newHost: String = ""
     @State private var newReferer: String = ""
@@ -17,33 +18,31 @@ struct SiteRulesView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Site Rules")
+            Text(S.siteRulesTitle)
                 .font(.title3.weight(.semibold))
-            Text("Match downloads by hostname (suffix match). " +
-                 "Set Referer / User-Agent / Cookie / Basic Auth. " +
-                 "Passwords go to Keychain.")
+            Text(S.siteRulesExplanation)
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Add a rule").font(.caption).foregroundStyle(.secondary)
-                TextField("hostname (e.g. cdn.example.com)", text: $newHost)
+                Text(S.siteRulesAddHint).font(.caption).foregroundStyle(.secondary)
+                TextField(S.siteRulesHost, text: $newHost)
                     .textFieldStyle(.roundedBorder)
-                TextField("Referer", text: $newReferer)
+                TextField(S.siteRulesReferer, text: $newReferer)
                     .textFieldStyle(.roundedBorder)
-                TextField("User-Agent", text: $newUA)
+                TextField(S.siteRulesUserAgent, text: $newUA)
                     .textFieldStyle(.roundedBorder)
-                TextField("Cookie header", text: $newCookie)
+                TextField(S.siteRulesCookie, text: $newCookie)
                     .textFieldStyle(.roundedBorder)
                 HStack {
-                    TextField("Basic Auth user", text: $newUser)
+                    TextField(S.siteRulesBasicAuthUser, text: $newUser)
                         .textFieldStyle(.roundedBorder)
-                    SecureField("password", text: $newPass)
+                    SecureField(S.siteRulesBasicAuthPassword, text: $newPass)
                         .textFieldStyle(.roundedBorder)
                 }
                 HStack {
-                    Button("Add") { commit() }
-                    Button("Clear All") {
+                    Button(S.siteRulesAdd) { commit() }
+                    Button(S.siteRulesClearAll) {
                         SiteRuleStore.shared.clearAll()
                         rules = []
                     }
@@ -54,11 +53,11 @@ struct SiteRulesView: View {
             }
             .frame(maxWidth: 540)
             Divider()
-            Text("Existing rules")
+            Text(S.siteRulesExisting)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if rules.isEmpty {
-                Text("No rules yet.")
+                Text(S.siteRulesEmpty)
                     .foregroundStyle(.tertiary)
                     .padding(.vertical, 8)
             } else {
@@ -66,10 +65,10 @@ struct SiteRulesView: View {
                     HStack {
                         VStack(alignment: .leading) {
                             Text(rule.host).font(.body.weight(.medium))
-                            if let r = rule.referer { Text("Referer: \(r)").font(.caption).foregroundStyle(.secondary) }
-                            if let ua = rule.userAgent { Text("UA: \(ua.prefix(40))…").font(.caption).foregroundStyle(.secondary) }
-                            if let c = rule.cookies { Text("Cookie: \(c.prefix(40))…").font(.caption).foregroundStyle(.secondary) }
-                            if let u = rule.basicAuthUser { Text("Basic: \(u)").font(.caption).foregroundStyle(.secondary) }
+                            if let r = rule.referer { Text(S.siteRulesRefererShort(r)).font(.caption).foregroundStyle(.secondary) }
+                            if let ua = rule.userAgent { Text(S.siteRulesUserAgentShort(ua)).font(.caption).foregroundStyle(.secondary) }
+                            if let c = rule.cookies { Text(S.siteRulesCookieShort(c)).font(.caption).foregroundStyle(.secondary) }
+                            if let u = rule.basicAuthUser { Text(S.siteRulesBasicAuthShort(u)).font(.caption).foregroundStyle(.secondary) }
                         }
                         Spacer()
                         Button {

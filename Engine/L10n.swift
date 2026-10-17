@@ -237,6 +237,167 @@ private enum Catalog {
         "Per-task limit", "单任务限速")
     static let detailError: (String, String) = (
         "Error", "错误")
+
+    // v1.0.7: Settings window title (was reusing
+    // settingsAboutTitle, which is the app name, not the
+    // window title).
+    static let settingsWindowTitle: (String, String) = (
+        "SDM Settings", "SDM 设置")
+    static let settingsBehaviour: (String, String) = (
+        "Behaviour", "行为")
+    static let settingsBehaviourHint: (String, String) = (
+        "These take effect immediately.", "更改立即生效。")
+    static let settingsCategoryFolderHint: (String, String) = (
+        "Downloads land in ~/Downloads/<Category>/ when classification is on.",
+        "启用分类后，下载文件会落到 ~/Downloads/<类别>/ 目录。")
+    static let settingsCategoriesHint: (String, String) = (
+        "Add / remove extensions in v1.0.5+. The v1.0 list lives in the code; an in-app editor arrives later.",
+        "在 v1.0.5+ 中可增删扩展名。v1.0 列表在代码里，应用内编辑器后续版本加入。")
+
+    // v1.0.7: missing History labels
+    static let historyNoEntries: (String, String) = (
+        "No history yet", "暂无历史")
+    static let historyExplanation: (String, String) = (
+        "Completed and failed downloads show up here. Right-click for actions.",
+        "已完成和失败的下载会显示在这里。右键可执行操作。")
+    static let historyEntriesCount: (String, String) = (
+        "\(0) entries", "\(0) 条记录")
+    static let historyFilter: (String, String) = (
+        "Filter", "筛选")
+    static let historyClearAll: (String, String) = (
+        "Clear all", "清空")
+    static let historyColumnDate: (String, String) = (
+        "Date", "时间")
+    static let historyColumnFile: (String, String) = (
+        "File", "文件")
+    static let historyColumnSize: (String, String) = (
+        "Size", "大小")
+    static let historyColumnState: (String, String) = (
+        "State", "状态")
+    static let historyActionRedownload: (String, String) = (
+        "Re-download", "重新下载")
+    static let historyActionOpenSource: (String, String) = (
+        "Open source page", "打开来源页")
+    static let historyActionReveal: (String, String) = (
+        "Reveal in Finder", "在访达中显示")
+    static let historyActionRemove: (String, String) = (
+        "Remove", "移除")
+
+    // v1.0.7: Site rules
+    static let siteRulesTitle: (String, String) = (
+        "Site Rules", "站点规则")
+    static let siteRulesExplanation: (String, String) = (
+        "Match downloads by hostname (suffix match). Applied rules add Referer / User-Agent / Cookie / Basic Auth headers.",
+        "按主机名匹配下载（后缀匹配）。命中的规则会附加 Referer / User-Agent / Cookie / Basic Auth 头。")
+    static let siteRulesAddHint: (String, String) = (
+        "Add a rule", "添加规则")
+    static let siteRulesAdd: (String, String) = (
+        "Add", "添加")
+    static let siteRulesClearAll: (String, String) = (
+        "Clear All", "全部清除")
+    static let siteRulesExisting: (String, String) = (
+        "Existing rules", "已有规则")
+    static let siteRulesEmpty: (String, String) = (
+        "No rules yet.", "暂无规则。")
+    static let siteRulesHost: (String, String) = (
+        "Host (e.g. example.com)", "主机名（如 example.com）")
+    static let siteRulesReferer: (String, String) = (
+        "Referer", "Referer")
+    static let siteRulesUserAgent: (String, String) = (
+        "User-Agent", "User-Agent")
+    static let siteRulesCookie: (String, String) = (
+        "Cookie", "Cookie")
+    static let siteRulesBasicAuthUser: (String, String) = (
+        "Basic Auth user", "Basic Auth 用户名")
+    static let siteRulesBasicAuthPassword: (String, String) = (
+        "Basic Auth password", "Basic Auth 密码")
+    static let siteRulesEnabled: (String, String) = (
+        "Enabled", "已启用")
+    static let siteRulesRefererShort: (String, String) = (
+        "Referer: \(0)", "Referer：\(0)")
+    static let siteRulesUserAgentShort: (String, String) = (
+        "UA: \(0)", "UA：\(0)")
+    static let siteRulesCookieShort: (String, String) = (
+        "Cookie: \(0)", "Cookie：\(0)")
+    static let siteRulesBasicAuthShort: (String, String) = (
+        "Basic: \(0)", "Basic：\(0)")
+
+    // v1.0.7: Schedule
+    static let scheduleTitle: (String, String) = (
+        "Schedule", "计划")
+    static let scheduleAdd: (String, String) = (
+        "Schedule", "添加")
+    static let scheduleEmpty: (String, String) = (
+        "No scheduled downloads", "暂无计划任务")
+    static let scheduleHint: (String, String) = (
+        "Pick a URL and a future time above.", "在上方填入 URL 和未来时间。")
+    static let scheduleURL: (String, String) = (
+        "URL", "URL")
+    static let scheduleFireAt: (String, String) = (
+        "Fire at", "触发时间")
+    static let scheduleNote: (String, String) = (
+        "Note (optional)", "备注（可选）")
+    static let scheduleColumnFireAt: (String, String) = (
+        "Fire at", "触发时间")
+    static let scheduleColumnURL: (String, String) = (
+        "URL", "URL")
+    static let scheduleColumnNote: (String, String) = (
+        "Note", "备注")
+    static let scheduleRemove: (String, String) = (
+        "Remove", "移除")
+
+    // v1.0.7: Expired link banner
+    static let expiredRefresh: (String, String) = (
+        "Refresh link", "刷新链接")
+
+    // v1.0.7: List view short labels
+    static let listShowDetails: (String, String) = (
+        "Show details", "查看详情")
+    static let listEmDash: (String, String) = (
+        "—", "—")
+    static let listAppName: (String, String) = (
+        "Super Download Manager", "隙间下载")
+    static let listProgressPercent: (String, String) = (
+        "\(0)%", "\(0)%")
+    static let listKBPerSec: (String, String) = (
+        "\(0) KB/s", "\(0) KB/s")
+    static let listChunkPrefix: (String, String) = (
+        "chunk #\(0)", "分段 #\(0)")
+    static let listSha256: (String, String) = (
+        "SHA-256: \(0)", "SHA-256：\(0)")
+
+    // v1.0.7: Clipboard confirm sheet
+    static let clipboardSheetTitle: (String, String) = (
+        "Download from clipboard?", "从剪贴板下载？")
+    static let clipboardSheetSubtitle: (String, String) = (
+        "This URL looks like a downloadable file. Confirm or skip.",
+        "该链接像是可下载文件。确认或跳过。")
+    static let clipboardCategory: (String, String) = (
+        "Save to category", "保存到分类")
+    static let clipboardSavePath: (String, String) = (
+        "Save path", "保存路径")
+    static let clipboardChoose: (String, String) = (
+        "Choose…", "选择…")
+    static let clipboardMaxThreads: (String, String) = (
+        "Threads for this download", "本下载的线程数")
+    static let clipboardMaxThreadsHint: (String, String) = (
+        "1 – 128", "1 – 128")
+    static let clipboardDisableToggle: (String, String) = (
+        "Stop monitoring clipboard", "停止监听剪贴板")
+    static let clipboardSkip: (String, String) = (
+        "Skip", "跳过")
+    static let clipboardDownload: (String, String) = (
+        "Download", "下载")
+
+    // v1.0.7: Settings toggle labels (Behaviour section)
+    static let settingsToggleAutoCategorize: (String, String) = (
+        "Auto-categorize downloads", "下载自动分类")
+    static let settingsToggleClipboardCapture: (String, String) = (
+        "Clipboard URL auto-capture", "剪贴板链接自动识别")
+    static let settingsToggleSystemNotifications: (String, String) = (
+        "System notifications on complete", "完成时系统通知")
+    static let settingsCategorySection: (String, String) = (
+        "Categories", "分类")
 }
 
 /// Resolve the current locale tag to a `Strings` locale.
@@ -384,6 +545,133 @@ public struct Strings {
         case .zh: return "显示分段 (\(count))"
         }
     }
+
+    // v1.0.7: Settings window title
+    public var settingsWindowTitle:        String { pick(Catalog.settingsWindowTitle) }
+    public var settingsBehaviour:          String { pick(Catalog.settingsBehaviour) }
+    public var settingsBehaviourHint:      String { pick(Catalog.settingsBehaviourHint) }
+    public var settingsCategoryFolderHint: String { pick(Catalog.settingsCategoryFolderHint) }
+    public var settingsCategoriesHint:     String { pick(Catalog.settingsCategoriesHint) }
+
+    // v1.0.7: History
+    public var historyNoEntries:        String { pick(Catalog.historyNoEntries) }
+    public var historyExplanation:      String { pick(Catalog.historyExplanation) }
+    public var historyFilter:           String { pick(Catalog.historyFilter) }
+    public var historyClearAll:         String { pick(Catalog.historyClearAll) }
+    public var historyColumnDate:       String { pick(Catalog.historyColumnDate) }
+    public var historyColumnFile:       String { pick(Catalog.historyColumnFile) }
+    public var historyColumnSize:       String { pick(Catalog.historyColumnSize) }
+    public var historyColumnState:      String { pick(Catalog.historyColumnState) }
+    public var historyActionRedownload: String { pick(Catalog.historyActionRedownload) }
+    public var historyActionOpenSource: String { pick(Catalog.historyActionOpenSource) }
+    public var historyActionReveal:     String { pick(Catalog.historyActionReveal) }
+    public var historyActionRemove:     String { pick(Catalog.historyActionRemove) }
+    public func historyEntriesCount(_ n: Int) -> String {
+        switch pair {
+        case .en: return "\(n) entries"
+        case .zh: return "\(n) 条记录"
+        }
+    }
+
+    // v1.0.7: Site rules
+    public var siteRulesTitle:           String { pick(Catalog.siteRulesTitle) }
+    public var siteRulesExplanation:     String { pick(Catalog.siteRulesExplanation) }
+    public var siteRulesAddHint:         String { pick(Catalog.siteRulesAddHint) }
+    public var siteRulesAdd:             String { pick(Catalog.siteRulesAdd) }
+    public var siteRulesClearAll:        String { pick(Catalog.siteRulesClearAll) }
+    public var siteRulesExisting:        String { pick(Catalog.siteRulesExisting) }
+    public var siteRulesEmpty:           String { pick(Catalog.siteRulesEmpty) }
+    public var siteRulesHost:            String { pick(Catalog.siteRulesHost) }
+    public var siteRulesReferer:         String { pick(Catalog.siteRulesReferer) }
+    public var siteRulesUserAgent:       String { pick(Catalog.siteRulesUserAgent) }
+    public var siteRulesCookie:          String { pick(Catalog.siteRulesCookie) }
+    public var siteRulesBasicAuthUser:   String { pick(Catalog.siteRulesBasicAuthUser) }
+    public var siteRulesBasicAuthPassword: String { pick(Catalog.siteRulesBasicAuthPassword) }
+    public var siteRulesEnabled:         String { pick(Catalog.siteRulesEnabled) }
+    public func siteRulesRefererShort(_ v: String) -> String {
+        switch pair {
+        case .en: return "Referer: \(v)"
+        case .zh: return "Referer：\(v)"
+        }
+    }
+    public func siteRulesUserAgentShort(_ v: String) -> String {
+        switch pair {
+        case .en: return "UA: \(v.prefix(40))…"
+        case .zh: return "UA：\(v.prefix(40))…"
+        }
+    }
+    public func siteRulesCookieShort(_ v: String) -> String {
+        switch pair {
+        case .en: return "Cookie: \(v.prefix(40))…"
+        case .zh: return "Cookie：\(v.prefix(40))…"
+        }
+    }
+    public func siteRulesBasicAuthShort(_ v: String) -> String {
+        switch pair {
+        case .en: return "Basic: \(v)"
+        case .zh: return "Basic：\(v)"
+        }
+    }
+
+    // v1.0.7: Schedule
+    public var scheduleTitle:    String { pick(Catalog.scheduleTitle) }
+    public var scheduleAdd:      String { pick(Catalog.scheduleAdd) }
+    public var scheduleEmpty:    String { pick(Catalog.scheduleEmpty) }
+    public var scheduleHint:     String { pick(Catalog.scheduleHint) }
+    public var scheduleURL:      String { pick(Catalog.scheduleURL) }
+    public var scheduleFireAt:   String { pick(Catalog.scheduleFireAt) }
+    public var scheduleNote:     String { pick(Catalog.scheduleNote) }
+    public var scheduleColumnFireAt: String { pick(Catalog.scheduleColumnFireAt) }
+    public var scheduleColumnURL:    String { pick(Catalog.scheduleColumnURL) }
+    public var scheduleColumnNote:  String { pick(Catalog.scheduleColumnNote) }
+    public var scheduleRemove:   String { pick(Catalog.scheduleRemove) }
+
+    // v1.0.7: Expired link banner
+    public var expiredRefresh:   String { pick(Catalog.expiredRefresh) }
+
+    // v1.0.7: List view short labels
+    public var listShowDetails:  String { pick(Catalog.listShowDetails) }
+    public var listEmDash:       String { pick(Catalog.listEmDash) }
+    public var listAppName:      String { pick(Catalog.listAppName) }
+    public func listProgressPercent(_ n: Int) -> String {
+        "\(n)%"
+    }
+    public func listKBPerSec(_ n: Int) -> String {
+        switch pair {
+        case .en: return "\(n) KB/s"
+        case .zh: return "\(n) KB/s"
+        }
+    }
+    public func listChunkPrefix(_ n: Int) -> String {
+        switch pair {
+        case .en: return "chunk #\(n)"
+        case .zh: return "分段 #\(n)"
+        }
+    }
+    public func listSha256(_ prefix: String) -> String {
+        switch pair {
+        case .en: return "SHA-256: \(prefix)…"
+        case .zh: return "SHA-256：\(prefix)…"
+        }
+    }
+
+    // v1.0.7: Clipboard confirm sheet
+    public var clipboardSheetTitle:        String { pick(Catalog.clipboardSheetTitle) }
+    public var clipboardSheetSubtitle:     String { pick(Catalog.clipboardSheetSubtitle) }
+    public var clipboardCategory:          String { pick(Catalog.clipboardCategory) }
+    public var clipboardSavePath:          String { pick(Catalog.clipboardSavePath) }
+    public var clipboardChoose:            String { pick(Catalog.clipboardChoose) }
+    public var clipboardMaxThreads:        String { pick(Catalog.clipboardMaxThreads) }
+    public var clipboardMaxThreadsHint:    String { pick(Catalog.clipboardMaxThreadsHint) }
+    public var clipboardDisableToggle:     String { pick(Catalog.clipboardDisableToggle) }
+    public var clipboardSkip:              String { pick(Catalog.clipboardSkip) }
+    public var clipboardDownload:          String { pick(Catalog.clipboardDownload) }
+
+    // v1.0.7: Settings toggle labels
+    public var settingsToggleAutoCategorize:    String { pick(Catalog.settingsToggleAutoCategorize) }
+    public var settingsToggleClipboardCapture: String { pick(Catalog.settingsToggleClipboardCapture) }
+    public var settingsToggleSystemNotifications: String { pick(Catalog.settingsToggleSystemNotifications) }
+    public var settingsCategorySection:         String { pick(Catalog.settingsCategorySection) }
 
     // MARK: - Format helpers
     public func settingsDefaultThreadsValue(_ n: Int) -> String {

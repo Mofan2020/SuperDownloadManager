@@ -49,7 +49,7 @@ struct TaskDetailView: View {
                             ProgressView().controlSize(.small)
                         }
                         if let h = checksumResult {
-                            Text("SHA-256: \(h.prefix(16))…")
+                            Text(S.listSha256(String(h.prefix(16))))
                                 .font(.caption.monospaced())
                                 .textSelection(.enabled)
                         }
@@ -154,7 +154,7 @@ struct TaskDetailView: View {
                         Image(systemName: chunkIcon(c.state))
                             .foregroundStyle(chunkColor(c.state))
                             .frame(width: 16)
-                        Text("chunk #\(c.id)")
+                        Text(S.listChunkPrefix(c.id))
                             .font(.caption.monospaced())
                             .frame(width: 70, alignment: .leading)
                         Text(byteRange(c))
