@@ -90,9 +90,6 @@ jobs:
           xcodebuild test -project SuperDownloadManager.xcodeproj \
                           -scheme SuperDownloadManager \
                           -destination 'platform=macOS' \
-                          -test-timeouts-enabled YES \
-                          -default-test-execution-time-allowance 60s \
-                          -default-test-time-compatibility-mode NO \
                           -derivedDataPath build 2>&1 \
             | tee test.log | grep -E "Test Case|Test Suite|Executed [0-9]+ tests"
           grep -q "Test Suite 'All tests' passed" test.log
