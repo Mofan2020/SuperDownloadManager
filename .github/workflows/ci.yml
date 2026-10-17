@@ -86,11 +86,10 @@ jobs:
 
       - name: Run tests
         run: |
-          # Don't use `set -e`: we want to capture xcodebuild's
-          # non-zero exit (test failures are real failures) and
-          # still emit a useful tail for debugging.
+          # SDMSelfTest is the dedicated test scheme — see release.yml
+          # for why we don't run tests via the main scheme.
           xcodebuild test -project SuperDownloadManager.xcodeproj \
-                          -scheme SuperDownloadManager \
+                          -scheme SDMSelfTest \
                           -destination 'platform=macOS' \
                           -derivedDataPath build \
             > test.log 2>&1

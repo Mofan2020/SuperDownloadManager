@@ -158,15 +158,9 @@ targets:
 
 schemes:
   SuperDownloadManager:
-    # Tests target is host-injected via TEST_HOST (no separate build).
-    # Xcode 27 + XcodeGen 2.46 duplicate the .swiftmodule when both
-    # targets are built into the same module dir; the test-only scheme
-    # is the proven shape per ios-personal-developer-program reference.
     build:
       targets:
         SuperDownloadManager: all
-    test:
-      gatherCoverageData: true
     run:
       config: Debug
     profile:

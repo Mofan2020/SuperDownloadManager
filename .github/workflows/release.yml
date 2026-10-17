@@ -62,14 +62,14 @@ jobs:
 
       - name: Run tests (Release)
         run: |
-          # Don't use `set -e`: we want to capture xcodebuild's
-          # exit code while still emitting useful diagnostics.
-          # Note: DownloadFlowEndToEndTests already self-skips on
-          # CI via the XCTSkipIf guard, so no `-skip-testing` is
-          # needed (and `-skip-testing` syntax doesn't work on
-          # Xcode 26.6's xcodebuild at all — it returns 66).
+          # SDMSelfTest is the dedicated test scheme; running tests
+          # through the main `SuperDownloadManager` scheme triggers
+          # the duplicate-.swiftmodule bug under Xcode 27 + XcodeGen
+          # 2.46 (two targets emitting the same module path). The
+          # SDMSelfTest scheme has only the Tests target in its
+          # build list, sidestepping that conflict.
           xcodebuild test -project SuperDownloadManager.xcodeproj \
-                          -scheme SuperDownloadManager \
+                          -scheme SDMSelfTest \
                           -destination 'platform=macOS' \
                           -derivedDataPath build_release \
             > test.log 2>&1
