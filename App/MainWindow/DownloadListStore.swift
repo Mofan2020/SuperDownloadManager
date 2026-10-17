@@ -76,11 +76,12 @@ public final class DownloadListStore: ObservableObject {
             object: UserDefaults.standard,
             queue: .main
         ) { [weak self] _ in
-            guard let self else { return }
-            // The notification fires for any default change; we
-            // only care about our key. Re-read the value either
-            // way — the cost is one UserDefaults hit.
-            self.applyPersistedBandwidth()
+            // didChangeNotification fires on the posting queue.
+            // We need to hop to MainActor to touch applyPersistedBandwidth
+            // (which is @MainActor on a class annotated with it).
+            Task { @MainActor [weak self] in
+                self?.applyPersistedBandwidth()
+            }
         }
     }
     deinit {
