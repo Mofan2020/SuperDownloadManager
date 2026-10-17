@@ -1,23 +1,24 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 import SuperDownloadManagerCore
 
-/// DownloadListView — main window's primary pane (v1.0.3 rewrite).
+/// DownloadListView — main window's primary pane (v1.0.4 rewrite).
 ///
-/// Adds a top toolbar with the basic IDM-style controls:
-///  - **+ Add URL…** opens a sheet for entering a URL.
-///  - **Pause All** / **Resume All** bulk operations.
-///  - **Clear Completed** removes finished rows.
-///
-/// Each row has its own per-state controls: Pause/Resume toggle,
-/// Cancel while downloading, Open / Reveal in Finder on
-/// completion, Retry on failure, Remove on terminal states.
+/// v1.0.4: 7-column `Table` with sortable headers, multi-select,
+/// drag-URL-into-window, and the per-row context menu that P1-4
+/// asked for. Clipboard auto-capture lives in `DownloadListStore`;
+/// per-row action helpers and helpers are kept local.
 struct DownloadListView: View {
     @ObservedObject var store: DownloadListStore
     @State private var showAddSheet = false
     @State private var addURL: String = ""
     @State private var addFilename: String = ""
     @State private var addError: String? = nil
+    @State private var selection: Set<UUID> = []
+    @State private var sortOrder: [KeyPathComparator<TaskSummary>] = [
+        .init(\.state, order: .forward)
+    ]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,15 +31,186 @@ struct DownloadListView: View {
                 EmptyStateView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List {
-                    ForEach(store.tasks) { task in
-                        TaskRow(task: task, store: store)
-                    }
-                }
-                .listStyle(.inset)
+                table
             }
         }
+        .onDrop(of: [.url, .text, .fileURL],
+                isTargeted: nil) { providers in
+            handleDrop(providers: providers)
+        }
         .sheet(isPresented: $showAddSheet) { addSheet }
+    }
+
+    // MARK: - Table
+
+    private var table: some View {
+        Table(of: TaskSummary.self,
+              selection: $selection,
+              sortOrder: $sortOrder) {
+            TableColumn("") { task in
+                Image(systemName: iconName(for: task.state))
+                    .foregroundStyle(stateColor(task.state))
+                    .help(task.state)
+            }
+            .width(20)
+
+            TableColumn("File", value: \.filename) { task in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(task.filename)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if let host = task.urlHost {
+                        Text(host)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .width(min: 160, ideal: 280)
+
+            TableColumn("Size", value: \.totalBytesOrZero) { task in
+                Text(byteCount(task.totalBytes))
+                    .monospacedDigit()
+            }
+            .width(70)
+
+            TableColumn("Progress") { task in
+                if task.totalBytes ?? 0 > 0 {
+                    HStack(spacing: 6) {
+                        ProgressView(value: task.fractionDone)
+                            .frame(maxWidth: 100)
+                        Text("\(Int(task.fractionDone * 100))%")
+                            .monospacedDigit()
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("—").foregroundStyle(.secondary)
+                }
+            }
+            .width(150)
+
+            TableColumn("Speed", value: \.speedBytesPerSec) { task in
+                Text(task.speedDescription)
+                    .monospacedDigit()
+                    .foregroundStyle(task.state == "downloading"
+                                     ? .primary : .secondary)
+            }
+            .width(80)
+
+            TableColumn("ETA") { task in
+                if let eta = task.etaDescription {
+                    Text(eta).monospacedDigit().foregroundStyle(.secondary)
+                } else {
+                    Text("—").foregroundStyle(.tertiary)
+                }
+            }
+            .width(60)
+
+            TableColumn("Status", value: \.state) { task in
+                HStack(spacing: 4) {
+                    if let cat = task.category {
+                        Image(systemName: cat.iconName)
+                            .font(.caption)
+                            .foregroundStyle(cat.tint)
+                    }
+                    Text(task.state.capitalized)
+                        .font(.caption)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(stateColor(task.state).opacity(0.18),
+                                    in: Capsule())
+                        .foregroundStyle(stateColor(task.state))
+                }
+            }
+            .width(100)
+
+            TableColumn("") { task in
+                rowActions(task)
+            }
+            .width(80)
+        } rows: {
+            ForEach(sortedTasks) { task in
+                TableRow(task)
+                    .contextMenu { rowContextMenu(task) }
+            }
+        }
+        .tableStyle(.inset(alternatesRowBackgrounds: true))
+    }
+
+    private var sortedTasks: [TaskSummary] {
+        store.tasks.sorted(using: sortOrder)
+    }
+
+    // MARK: - Per-row inline actions
+
+    @ViewBuilder
+    private func rowActions(_ task: TaskSummary) -> some View {
+        HStack(spacing: 4) {
+            switch task.state {
+            case "downloading", "queued":
+                Button { store.pause(id: task.id) } label: {
+                    Image(systemName: "pause.fill")
+                }.buttonStyle(.borderless).help("Pause")
+                Button { store.cancel(id: task.id) } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }.buttonStyle(.borderless).help("Cancel")
+            case "paused":
+                Button { store.resume(id: task.id) } label: {
+                    Image(systemName: "play.fill")
+                }.buttonStyle(.borderless).help("Resume")
+                Button { store.cancel(id: task.id) } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }.buttonStyle(.borderless).help("Cancel")
+            case "failed", "cancelled":
+                Button { store.resume(id: task.id) } label: {
+                    Image(systemName: "arrow.clockwise")
+                }.buttonStyle(.borderless).help("Retry")
+            case "completed":
+                Button { store.openFile(id: task.id) } label: {
+                    Image(systemName: "arrow.up.forward.app")
+                }.buttonStyle(.borderless).help("Open")
+                Button { store.revealInFinder(id: task.id) } label: {
+                    Image(systemName: "folder")
+                }.buttonStyle(.borderless).help("Reveal in Finder")
+            default:
+                EmptyView()
+            }
+        }
+        .controlSize(.small)
+    }
+
+    // MARK: - Right-click context menu (P1-4)
+
+    @ViewBuilder
+    private func rowContextMenu(_ task: TaskSummary) -> some View {
+        if task.state == "completed" {
+            Button("Open") { store.openFile(id: task.id) }
+            Button("Reveal in Finder") { store.revealInFinder(id: task.id) }
+        }
+        if task.state == "downloading" || task.state == "queued" {
+            Button("Pause") { store.pause(id: task.id) }
+            Button("Cancel") { store.cancel(id: task.id) }
+        }
+        if task.state == "paused" || task.state == "failed" || task.state == "cancelled" {
+            Button("Resume") { store.resume(id: task.id) }
+        }
+        Divider()
+        Button("Copy URL") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(task.urlString, forType: .string)
+        }
+        if let host = task.urlHost, let url = URL(string: "https://\(host)") {
+            Button("Open Source Page") { NSWorkspace.shared.open(url) }
+        }
+        Divider()
+        Button("Limit speed…") { store.setSpeedLimit(id: task.id) }
+        if task.state == "completed" {
+            Button("Compute checksum") { store.computeChecksum(id: task.id) }
+        }
+        Divider()
+        Button("Remove from list") { store.remove(id: task.id) }
+        Button("Delete file") { store.deleteFile(id: task.id) }
     }
 
     // MARK: - Toolbar
@@ -131,10 +303,8 @@ struct DownloadListView: View {
 
             HStack {
                 Spacer()
-                Button("Cancel") {
-                    showAddSheet = false
-                }
-                .keyboardShortcut(.cancelAction)
+                Button("Cancel") { showAddSheet = false }
+                    .keyboardShortcut(.cancelAction)
                 Button("Add") { commitAdd() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(addURL.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -159,170 +329,32 @@ struct DownloadListView: View {
         addError = nil
         showAddSheet = false
     }
-}
 
-private struct TaskRow: View {
-    let task: TaskSummary
-    @ObservedObject var store: DownloadListStore
+    // MARK: - Drag & drop (P0-2)
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 10) {
-                Image(systemName: iconName(for: task.state))
-                    .foregroundStyle(.tint)
-                    .frame(width: 22)
-                Text(task.filename)
-                    .font(.body.weight(.medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer()
-                rowActions
-            }
-            ProgressView(value: task.fractionDone)
-                .progressViewStyle(.linear)
-            HStack(spacing: 8) {
-                Text(byteCount(task.bytesDone) +
-                     (task.totalBytes.map { " / \(byteCount($0))" } ?? ""))
-                if task.state == "downloading" {
-                    Text("·")
-                    Text(task.speedDescription)
-                    if let eta = task.etaDescription {
-                        Text("·")
-                        Text("ETA \(eta)")
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        var accepted = false
+        for provider in providers {
+            if provider.canLoadObject(ofClass: URL.self) {
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    if let url = url, let scheme = url.scheme?.lowercased(),
+                       scheme == "http" || scheme == "https" {
+                        Task { @MainActor in store.add(url: url) }
+                        accepted = true
                     }
-                } else if let err = task.errorMessage, !err.isEmpty {
-                    Text("·")
-                    Text(err)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .foregroundStyle(.red)
                 }
-                Spacer()
-                Text(localizedState(task.state))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(stateBadgeColor(task.state).opacity(0.18),
-                                in: Capsule())
-                    .foregroundStyle(stateBadgeColor(task.state))
+            } else if provider.canLoadObject(ofClass: String.self) {
+                _ = provider.loadObject(ofClass: String.self) { text, _ in
+                    if let s = text, let url = URL(string: s),
+                       let scheme = url.scheme?.lowercased(),
+                       scheme == "http" || scheme == "https" {
+                        Task { @MainActor in store.add(url: url) }
+                        accepted = true
+                    }
+                }
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 6)
-        .contextMenu {
-            rowContextMenu
-        }
-    }
-
-    // MARK: - Per-row actions
-
-    @ViewBuilder
-    private var rowActions: some View {
-        switch task.state {
-        case "downloading", "queued":
-            Button {
-                store.pause(id: task.id)
-            } label: {
-                Image(systemName: "pause.fill")
-            }
-            .buttonStyle(.borderless)
-            .help("Pause")
-            Button {
-                store.cancel(id: task.id)
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-            }
-            .buttonStyle(.borderless)
-            .help("Cancel")
-        case "paused":
-            Button {
-                store.resume(id: task.id)
-            } label: {
-                Image(systemName: "play.fill")
-            }
-            .buttonStyle(.borderless)
-            .help("Resume (v1.0.3 restarts from byte 0)")
-            Button {
-                store.cancel(id: task.id)
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-            }
-            .buttonStyle(.borderless)
-            .help("Cancel")
-        case "failed":
-            Button {
-                store.resume(id: task.id)
-            } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-            .buttonStyle(.borderless)
-            .help("Retry")
-            Button {
-                store.remove(id: task.id)
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.borderless)
-            .help("Remove from list")
-        case "completed":
-            Button {
-                store.openFile(id: task.id)
-            } label: {
-                Image(systemName: "arrow.up.forward.app")
-            }
-            .buttonStyle(.borderless)
-            .help("Open")
-            Button {
-                store.revealInFinder(id: task.id)
-            } label: {
-                Image(systemName: "folder")
-            }
-            .buttonStyle(.borderless)
-            .help("Reveal in Finder")
-            Button {
-                store.remove(id: task.id)
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.borderless)
-            .help("Remove from list")
-        case "cancelled":
-            Button {
-                store.resume(id: task.id)
-            } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-            .buttonStyle(.borderless)
-            .help("Re-add")
-            Button {
-                store.remove(id: task.id)
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.borderless)
-            .help("Remove from list")
-        default:
-            EmptyView()
-        }
-    }
-
-    @ViewBuilder
-    private var rowContextMenu: some View {
-        if task.state == "completed" {
-            Button("Open") { store.openFile(id: task.id) }
-            Button("Reveal in Finder") { store.revealInFinder(id: task.id) }
-        }
-        if task.state == "downloading" || task.state == "queued" {
-            Button("Pause") { store.pause(id: task.id) }
-            Button("Cancel") { store.cancel(id: task.id) }
-        }
-        if task.state == "paused" || task.state == "failed" || task.state == "cancelled" {
-            Button("Retry") { store.resume(id: task.id) }
-        }
-        if task.isTerminal || task.state == "paused" {
-            Divider()
-            Button("Remove from list") { store.remove(id: task.id) }
-        }
+        return accepted
     }
 
     // MARK: - Helpers
@@ -340,20 +372,7 @@ private struct TaskRow: View {
         }
     }
 
-    private func localizedState(_ state: String) -> LocalizedStringKey {
-        switch state {
-        case "downloading":       return L10n.stateDownloading
-        case "completed":         return L10n.stateCompleted
-        case "awaiting_new_link": return L10n.stateAwaitingLink
-        case "failed":            return L10n.stateFailed
-        case "paused":            return "Paused"
-        case "cancelled":         return "Cancelled"
-        case "queued":            return "Queued"
-        default:                  return L10n.stateUnknown
-        }
-    }
-
-    private func stateBadgeColor(_ state: String) -> Color {
+    private func stateColor(_ state: String) -> Color {
         switch state {
         case "downloading", "queued": return .accentColor
         case "completed": return .green
@@ -364,14 +383,13 @@ private struct TaskRow: View {
         }
     }
 
-    private func byteCount(_ bytes: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    private func byteCount(_ bytes: Int64?) -> String {
+        guard let bytes, bytes > 0 else { return "—" }
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 }
 
-/// Empty-state placeholder. Shown when there are no rows in the
-/// list — gives the user a clear "click + to add a download"
-/// affordance instead of staring at a blank window.
+/// Empty-state placeholder.
 struct EmptyStateView: View {
     var body: some View {
         VStack(spacing: 14) {
@@ -382,11 +400,11 @@ struct EmptyStateView: View {
                 .font(.title2.weight(.semibold))
             Text("No downloads yet")
                 .foregroundStyle(.secondary)
-            Text("Click + or press ⌘N to add a URL. Drop a download in Firefox/Safari to send it to SDM. From a terminal: `sdmdm add <url>`.")
+            Text("Click + or press ⌘N to add a URL. Drop a download in Firefox/Safari to send it to SDM. From a terminal: `sdmdm add <url>`. Drag a URL onto this window.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 380)
+                .frame(maxWidth: 420)
             Text("Settings → Language to switch to 中文.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
