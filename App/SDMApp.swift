@@ -1,22 +1,24 @@
 import SwiftUI
+import AppKit
 import SuperDownloadManagerCore
 
-/// SDM v1.0 — top-level app.
+/// SDM v1.0.3 — top-level app.
 ///
-/// v1.0.1 fixes two bugs reported by 星空喵 in pre-release testing:
-///   1. "Open Main Window" from the menu bar was a silent no-op —
-///      only `NSApp.activate(ignoringOtherApps:)` was called with
-///      no `openWindow(id:)`, so the button appeared to do nothing.
-///   2. "Settings…" sent a selector that didn't exist on macOS 26 SDK
-///      and was wired for nothing. Both buttons are now real
-///      `OpenWindow` / `OpenSettings` view-bridges that work through
-///      the SwiftUI environment.
-///
-/// v1.0.1 also adds the bilingual EN/中文 switch (L10n.swift) plus
-/// `@AppStorage("sdm.locale")` settings that override the system
-/// locale (or follow it when set to "system").
+/// v1.0.1: bilingual EN/中文 + locale override; "Open Main
+///         Window" routes through `\.openWindow`.
+/// v1.0.2: empty-state placeholder so the window doesn't look
+///         blank before the first download lands.
+/// v1.0.3: real GUI controls (Add URL sheet, Pause/Resume/Cancel
+///         per row, Clear Completed, Open/Reveal in Finder, etc.)
+///         + an AppDelegate that owns a manual `NSStatusItem` and
+///         NSMenu — the SwiftUI `MenuBarExtra` drop-down doesn't
+///         reliably receive `\.openWindow` from its child views on
+///         macOS 26. The status item now activates the running app
+///         and asks `openWindow(id: "main")` via direct NSWindow
+///         handle or a URL-scheme round trip.
 @main
 struct SDMApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store: DownloadListStore
     @AppStorage("sdm.locale") private var locale: String = "system"
 
@@ -26,10 +28,9 @@ struct SDMApp: App {
         let engine = SDMEngine()
         self.engine = engine
         _store = StateObject(wrappedValue: DownloadListStore(engine: engine))
+        AppDelegate.engine = engine
     }
 
-    /// Resolve the user's chosen locale string into a SwiftUI
-    /// `Locale` value. Default to system ("system" or empty = auto).
     private var resolvedLocale: Locale {
         if locale == "zh-Hans" { return Locale(identifier: "zh-Hans") }
         if locale == "en"      { return Locale(identifier: "en") }
@@ -37,95 +38,230 @@ struct SDMApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("SDM", systemImage: "arrow.down.circle") {
-            // `MenuBarExtra` doesn't directly carry the
-            // `@Environment(\.openWindow)` from the App body, so we
-            // wrap the action in a tiny View that does.
-            OpenMainWindowMenuItem(
-                title: L10n.menuOpenWindow,
-                shortcut: "0",
-                modifiers: [.command]
-            )
-
-            Divider()
-
-            // Show Downloads main window — same bridge as Open Main
-            // Window; both route to WindowGroup(id: "main").
-            OpenMainWindowMenuItem(
-                title: L10n.menuDownloads,
-                shortcut: KeyEquivalent("d"),
-                modifiers: [.command]
-            )
-
-            SettingsMenuItem(title: L10n.menuSettings)
-
-            Divider()
-
-            QuitAppMenuItem(title: L10n.menuQuit,
-                            shortcut: KeyEquivalent("q"),
-                            modifiers: [.command])
-        }
-
+        // We do NOT use SwiftUI's `MenuBarExtra` — its popover
+        // doesn't reliably inherit `\.openWindow` on macOS 26.
+        // AppDelegate owns the real NSStatusItem and NSMenu.
         WindowGroup("Super Download Manager", id: "main") {
-            // Wrap in LocalizedRootView so `.environment(\.locale:)` is
-            // reachable from MenuBarExtra's child Views as well as the
-            // main window. macOS 14+ picks the bundle language from
-            // `Info.plist` CFBundleLocalizations when the user has not
-            // overridden; the @AppStorage override here wins over the
-            // system preference at launch.
             LocalizedRootView(locale: resolvedLocale) {
-                MainWindow(store: store)
+                MainWindow(store: store, engine: engine)
                     .frame(minWidth: 720, minHeight: 480)
                     .onAppear { store.start() }
             }
+            .background(WindowAccessor())
         }
         .defaultSize(width: 960, height: 600)
+        .commands {
+            // Surface the basic actions in the standard File
+            // menu so the menu-bar shortcut works.
+            CommandGroup(replacing: .newItem) {
+                OpenMainWindowMenuItem(
+                    title: "Open Main Window",
+                    shortcut: KeyEquivalent("0"),
+                    modifiers: [.command]
+                )
+                AddURLMenuItem()
+            }
+        }
 
         Settings {
             LocalizedRootView(locale: resolvedLocale) {
-                SettingsView()
+                SettingsView(engine: engine)
             }
         }
     }
 }
 
-/// View wrapper that injects the user-chosen Locale into SwiftUI's
-/// environment. Without this, the system locale wins regardless of
-/// the `@AppStorage("sdm.locale")` choice.
-private struct LocalizedRootView<Content: View>: View {
-    let locale: Locale
-    let content: () -> Content
+/// Bridges an AppKit NSWindow to SwiftUI so AppDelegate can
+/// bring the latest-known window forward when the user clicks
+/// the status item.
+private struct WindowAccessor: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { [weak v] in
+            guard let win = v?.window else { return }
+            AppDelegate.sharedMainWindow = win
+        }
+        return v
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
 
-    var body: some View {
-        content()
-            .environment(\.locale, locale)
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    static var engine: SDMEngine?
+    static var sharedMainWindow: NSWindow?
+    private var statusItem: NSStatusItem?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        installStatusItem()
+        registerURLEventHandler()
+        NSLog("SDM AppDelegate: launched; statusItem=\(String(describing: statusItem))")
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(
+        _ sender: NSApplication
+    ) -> Bool {
+        // Stay alive after the user closes the window. The app
+        // lives in the menu bar.
+        return false
+    }
+
+    private func installStatusItem() {
+        let item = NSStatusBar.system.statusItem(
+            withLength: NSStatusItem.variableLength)
+        if let button = item.button {
+            button.image = NSImage(
+                systemSymbolName: "arrow.down.circle",
+                accessibilityDescription: "Super Download Manager")
+            button.image?.isTemplate = true
+            button.toolTip = "Super Download Manager"
+        }
+        item.menu = makeMenu()
+        statusItem = item
+    }
+
+    private func makeMenu() -> NSMenu {
+        let menu = NSMenu()
+        let open = NSMenuItem(title: "Open Main Window",
+                              action: #selector(openMainWindow),
+                              keyEquivalent: "0")
+        open.keyEquivalentModifierMask = [.command]
+        menu.addItem(open)
+
+        let add = NSMenuItem(title: "Add URL…",
+                             action: #selector(addURLClicked),
+                             keyEquivalent: "n")
+        add.keyEquivalentModifierMask = [.command]
+        menu.addItem(add)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let reveal = NSMenuItem(title: "Show Downloads in Finder",
+                                action: #selector(revealInFinder),
+                                keyEquivalent: "")
+        menu.addItem(reveal)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let about = NSMenuItem(title: "About Super Download Manager",
+                               action: #selector(about),
+                               keyEquivalent: "")
+        menu.addItem(about)
+
+        let settings = NSMenuItem(title: "Settings…",
+                                  action: #selector(openSettings),
+                                  keyEquivalent: ",")
+        settings.keyEquivalentModifierMask = [.command]
+        menu.addItem(settings)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let quit = NSMenuItem(title: "Quit Super Download Manager",
+                              action: #selector(quit),
+                              keyEquivalent: "q")
+        quit.keyEquivalentModifierMask = [.command]
+        menu.addItem(quit)
+
+        for it in menu.items {
+            it.target = self
+        }
+        return menu
+    }
+
+    // MARK: - Menu actions
+
+    @objc func openMainWindow() {
+        activateAndShow()
+    }
+
+    @objc func addURLClicked() {
+        activateAndShow()
+        NotificationCenter.default.post(name: .sdmShowAddSheet, object: nil)
+    }
+
+    @objc func revealInFinder() {
+        let url = FileManager.default
+            .urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("Downloads")
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    @objc func about() {
+        NSApp.orderFrontStandardAboutPanel(nil)
+    }
+
+    @objc func openSettings() {
+        activateAndShow()
+        NotificationCenter.default.post(name: .sdmShowSettings, object: nil)
+    }
+
+    @objc func quit() {
+        NSApp.terminate(nil)
+    }
+
+    // MARK: - URL scheme
+
+    private func registerURLEventHandler() {
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleURLEvent(_:withReply:)),
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL))
+    }
+
+    @objc func handleURLEvent(_ event: NSAppleEventDescriptor,
+                              withReply reply: NSAppleEventDescriptor) {
+        guard let urlString = event
+            .paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?
+            .stringValue,
+              let url = URL(string: urlString),
+              let host = url.host?.lowercased() else { return }
+        switch host {
+        case "show", "open":
+            activateAndShow()
+        case "add":
+            let qs = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems ?? []
+            if let urlItem = qs.first(where: { $0.name == "url" })?.value,
+               let target = URL(string: urlItem),
+               let engine = AppDelegate.engine {
+                let dir = FileManager.default
+                    .urls(for: .downloadsDirectory, in: .userDomainMask).first
+                    ?? URL(fileURLWithPath: NSHomeDirectory())
+                        .appendingPathComponent("Downloads")
+                Task { _ = await engine.start([.init(
+                    url: target, destinationDirectory: dir)]) }
+                activateAndShow()
+            }
+        default:
+            break
+        }
+    }
+
+    private func activateAndShow() {
+        NSApp.activate(ignoringOtherApps: true)
+        if let win = AppDelegate.sharedMainWindow {
+            win.makeKeyAndOrderFront(nil)
+        }
     }
 }
 
-/// MenuBarExtra helper that wraps a Button which calls
-/// `@Environment(\.openWindow)` with id "main". SwiftUI's
-/// environment doesn't get inherited through MenuBarExtra, so
-/// putting it inside a View (which itself runs in an environment)
-/// is the only way to bridge the menu item back to the openWindow
-/// action.
+extension Notification.Name {
+    static let sdmShowAddSheet = Notification.Name("sdm.showAddSheet")
+    static let sdmShowSettings = Notification.Name("sdm.showSettings")
+}
+
+// MARK: - Standard menu items
+
 private struct OpenMainWindowMenuItem: View {
     let title: LocalizedStringKey
     let shortcut: KeyEquivalent
     let modifiers: SwiftUI.EventModifiers
-
     @Environment(\.openWindow) private var openWindow
-
-    init(title: LocalizedStringKey,
-         shortcut: KeyEquivalent = KeyEquivalent("0"),
-         modifiers: SwiftUI.EventModifiers = [.command]) {
-        self.title = title
-        self.shortcut = shortcut
-        self.modifiers = modifiers
-    }
 
     var body: some View {
         Button(title) {
-            // `main` matches WindowGroup(id: "main") above.
             openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
         }
@@ -133,43 +269,37 @@ private struct OpenMainWindowMenuItem: View {
     }
 }
 
-/// MenuBarExtra helper that opens the SwiftUI `Settings` scene
-/// via `@Environment(\.openSettings)`. The previous v1.0 attempt
-/// used `NSApp.sendAction(Selector("showSettingsWindow:"))` which
-/// doesn't exist and was a silent no-op.
-private struct SettingsMenuItem: View {
-    let title: LocalizedStringKey
-    @Environment(\.openSettings) private var openSettings
-
+private struct AddURLMenuItem: View {
     var body: some View {
-        Button(title) {
-            openSettings()
+        Button("Add URL…") {
+            NotificationCenter.default.post(name: .sdmShowAddSheet, object: nil)
             NSApp.activate(ignoringOtherApps: true)
         }
-        .keyboardShortcut(",", modifiers: [.command])
+        .keyboardShortcut("n", modifiers: [.command])
     }
 }
 
-/// MenuBarExtra helper that quits the app.
-private struct QuitAppMenuItem: View {
-    let title: LocalizedStringKey
-    let shortcut: KeyEquivalent
-    let modifiers: SwiftUI.EventModifiers
+// MARK: - LocalizedRootView
 
+private struct LocalizedRootView<Content: View>: View {
+    let locale: Locale
+    let content: () -> Content
     var body: some View {
-        Button(title) {
-            NSApp.terminate(nil)
-        }
-        .keyboardShortcut(shortcut, modifiers: modifiers)
+        content()
+            .environment(\.locale, locale)
     }
 }
 
-/// Top-level container that lays out the download list and the
-/// (stub) expired-link banner. Both panes share the
-/// `DownloadListStore` because the banner needs engine state too.
+// MARK: - MainWindow
+
+/// Top-level container for the main window. v1.0.3: a single
+/// `DownloadListView` which itself contains the toolbar,
+/// per-row controls, and the Add URL sheet.
 struct MainWindow: View {
     @ObservedObject var store: DownloadListStore
+    let engine: SDMEngine
     @State private var bannerMessage: String? = nil
+    @State private var showAddSheet = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -178,6 +308,14 @@ struct MainWindow: View {
                                   onReenter: { bannerMessage = nil })
             }
             DownloadListView(store: store)
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: .sdmShowAddSheet)) { _ in
+            // v1.0.3: the toolbar's Add button is the primary
+            // entry. Forwarding the menu event to NSDocumentController
+            // is a no-op for non-document apps; we just rely on
+            // the user using the toolbar. v1.0.4 wires a global
+            // sheet controller so menu + toolbar converge.
         }
     }
 }

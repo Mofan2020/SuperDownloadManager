@@ -13,11 +13,16 @@ import SuperDownloadManagerCore
 /// English / 简体中文. The choice is persisted in `@AppStorage`
 /// under `sdm.locale`; the App re-reads it on next launch.
 struct SettingsView: View {
+    let engine: SDMEngine?
     @AppStorage("sdm.threads.default") private var defaultThreads: Int = 32
     @AppStorage("sdm.bandwidth.bytesPerSec") private var bandwidth: Int = 0
     @AppStorage("sdm.openAtLogin") private var openAtLogin: Bool = false
     @AppStorage("sdm.updateChannel") private var updateChannel: String = "stable"
     @AppStorage("sdm.locale") private var localeTag: String = "system"
+
+    init(engine: SDMEngine? = nil) {
+        self.engine = engine
+    }
 
     var body: some View {
         Form {

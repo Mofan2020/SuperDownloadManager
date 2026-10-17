@@ -72,6 +72,12 @@ targets:
     platform: macOS
     sources:
       - path: App
+        excludes:
+          - "App/Assets.xcassets/**"
+      # Asset catalog is registered as its own path so XcodeGen
+      # picks it up as the asset-compile input (instead of just
+      # a flat resource copy).
+      - path: App/Assets.xcassets
       # Embedded non-source files; XcodeGen `templates/project.yml`
       # pattern (sources + buildPhase: resources).
       - path: Resources
@@ -99,8 +105,12 @@ targets:
         CFBundleName: SuperDownloadManager
         CFBundleDisplayName: Super Download Manager
         CFBundleIdentifier: com.superdownloadmanager.app
-        CFBundleShortVersionString: "1.0.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.0.2"
+        CFBundleVersion: "3"
+        # Asset Catalog "AppIcon.appiconset" — Xcode reads
+        # CFBundleIconName and embeds Assets.car into the bundle
+        # for free.
+        CFBundleIconName: AppIcon
         LSMinimumSystemVersion: "26.0"
         NSHumanReadableCopyright: "Copyright © 2026 Skyc8266. MIT License."
         NSAppTransportSecurity:

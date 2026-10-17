@@ -14,12 +14,15 @@ import Foundation
 /// the active task. The engine asks for `min(taskWants,
 /// availableSlots())` workers.
 public actor TaskQueue {
-    public struct TaskSummary: Sendable {
+    public struct TaskSummary: Sendable, Identifiable {
         public let id: UUID
         public let url: URL
-        public var state: String
+        public var state: String          // "queued" | "downloading" | "paused" | "completed" | "failed" | "cancelled"
         public var bytesDone: Int64
         public var totalBytes: Int64?
+        public var speedBytesPerSec: Double
+        public var errorMessage: String?
+        public var destination: URL
     }
 
     public private(set) var tasks: [UUID: TaskSummary] = [:]
@@ -44,6 +47,8 @@ public actor TaskQueue {
     }
 
     public func snapshot() -> [TaskSummary] { Array(tasks.values) }
+
+    public func get(id: UUID) -> TaskSummary? { tasks[id] }
 
     /// Slots the engine may grant the active task right now.
     /// v1.0: every active task gets the full cap when alone; we

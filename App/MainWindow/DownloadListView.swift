@@ -1,64 +1,331 @@
 import SwiftUI
-
+import AppKit
 import SuperDownloadManagerCore
 
-/// DownloadListView — main window's primary pane.
+/// DownloadListView — main window's primary pane (v1.0.3 rewrite).
 ///
-/// Renders the engine's task list. Each row is a `TaskRow` with
-/// filename, progress bar, current speed, ETA, and status badge.
-/// The view subscribes to a `DownloadListStore` (publishing live
-/// snapshots from `SDMEngine`) so a running download refreshes in
-/// place without manual re-renders.
+/// Adds a top toolbar with the basic IDM-style controls:
+///  - **+ Add URL…** opens a sheet for entering a URL.
+///  - **Pause All** / **Resume All** bulk operations.
+///  - **Clear Completed** removes finished rows.
 ///
-/// v1.0.1: state strings are localized via `L10n.state<...>` —
-/// the raw `"downloading"` / `"completed"` engine state IDs are
-/// still emitted from `SDMEngine.snapshot()`, but the row view
-/// translates them at render time. The eta/speed formatters
-/// stay in `ByteRateFormatter` / `TimeFormatter` and use the
-/// Unicode `U+00B7 MIDDLE DOT` separator in both locales (we
-/// only translate them through `Localizable.strings` if the
-/// UI later surfaces them prominently).
+/// Each row has its own per-state controls: Pause/Resume toggle,
+/// Cancel while downloading, Open / Reveal in Finder on
+/// completion, Retry on failure, Remove on terminal states.
 struct DownloadListView: View {
     @ObservedObject var store: DownloadListStore
+    @State private var showAddSheet = false
+    @State private var addURL: String = ""
+    @State private var addFilename: String = ""
+    @State private var addError: String? = nil
 
     var body: some View {
-        List(store.tasks, id: \.id) { task in
-            TaskRow(task: task)
+        VStack(spacing: 0) {
+            toolbar
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.bar)
+            Divider()
+            if store.tasks.isEmpty {
+                EmptyStateView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List {
+                    ForEach(store.tasks) { task in
+                        TaskRow(task: task, store: store)
+                    }
+                }
+                .listStyle(.inset)
+            }
         }
-        .listStyle(.inset)
+        .sheet(isPresented: $showAddSheet) { addSheet }
+    }
+
+    // MARK: - Toolbar
+
+    private var toolbar: some View {
+        HStack(spacing: 8) {
+            Button {
+                addError = nil
+                addFilename = ""
+                showAddSheet = true
+            } label: {
+                Label("Add URL…", systemImage: "plus")
+            }
+            .keyboardShortcut("n", modifiers: [.command])
+            .help("Add a new download URL (⌘N)")
+
+            Spacer()
+
+            let activeCount = store.tasks.filter {
+                $0.state == "downloading" || $0.state == "queued"
+            }.count
+            let pausedCount = store.tasks.filter { $0.state == "paused" }.count
+
+            Button {
+                store.tasks.filter {
+                    $0.state == "downloading" || $0.state == "queued"
+                }.forEach { store.pause(id: $0.id) }
+            } label: {
+                Label("Pause All", systemImage: "pause.circle")
+            }
+            .disabled(activeCount == 0)
+            .help(activeCount == 0
+                  ? "No active downloads"
+                  : "Pause \(activeCount) active download\(activeCount == 1 ? "" : "s")")
+
+            Button {
+                store.tasks.filter { $0.state == "paused" }
+                    .forEach { store.resume(id: $0.id) }
+            } label: {
+                Label("Resume All", systemImage: "play.circle")
+            }
+            .disabled(pausedCount == 0)
+            .help(pausedCount == 0
+                  ? "No paused downloads"
+                  : "Resume \(pausedCount) paused download\(pausedCount == 1 ? "" : "s")")
+
+            Button {
+                store.clearCompleted()
+            } label: {
+                Label("Clear Completed", systemImage: "trash")
+            }
+            .disabled(!store.tasks.contains { $0.state == "completed" })
+            .help("Remove completed downloads from the list")
+        }
+    }
+
+    // MARK: - Add URL sheet
+
+    private var addSheet: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Add Download")
+                .font(.title3.weight(.semibold))
+            Text("Enter a URL. SDM will start a multi-threaded download immediately.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("URL")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("https://example.com/file.zip", text: $addURL)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(commitAdd)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Save as (optional)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("Leave blank to use the server's filename",
+                          text: $addFilename)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            if let err = addError {
+                Text(err)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    showAddSheet = false
+                }
+                .keyboardShortcut(.cancelAction)
+                Button("Add") { commitAdd() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(addURL.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+    }
+
+    private func commitAdd() {
+        let trimmed = addURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            addError = "Enter a valid http(s) URL."
+            return
+        }
+        let name = addFilename.trimmingCharacters(in: .whitespaces)
+        store.add(url: url, filenameOverride: name.isEmpty ? nil : name)
+        addURL = ""
+        addFilename = ""
+        addError = nil
+        showAddSheet = false
     }
 }
 
 private struct TaskRow: View {
     let task: TaskSummary
+    @ObservedObject var store: DownloadListStore
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: iconName(for: task.state))
-                .foregroundStyle(.secondary)
-                .frame(width: 22)
-
-            VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Image(systemName: iconName(for: task.state))
+                    .foregroundStyle(.tint)
+                    .frame(width: 22)
                 Text(task.filename)
-                    .font(.body)
+                    .font(.body.weight(.medium))
                     .lineLimit(1)
-                ProgressView(value: task.fractionDone)
-                    .frame(width: 220)
-                HStack(spacing: 8) {
+                    .truncationMode(.middle)
+                Spacer()
+                rowActions
+            }
+            ProgressView(value: task.fractionDone)
+                .progressViewStyle(.linear)
+            HStack(spacing: 8) {
+                Text(byteCount(task.bytesDone) +
+                     (task.totalBytes.map { " / \(byteCount($0))" } ?? ""))
+                if task.state == "downloading" {
+                    Text("·")
                     Text(task.speedDescription)
                     if let eta = task.etaDescription {
                         Text("·")
-                        Text(eta)
+                        Text("ETA \(eta)")
                     }
+                } else if let err = task.errorMessage, !err.isEmpty {
                     Text("·")
-                    Text(localizedState(task.state))
+                    Text(err)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .foregroundStyle(.red)
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                Spacer()
+                Text(localizedState(task.state))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(stateBadgeColor(task.state).opacity(0.18),
+                                in: Capsule())
+                    .foregroundStyle(stateBadgeColor(task.state))
             }
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
+        .contextMenu {
+            rowContextMenu
+        }
     }
+
+    // MARK: - Per-row actions
+
+    @ViewBuilder
+    private var rowActions: some View {
+        switch task.state {
+        case "downloading", "queued":
+            Button {
+                store.pause(id: task.id)
+            } label: {
+                Image(systemName: "pause.fill")
+            }
+            .buttonStyle(.borderless)
+            .help("Pause")
+            Button {
+                store.cancel(id: task.id)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .buttonStyle(.borderless)
+            .help("Cancel")
+        case "paused":
+            Button {
+                store.resume(id: task.id)
+            } label: {
+                Image(systemName: "play.fill")
+            }
+            .buttonStyle(.borderless)
+            .help("Resume (v1.0.3 restarts from byte 0)")
+            Button {
+                store.cancel(id: task.id)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .buttonStyle(.borderless)
+            .help("Cancel")
+        case "failed":
+            Button {
+                store.resume(id: task.id)
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.borderless)
+            .help("Retry")
+            Button {
+                store.remove(id: task.id)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .help("Remove from list")
+        case "completed":
+            Button {
+                store.openFile(id: task.id)
+            } label: {
+                Image(systemName: "arrow.up.forward.app")
+            }
+            .buttonStyle(.borderless)
+            .help("Open")
+            Button {
+                store.revealInFinder(id: task.id)
+            } label: {
+                Image(systemName: "folder")
+            }
+            .buttonStyle(.borderless)
+            .help("Reveal in Finder")
+            Button {
+                store.remove(id: task.id)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .help("Remove from list")
+        case "cancelled":
+            Button {
+                store.resume(id: task.id)
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.borderless)
+            .help("Re-add")
+            Button {
+                store.remove(id: task.id)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .help("Remove from list")
+        default:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var rowContextMenu: some View {
+        if task.state == "completed" {
+            Button("Open") { store.openFile(id: task.id) }
+            Button("Reveal in Finder") { store.revealInFinder(id: task.id) }
+        }
+        if task.state == "downloading" || task.state == "queued" {
+            Button("Pause") { store.pause(id: task.id) }
+            Button("Cancel") { store.cancel(id: task.id) }
+        }
+        if task.state == "paused" || task.state == "failed" || task.state == "cancelled" {
+            Button("Retry") { store.resume(id: task.id) }
+        }
+        if task.isTerminal || task.state == "paused" {
+            Divider()
+            Button("Remove from list") { store.remove(id: task.id) }
+        }
+    }
+
+    // MARK: - Helpers
 
     private func iconName(for state: String) -> String {
         switch state {
@@ -67,68 +334,64 @@ private struct TaskRow: View {
         case "awaiting_new_link": return "link.badge.plus"
         case "failed":           return "xmark.octagon.fill"
         case "paused":           return "pause.circle.fill"
+        case "cancelled":        return "minus.circle"
+        case "queued":           return "ellipsis.circle"
         default:                 return "circle.dashed"
         }
     }
 
     private func localizedState(_ state: String) -> LocalizedStringKey {
         switch state {
-        case "downloading":      return L10n.stateDownloading
-        case "completed":        return L10n.stateCompleted
+        case "downloading":       return L10n.stateDownloading
+        case "completed":         return L10n.stateCompleted
         case "awaiting_new_link": return L10n.stateAwaitingLink
-        case "failed":           return L10n.stateFailed
-        case "paused":           return L10n.statePaused
-        default:                 return L10n.stateUnknown
+        case "failed":            return L10n.stateFailed
+        case "paused":            return "Paused"
+        case "cancelled":         return "Cancelled"
+        case "queued":            return "Queued"
+        default:                  return L10n.stateUnknown
         }
     }
-}
 
-/// Compact denormalised summary the view consumes. The store hands
-/// these out already-formatted for display so SwiftUI doesn't have
-/// to recompute strings on every tick.
-public struct TaskSummary: Identifiable, Equatable {
-    public let id: UUID
-    public var filename: String
-    public var state: String
-    public var bytesDone: Int64
-    public var totalBytes: Int64?
-    public var speedBytesPerSec: Double
-
-    public var fractionDone: Double {
-        guard let total = totalBytes, total > 0 else { return 0 }
-        return Double(bytesDone) / Double(total)
+    private func stateBadgeColor(_ state: String) -> Color {
+        switch state {
+        case "downloading", "queued": return .accentColor
+        case "completed": return .green
+        case "paused":    return .orange
+        case "failed":    return .red
+        case "cancelled": return .secondary
+        default:          return .secondary
+        }
     }
 
-    public var speedDescription: String {
-        ByteRateFormatter.string(from: speedBytesPerSec)
-    }
-
-    public var etaDescription: String? {
-        guard let total = totalBytes,
-              total > bytesDone,
-              speedBytesPerSec > 0 else { return nil }
-        let remaining = Double(total - bytesDone)
-        return TimeFormatter.string(from: remaining / speedBytesPerSec)
+    private func byteCount(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 }
 
-/// Localized formatters — kept separate so they're testable.
-public enum ByteRateFormatter {
-    public static func string(from bytesPerSec: Double) -> String {
-        if bytesPerSec >= 1_048_576 { return String(format: "%.2f MB/s", bytesPerSec / 1_048_576) }
-        if bytesPerSec >= 1_024     { return String(format: "%.1f KB/s", bytesPerSec / 1_024) }
-        return String(format: "%.0f B/s", bytesPerSec)
-    }
-}
-
-public enum TimeFormatter {
-    public static func string(from seconds: Double) -> String {
-        if seconds < 60 { return String(format: "%.0fs", seconds) }
-        let totalMin = Int(seconds / 60)
-        let secs = Int(seconds.truncatingRemainder(dividingBy: 60))
-        if totalMin < 60 { return "\(totalMin)m \(secs)s" }
-        let h = totalMin / 60
-        let m = totalMin % 60
-        return "\(h)h \(m)m"
+/// Empty-state placeholder. Shown when there are no rows in the
+/// list — gives the user a clear "click + to add a download"
+/// affordance instead of staring at a blank window.
+struct EmptyStateView: View {
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "arrow.down.circle")
+                .font(.system(size: 56, weight: .light))
+                .foregroundStyle(.tint)
+            Text("Super Download Manager")
+                .font(.title2.weight(.semibold))
+            Text("No downloads yet")
+                .foregroundStyle(.secondary)
+            Text("Click + or press ⌘N to add a URL. Drop a download in Firefox/Safari to send it to SDM. From a terminal: `sdmdm add <url>`.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 380)
+            Text("Settings → Language to switch to 中文.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
