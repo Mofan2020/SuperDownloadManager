@@ -50,6 +50,43 @@ public final class DownloadListStore: ObservableObject {
         startDispatchServer()
         requestNotificationPermission()
         cleanupOrphanedPartFiles()
+        applyPersistedBandwidth()
+        observeBandwidth()
+    }
+
+    /// v1.0.6: push the persisted global bandwidth limit into
+    /// the engine at startup. v1.0.x stored the value in
+    /// AppStorage but never wired it to the live limiter, so
+    /// the Settings → Bandwidth slider was cosmetic.
+    private func applyPersistedBandwidth() {
+        let kbps = UserDefaults.standard.integer(forKey: "sdm.bandwidth.bytesPerSec")
+        let bytesPerSec = Double(kbps) * 1024.0
+        Task { [engine] in await engine.setSpeedLimit(bytesPerSec) }
+    }
+
+    /// v1.0.6: react to the user editing Settings → Bandwidth
+    /// at runtime. UserDefaults posts `didChangeNotification`
+    /// synchronously inside the binding's setter, so we hop off
+    /// the MainActor and push the new rate to the engine.
+    private var bandwidthObserver: NSObjectProtocol?
+    public func observeBandwidth() {
+        if bandwidthObserver != nil { return }
+        bandwidthObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: UserDefaults.standard,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            // The notification fires for any default change; we
+            // only care about our key. Re-read the value either
+            // way — the cost is one UserDefaults hit.
+            self.applyPersistedBandwidth()
+        }
+    }
+    deinit {
+        if let obs = bandwidthObserver {
+            NotificationCenter.default.removeObserver(obs)
+        }
     }
 
     public func stop() {
@@ -89,7 +126,8 @@ public final class DownloadListStore: ObservableObject {
                     destinationPath: r.destination.path,
                     errorMessage: r.errorMessage,
                     category: classifyEnabled
-                        ? DownloadCategory.from(url: r.url) : .other
+                        ? DownloadCategory.from(url: r.url) : .other,
+                    speedLimitBytesPerSec: r.speedLimitBytesPerSec
                 )
             }
         // Drop EWMA for tasks that no longer exist.
@@ -215,17 +253,32 @@ public final class DownloadListStore: ObservableObject {
         remove(id: id)
     }
 
-    /// P1-4: per-task speed limit. v1.0.4 wires a stub alert;
-    /// the real per-task limiter ships in v1.0.5 once the
-    /// engine refactor lands.
+    /// P1-2: per-task speed limit. v1.0.6: real sheet. The user
+    /// types a KB/s value (0 = clear override, use global).
     public func setSpeedLimit(id: UUID) {
+        // Snapshot the current value so the sheet pre-fills.
+        let current = tasks.first { $0.id == id }?.speedLimitBytesPerSec ?? 0
         let alert = NSAlert()
         alert.messageText = "Limit Speed"
-        alert.informativeText = "Per-task speed limit lands in v1.0.5. " +
-            "Global speed limit is in Settings → Bandwidth (cmd-,)."
+        alert.informativeText = "Per-task limit in KB/s. 0 = use global. " +
+            "Global is in Settings → Bandwidth (⌘,)."
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 22))
+        field.placeholderString = "0 = unlimited"
+        // Convert bytes/sec → KB/s for display, rounded.
+        field.stringValue = current > 0
+            ? String(Int((current / 1024.0).rounded()))
+            : ""
+        field.formatter = NumberFormatter()
+        (field.formatter as? NumberFormatter)?.numberStyle = .decimal
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Apply")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            let kbps = Int(field.stringValue) ?? 0
+            let bytesPerSec = Double(kbps) * 1024.0
+            Task { [engine] in await engine.setTaskSpeedLimit(id: id, bytesPerSec: bytesPerSec) }
+        }
     }
 
     /// P1-4: compute SHA-256 of a finished file.

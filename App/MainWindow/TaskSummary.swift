@@ -21,6 +21,8 @@ public struct TaskSummary: Identifiable, Equatable {
     public var destinationPath: String
     public var errorMessage: String?
     public var category: DownloadCategory?
+    /// v1.0.6: per-task speed limit override. 0 = use global.
+    public var speedLimitBytesPerSec: Double = 0
 
     /// Convenience for `Table` sort comparators: optional Int64
     /// → 0 for "no info" so columns sort unknown to the end.

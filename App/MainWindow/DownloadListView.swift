@@ -19,6 +19,7 @@ struct DownloadListView: View {
     @State private var sortOrder: [KeyPathComparator<TaskSummary>] = [
         .init(\.state, order: .forward)
     ]
+    @State private var detailTask: TaskSummary? = nil
     @Environment(\.strings) private var S
 
     var body: some View {
@@ -116,13 +117,19 @@ struct DownloadListView: View {
                             .font(.caption)
                             .foregroundStyle(cat.tint)
                     }
-                    Text(task.state.capitalized)
+                    Text(stateLabel(task.state))
                         .font(.caption)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(stateColor(task.state).opacity(0.18),
                                     in: Capsule())
                         .foregroundStyle(stateColor(task.state))
+                    if task.speedLimitBytesPerSec > 0 {
+                        Image(systemName: "speedometer")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .help("Limited to \(Int((task.speedLimitBytesPerSec / 1024.0).rounded())) KB/s")
+                    }
                 }
             }
             .width(100)
@@ -138,6 +145,25 @@ struct DownloadListView: View {
             }
         }
         .tableStyle(.inset(alternatesRowBackgrounds: true))
+        .contextMenu(forSelectionType: TaskSummary.ID.self) { ids in
+            // Show details for the right-clicked row. macOS
+            // delivers the selection via SwiftUI's table
+            // context-menu API; we open the detail sheet for
+            // the first selected id (or the right-clicked one).
+            if let id = ids.first,
+               let t = store.tasks.first(where: { $0.id == id }) {
+                Button("Show details") { detailTask = t }
+            }
+        } primaryAction: { ids in
+            // Double-click on a row.
+            if let id = ids.first,
+               let t = store.tasks.first(where: { $0.id == id }) {
+                detailTask = t
+            }
+        }
+        .sheet(item: $detailTask) { t in
+            TaskDetailView(task: t)
+        }
     }
 
     private var sortedTasks: [TaskSummary] {
@@ -186,6 +212,7 @@ struct DownloadListView: View {
 
     @ViewBuilder
     private func rowContextMenu(_ task: TaskSummary) -> some View {
+        Button("Show details") { detailTask = task }
         if task.state == "completed" {
             Button(S.rowOpen) { store.openFile(id: task.id) }
             Button(S.rowReveal) { store.revealInFinder(id: task.id) }
@@ -363,6 +390,19 @@ struct DownloadListView: View {
         case "cancelled":        return "minus.circle"
         case "queued":           return "ellipsis.circle"
         default:                 return "circle.dashed"
+        }
+    }
+
+    private func stateLabel(_ state: String) -> String {
+        switch state {
+        case "downloading":       return S.stateDownloading
+        case "completed":         return S.stateCompleted
+        case "awaiting_new_link": return S.stateAwaitingLink
+        case "failed":            return S.stateFailed
+        case "paused":            return S.statePaused
+        case "cancelled":         return S.stateCancelled
+        case "queued":            return S.stateQueued
+        default:                  return S.stateUnknown
         }
     }
 

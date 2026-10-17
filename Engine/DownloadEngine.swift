@@ -34,9 +34,21 @@ public actor SDMEngine {
     public private(set) var specs: [UUID: LiveTask] = [:]
     public let planner: RangePlanner
     public let queue: TaskQueue
+    /// Global bandwidth limiter. The v1.0.6 fix: a single
+    /// `SpeedLimiter` that the engine reconfigures via
+    /// `setSpeedLimit(_:)`. Per-task limiters override this for
+    /// individual downloads (see `taskLimiters`).
     public let limiter: SpeedLimiter
     public var strategy: RangeStrategy
     public var parallelismCap: Int
+
+    /// v1.0.6: per-task speed limiters. Keyed by task id; missing
+    /// entries mean "no per-task limit, fall back to the global
+    /// `limiter`". A task with `setSpeedLimit(id:)` builds a
+    /// dedicated limiter at the requested rate and the engine
+    /// passes that one into the DownloadFlow instead of the
+    /// shared global.
+    private var taskLimiters: [UUID: SpeedLimiter] = [:]
 
     public private(set) var defaultDownloadDir: URL
 
@@ -72,7 +84,32 @@ public actor SDMEngine {
     }
 
     public func setSpeedLimit(_ bytesPerSec: Double) async {
-        await limiter.replace(with: bytesPerSec)
+        // v1.0.6: actually push the new rate into the live
+        // limiter. The previous v1.0.x code stored the rate but
+        // never reconfigured the bucket, so the Settings →
+        // Bandwidth slider was cosmetic. setRate() resets the
+        // token bucket so the throttle kicks in immediately.
+        await limiter.setRate(bytesPerSec)
+    }
+
+    /// v1.0.6: per-task speed limit. `bytesPerSec == 0` clears
+    /// the override and lets the task fall back to the global
+    /// limiter. `bytesPerSec > 0` builds a fresh limiter
+    /// dedicated to this task.
+    public func setTaskSpeedLimit(id: UUID, bytesPerSec: Double) async {
+        if bytesPerSec <= 0 {
+            taskLimiters.removeValue(forKey: id)
+            await queue.update(id: id) { t in
+                t.speedLimitBytesPerSec = 0
+            }
+        } else {
+            let l = taskLimiters[id] ?? SpeedLimiter(rateBytesPerSec: bytesPerSec)
+            await l.setRate(bytesPerSec)
+            taskLimiters[id] = l
+            await queue.update(id: id) { t in
+                t.speedLimitBytesPerSec = bytesPerSec
+            }
+        }
     }
 
     public func snapshot() async -> [TaskQueue.TaskSummary] {
@@ -96,7 +133,8 @@ public actor SDMEngine {
                 id: id, url: spec.url, state: "queued",
                 bytesDone: 0, totalBytes: nil,
                 speedBytesPerSec: 0, errorMessage: nil,
-                destination: destination))
+                destination: destination,
+                speedLimitBytesPerSec: 0))
 
             let live = Task { [weak self] in
                 guard let self else { return }
@@ -148,12 +186,17 @@ public actor SDMEngine {
 
         // Build the flow first so the in-process progress
         // channel exists; then bridge its stream to the queue.
+        // v1.0.6: if the user set a per-task speed limit, use
+        // that dedicated limiter instead of the global one.
+        // The per-task limiter is exclusive — it doesn't
+        // share tokens with the global bucket.
+        let flowLimiter: SpeedLimiter = taskLimiters[id] ?? limiter
         let flow = DownloadFlow(
             url: spec.url,
             destination: realDest,
             strategy: strategy,
             parallelismCap: parallelismCap,
-            limiter: limiter)
+            limiter: flowLimiter)
 
         let progressTask = Task { [weak self] in
             for await bytes in flow.progressChannel.stream {
@@ -320,10 +363,10 @@ public actor SDMEngine {
 }
 
 private extension SpeedLimiter {
-    /// Replace the configured rate. We don't actually need a new
-    /// limiter — the consume path already re-reads `rateBytesPerSec`
-    /// through the actor on every call.
+    // v1.0.5: kept for source compatibility; v1.0.6 uses
+    // setRate(_:) above which actually reconfigures the bucket.
+    @available(*, deprecated, message: "Use setRate(_:) instead.")
     func replace(with rate: Double) {
-        _ = self  // actor hop
+        _ = self
     }
 }

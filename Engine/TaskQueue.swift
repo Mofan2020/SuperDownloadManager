@@ -23,6 +23,11 @@ public actor TaskQueue {
         public var speedBytesPerSec: Double
         public var errorMessage: String?
         public var destination: URL
+        /// v1.0.6: per-task speed-limit override. 0 means
+        /// "no per-task limit, fall back to global". Visible in
+        /// the row as a chip and editable from the right-click
+        /// menu.
+        public var speedLimitBytesPerSec: Double
     }
 
     public private(set) var tasks: [UUID: TaskSummary] = [:]

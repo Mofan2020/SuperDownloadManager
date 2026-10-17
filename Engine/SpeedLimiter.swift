@@ -12,8 +12,8 @@ import Foundation
 ///
 /// Public-domain algorithm in textbook references; not copied.
 public actor SpeedLimiter {
-    private let rateBytesPerSec: Double
-    private let capacity: Double
+    private var rateBytesPerSec: Double
+    private var capacity: Double
     private let granularity: TimeInterval
     private var tokens: Double
     private var lastRefill: Date
@@ -28,6 +28,18 @@ public actor SpeedLimiter {
         self.tokens = r > 0 ? self.capacity : .infinity
         self.lastRefill = Date()
         self.granularity = granularity
+    }
+
+    /// v1.0.6: change the configured rate at runtime. The
+    /// engine calls this when the user edits Settings → Bandwidth.
+    /// The bucket is reset to "full at the new rate" so the
+    /// change takes effect immediately without bursting.
+    public func setRate(_ bytesPerSec: Double) {
+        let r = max(0, bytesPerSec)
+        rateBytesPerSec = r
+        capacity = max(r * granularity, 1)
+        tokens = r > 0 ? capacity : .infinity
+        lastRefill = Date()
     }
 
     public func isEnabled() -> Bool { rateBytesPerSec > 0 }
