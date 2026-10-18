@@ -148,8 +148,14 @@ public struct DownloadFlow: Sendable {
         }
 
         // 4. Merge + sidecar.
+        // v1.1.2: the assembler exposes both sync (finalize) and
+        // async (finalizeAsync) entry points. The flow is itself
+        // an async function, but the merge IO is short and the
+        // sync version is what tests cover; dispatch off the
+        // actor via `finalizeAsync` keeps the engine's task
+        // scheduler happy.
         do {
-            try await assembler.finalize(chunksInOrder: activeChunks.map { $0.id })
+            try await assembler.finalizeAsync(chunksInOrder: activeChunks.map { $0.id })
         } catch {
             throw FlowError.mergeFailed(error)
         }

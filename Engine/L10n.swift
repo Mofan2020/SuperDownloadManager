@@ -445,6 +445,14 @@ private enum Catalog {
         "Schedule", "计划")
     static let sidebarOther: (String, String) = (
         "Other", "其他")
+
+    // v1.1.2: Notification bodies
+    static let notifCompleteTitle: (String, String) = (
+        "Download complete", "下载完成")
+    static let notifFailedTitle: (String, String) = (
+        "Download failed", "下载失败")
+    static let notifBodyOfUnknownError: (String, String) = (
+        "Unknown error", "未知错误")
 }
 
 /// Resolve the current locale tag to a `Strings` locale. v1.1.2:
@@ -488,6 +496,15 @@ private func resolveSystemLocale() -> Catalog.Pair {
 /// Per-key accessor. Read from `Strings.current.<key>` once you've
 /// taken `let S = Strings.current` in `body`.
 public struct Strings {
+    /// Last-wins shortcut. `Strings.current` resolves the same
+    /// way the SwiftUI environment does — through the user's
+    /// `sdm.locale` AppStorage override, falling back to the
+    /// system locale when the override is absent or invalid.
+    public static var current: Strings {
+        let raw = UserDefaults.standard.string(forKey: "sdm.locale") ?? "system"
+        return Strings(locale: LocaleTag(rawValue: raw) ?? .system)
+    }
+
     public let locale: LocaleTag
     private let pair: Catalog.Pair
     public init(locale: LocaleTag) {
@@ -772,6 +789,11 @@ public struct Strings {
     public var sidebarHistory:        String { pick(Catalog.sidebarHistory) }
     public var sidebarSchedule:       String { pick(Catalog.sidebarSchedule) }
     public var sidebarOther:          String { pick(Catalog.sidebarOther) }
+
+    // v1.1.2: Notification bodies
+    public var notifCompleteTitle:    String { pick(Catalog.notifCompleteTitle) }
+    public var notifFailedTitle:      String { pick(Catalog.notifFailedTitle) }
+    public var notifBodyOfUnknownError: String { pick(Catalog.notifBodyOfUnknownError) }
 
     // MARK: - Format helpers
     public func settingsDefaultThreadsValue(_ n: Int) -> String {

@@ -461,8 +461,12 @@ public final class DownloadListStore: ObservableObject {
     }
 
     private func postCompleteNotification(_ task: TaskSummary) {
+        // v1.1.2: notification body now sourced from Strings so it
+        // follows Settings → Language. Falls back to the default
+        // (system locale) when the env hasn't been set yet.
+        let S = Strings.current
         let content = UNMutableNotificationContent()
-        content.title = "Download complete"
+        content.title = S.notifCompleteTitle
         content.subtitle = task.filename
         content.body = ByteCountFormatter.string(
             fromByteCount: task.totalBytes ?? 0, countStyle: .file)
@@ -476,10 +480,11 @@ public final class DownloadListStore: ObservableObject {
     }
 
     private func postFailureNotification(_ task: TaskSummary) {
+        let S = Strings.current
         let content = UNMutableNotificationContent()
-        content.title = "Download failed"
+        content.title = S.notifFailedTitle
         content.subtitle = task.filename
-        content.body = task.errorMessage ?? "Unknown error"
+        content.body = task.errorMessage ?? S.notifBodyOfUnknownError
         content.sound = .default
         let req = UNNotificationRequest(
             identifier: "failure-\(task.id.uuidString)",

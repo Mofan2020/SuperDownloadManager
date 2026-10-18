@@ -141,7 +141,7 @@ final class FileAssemblerTests: XCTestCase {
             let chunkBytes = Array(repeating: UInt8(id & 0xFF), count: perChunk)
             _ = try await a.append(Data(chunkBytes), to: id)
         }
-        try await a.finalize(chunksInOrder: [0, 1, 2, 3])
+        try a.finalize(chunksInOrder: [0, 1, 2, 3])
         let data = try Data(contentsOf: tmp)
         XCTAssertEqual(data.count, 4 * perChunk)
         // Check that byte at offset 0 is 0x00 and at offset perChunk is 0x01.

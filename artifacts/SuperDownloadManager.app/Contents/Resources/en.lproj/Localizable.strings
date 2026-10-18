@@ -1,0 +1,48 @@
+/* SDM v1.0.1 English string catalog. Mirror every key in
+   zh-Hans.lproj/Localizable.strings when adding a translation. */
+
+/* Menu bar items */
+"menu.openMainWindow" = "Open Main Window";
+"menu.downloads"       = "Downloads…";
+"menu.settings"        = "Settings…";
+"menu.quit"            = "Quit SDM";
+
+/* Main window */
+"window.main.title" = "Downloads";
+
+/* Settings — defaults */
+"settings.section.defaults"   = "Defaults";
+"settings.defaultThreads"      = "Default threads: %lld";
+"settings.bandwidth"           = "Bandwidth limit";
+"settings.bandwidth.hint"      = "0 = unlimited (min 100 KB/s)";
+"settings.kbps"                = "KB/s";
+
+/* Settings — categories */
+"settings.section.categories"  = "Categories";
+"settings.categories.link"     = "File classification rules";
+"settings.categories.placeholder" = "Categories editor (wired in v1.1)";
+
+/* Settings — startup */
+"settings.section.startup"      = "Startup";
+"settings.openAtLogin"          = "Open at login";
+"settings.updateChannel"       = "Update channel";
+"settings.update.stable"        = "Stable";
+"settings.update.prerelease"    = "Pre-release";
+
+/* Settings — general */
+"settings.section.general"      = "General";
+"settings.language"             = "Language";
+"settings.language.system"      = "Follow system";
+"settings.language.en"          = "English";
+"settings.language.zh-Hans"     = "简体中文";
+
+/* Expired-link banner */
+"banner.refreshLink"            = "Refresh link";
+
+/* States */
+"state.downloading"   = "Downloading";
+"state.completed"     = "Completed";
+"state.awaiting_link" = "Awaiting new link";
+"state.failed"        = "Failed";
+"state.paused"        = "Paused";
+"state.unknown"       = "Idle";

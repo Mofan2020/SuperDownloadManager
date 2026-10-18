@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UserNotifications
 import SuperDownloadManagerCore
 
 // v1.1.2: sidebar-level filter model — selected item in the
@@ -164,11 +165,48 @@ private struct WindowAccessor: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
+/// NotificationsDelegate — v1.1.2: route UNUserNotificationCenter
+/// delegate callbacks so a click on a download-complete banner
+/// brings the main window forward. Without a delegate, the
+/// system fires `didReceive` on a background queue and the
+/// notification is silently acknowledged — the user clicks the
+/// banner and nothing happens in the app.
+private final class NotificationsDelegate: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler:
+            @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        // Show the banner + play the sound even if the app is
+        // foreground — v1.0.7 silently swallowed the alert
+        // when the user happened to have the window focused.
+        completionHandler([.banner, .sound])
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        // Bring the main window forward so the user lands on
+        // the row that just finished. The userInfo is set by
+        // `postCompleteNotification` / `postFailureNotification`.
+        let info = response.notification.request.content.userInfo
+        DispatchQueue.main.async {
+            AppDelegate.bringMainWindowForward()
+            NSLog("SDM notif clicked: \(info)")
+        }
+        completionHandler()
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static var engine: SDMEngine?
     static var sharedMainWindow: NSWindow?
     private var statusItem: NSStatusItem?
+    private var notificationsDelegate: NotificationsDelegate?
 
     // v1.1.2: Track how many "real" app windows are currently
     // open. The SwiftUI `WindowGroup` keeps detached window
@@ -185,6 +223,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installStatusItem()
         registerURLEventHandler()
         installDockVisibilityObservers()
+        // v1.1.2: install the notifications delegate *and* ask
+        // for permission at launch (v1.0.7 only asked for it when
+        // the main window's `onAppear` fired, which could race
+        // with `DispatchQueue.main.asyncAfter` startup work and
+        // the user could easily miss the authorisation dialog).
+        installNotificationsDelegate()
+        requestNotificationAuthorization()
         // v1.1.2: reconcile the "Open at login" AppStorage value
         // with the system's login-item registration. v1.0.4 stored
         // the Bool but never called SMAppService, so toggling in
@@ -202,6 +247,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.updateDockVisibilityForCurrentState(force: true)
         }
         NSLog("SDM AppDelegate: launched; statusItem=\(String(describing: statusItem))")
+    }
+
+    // MARK: - Notifications (v1.1.2)
+
+    private func installNotificationsDelegate() {
+        let d = NotificationsDelegate()
+        notificationsDelegate = d
+        UNUserNotificationCenter.current().delegate = d
+    }
+
+    private func requestNotificationAuthorization() {
+        UNUserNotificationCenter.current().requestAuthorization(
+            options: [.alert, .sound, .badge]
+        ) { granted, error in
+            if let error {
+                NSLog("SDM notif auth failed: \(error)")
+            } else {
+                NSLog("SDM notif auth granted=\(granted)")
+            }
+        }
+    }
+
+    /// Public bridge so `NotificationsDelegate` (a non-`@MainActor`
+    /// class) can ask the AppDelegate to bring the main window
+    /// forward. Safe to call from any thread.
+    static func bringMainWindowForward() {
+        DispatchQueue.main.async {
+            guard let win = AppDelegate.sharedMainWindow else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            win.makeKeyAndOrderFront(nil)
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(

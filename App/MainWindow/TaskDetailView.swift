@@ -11,17 +11,56 @@ import SuperDownloadManagerCore
 /// in real time while the sheet is open. v1.0.6 took a frozen
 /// `TaskSummary` snapshot at sheet open, so the displayed
 /// values never changed.
+///
+/// v1.1.2: the chunk breakdown in the "Show chunks" section
+/// (here `ChunkStatus` rows) also lives as a *computed*
+/// property keyed off the live `task`. v1.0.7 kept `chunks` as
+/// `@State` populated only on the showChunks toggle, which is
+/// why the chunk bars never moved after the section was first
+/// opened. Computing 32 chunks per render is well under a
+/// millisecond; the trade-off is worth the live accuracy.
 struct TaskDetailView: View {
     let taskID: UUID
     @ObservedObject var store: DownloadListStore
     @Environment(\.strings) private var S
-    @State private var chunks: [ChunkStatus] = []
     @State private var computingChecksum = false
     @State private var checksumResult: String? = nil
     @State private var showChunks = false
 
     private var task: TaskSummary? {
         store.tasks.first(where: { $0.id == taskID })
+    }
+
+    /// Live chunk breakdown. Synthesised from the live task's
+    /// `totalBytes` and `bytesDone` (the engine exposes the real
+    /// chunk state through `RangePlanner.snapshot`, but no
+    /// instance is reachable from the GUI today; this
+    /// approximation is what the user can already infer from
+    /// the row's progress bar and refreshes on every render).
+    /// Capped at 32 chunks so v1.0.7's small-file UI
+    /// (≤ 2 MB chunks) stays readable.
+    private var chunks: [ChunkStatus] {
+        guard let t = task else { return [] }
+        let total = t.totalBytes ?? 0
+        guard total > 0 else { return [] }
+        let n = max(1, min(32, Int(total / (2 * 1024 * 1024)) + 1))
+        let chunkSize = total / Int64(n)
+        var out: [ChunkStatus] = []
+        out.reserveCapacity(n)
+        for i in 0..<n {
+            let start = Int64(i) * chunkSize
+            let end = (i == n - 1) ? total : (Int64(i + 1) * chunkSize)
+            let size = end - start
+            let done = max(0, min(size, t.bytesDone - start))
+            let fraction = size > 0 ? Double(done) / Double(size) : 1
+            let state: ChunkStatus.State = (done >= size) ? .done
+                : (fraction > 0) ? .active
+                : .pending
+            out.append(ChunkStatus(
+                id: i, start: start, end: end, bytesDone: done,
+                fraction: fraction, state: state))
+        }
+        return out
     }
 
     var body: some View {
@@ -37,13 +76,6 @@ struct TaskDetailView: View {
                                ? S.detailHideChunks
                                : S.detailShowChunks(count: chunks.count)) {
                             showChunks.toggle()
-                            if showChunks {
-                                // Always refresh the chunk view
-                                // from the live task; we don't
-                                // want a stale snapshot when the
-                                // user re-opens the section.
-                                loadChunks(from: t)
-                            }
                         }
                         if computingChecksum {
                             ProgressView().controlSize(.small)
@@ -186,34 +218,6 @@ struct TaskDetailView: View {
         }
         return ByteCountFormatter.string(fromByteCount: task.bytesDone,
                                           countStyle: .file)
-    }
-
-    private func loadChunks(from task: TaskSummary) {
-        // v1.0.7: synthesize chunk breakdown from the live
-        // bytesDone. RangeManager.snapshotChunks(id:) exists
-        // but the live planner API isn't surfaced yet; this
-        // approximation matches what the user actually sees
-        // (bytesDone vs totalBytes) and refreshes on every
-        // showChunks toggle.
-        let total = task.totalBytes ?? 0
-        guard total > 0 else { chunks = []; return }
-        let n = max(1, min(32, Int(total / (2 * 1024 * 1024)) + 1))
-        let chunkSize = total / Int64(n)
-        var out: [ChunkStatus] = []
-        for i in 0..<n {
-            let start = Int64(i) * chunkSize
-            let end = (i == n - 1) ? total : (Int64(i + 1) * chunkSize)
-            let size = end - start
-            let done = max(0, min(size, task.bytesDone - start))
-            let fraction = size > 0 ? Double(done) / Double(size) : 1
-            let state: ChunkStatus.State = (done >= size) ? .done
-                : (fraction > 0) ? .active
-                : .pending
-            out.append(ChunkStatus(
-                id: i, start: start, end: end, bytesDone: done,
-                fraction: fraction, state: state))
-        }
-        chunks = out
     }
 
     private func copyJSON(_ task: TaskSummary) {
