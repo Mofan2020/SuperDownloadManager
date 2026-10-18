@@ -140,4 +140,107 @@ final class ContentSnifferTests: XCTestCase {
         let bytes = Data([0x00, 0xFF, 0x13, 0x37, 0x42])
         XCTAssertEqual(ContentSniffer.sniff(bytes), .unknown)
     }
+
+    // MARK: - Content-Disposition (v1.1.1)
+
+    /// The actual case from a real GitHub release-assets
+    /// download: the CDN echoes
+    /// `attachment; filename=SuperDownloadManager.app.zip`
+    /// (no double-quotes). v1.0.x's regex required `"..."`
+    /// so it returned nil and the engine fell through to the
+    /// URL path, which is a UUID for the CDN — resulting in
+    /// downloads named `efb1` or `download.bin`.
+    func testContentDispositionUnquotedGitHub() {
+        let url = URL(string: "https://example.com/whatever")!
+        let headers: [AnyHashable: Any] = [
+            "Content-Disposition": "attachment; filename=SuperDownloadManager.app.zip",
+            "Content-Length": "4205555",
+        ]
+        let http = HTTPURLResponse(url: url, statusCode: 200,
+                                   httpVersion: "HTTP/1.1",
+                                   headerFields: headers as? [String: String])!
+        let probe = ContentSniffer.parse(http: http, originalURL: url)
+        XCTAssertEqual(probe.suggestedFilename, "SuperDownloadManager.app.zip")
+    }
+
+    /// RFC 6266 quoted form — what most other CDNs ship.
+    func testContentDispositionQuoted() {
+        let url = URL(string: "https://example.com/whatever")!
+        let headers: [AnyHashable: Any] = [
+            "Content-Disposition": #"attachment; filename="foo bar.zip""#,
+        ]
+        let http = HTTPURLResponse(url: url, statusCode: 200,
+                                   httpVersion: "HTTP/1.1",
+                                   headerFields: headers as? [String: String])!
+        let probe = ContentSniffer.parse(http: http, originalURL: url)
+        XCTAssertEqual(probe.suggestedFilename, "foo bar.zip")
+    }
+
+    /// RFC 5987 ext-val form. Per RFC 6266 §4.3, this should
+    /// win when both are present.
+    func testContentDispositionExtVal() {
+        let url = URL(string: "https://example.com/whatever")!
+        let headers: [AnyHashable: Any] = [
+            "Content-Disposition": "attachment; filename=\"fallback.zip\"; filename*=UTF-8''primary%20v2.zip",
+        ]
+        let http = HTTPURLResponse(url: url, statusCode: 200,
+                                   httpVersion: "HTTP/1.1",
+                                   headerFields: headers as? [String: String])!
+        let probe = ContentSniffer.parse(http: http, originalURL: url)
+        XCTAssertEqual(probe.suggestedFilename, "primary v2.zip",
+            "filename* (ext-val) must win over plain filename=")
+    }
+
+    /// Unquoted ext-val (no spaces to percent-encode).
+    func testContentDispositionExtValNoEncoding() {
+        let url = URL(string: "https://example.com/whatever")!
+        let headers: [AnyHashable: Any] = [
+            "Content-Disposition": "attachment; filename*=UTF-8''plain.zip",
+        ]
+        let http = HTTPURLResponse(url: url, statusCode: 200,
+                                   httpVersion: "HTTP/1.1",
+                                   headerFields: headers as? [String: String])!
+        let probe = ContentSniffer.parse(http: http, originalURL: url)
+        XCTAssertEqual(probe.suggestedFilename, "plain.zip")
+    }
+
+    /// `inline` (not attachment) is also valid; we accept it.
+    func testContentDispositionInline() {
+        let url = URL(string: "https://example.com/whatever")!
+        let headers: [AnyHashable: Any] = [
+            "Content-Disposition": "inline; filename=preview.html",
+        ]
+        let http = HTTPURLResponse(url: url, statusCode: 200,
+                                   httpVersion: "HTTP/1.1",
+                                   headerFields: headers as? [String: String])!
+        let probe = ContentSniffer.parse(http: http, originalURL: url)
+        XCTAssertEqual(probe.suggestedFilename, "preview.html")
+    }
+
+    /// Pure unit test of the parser — covers the same shapes
+    /// the integration tests do but doesn't need an
+    /// HTTPURLResponse, so failures are easier to read.
+    func testParseContentDispositionDirect() {
+        XCTAssertEqual(
+            ContentSniffer.parseContentDisposition("attachment; filename=foo.zip"),
+            "foo.zip")
+        XCTAssertEqual(
+            ContentSniffer.parseContentDisposition(#"attachment; filename="foo.zip""#),
+            "foo.zip")
+        XCTAssertEqual(
+            ContentSniffer.parseContentDisposition("attachment; filename*=UTF-8''foo.zip"),
+            "foo.zip")
+        XCTAssertEqual(
+            ContentSniffer.parseContentDisposition("attachment; filename*=UTF-8''foo%20bar.zip"),
+            "foo bar.zip")
+        XCTAssertEqual(
+            ContentSniffer.parseContentDisposition("inline; filename=\"preview.html\""),
+            "preview.html")
+        // No filename at all → nil
+        XCTAssertNil(
+            ContentSniffer.parseContentDisposition("attachment"))
+        // Empty filename value → nil
+        XCTAssertNil(
+            ContentSniffer.parseContentDisposition("attachment; filename="))
+    }
 }

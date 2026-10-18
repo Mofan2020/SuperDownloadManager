@@ -274,21 +274,24 @@ public enum ContentSniffer {
 
         var filename: String?
         if let cd = header("Content-Disposition") {
-            // RFC 5987 / RFC 6266 — look for filename*=UTF-8''...
-            // and fall back to plain filename="...". P3's
-            // P3ExpiredLinkTests will exercise UTF-8 case.
-            if let range = cd.range(of: #"filename\*\s*=\s*[^;]*'[^']*'([^;]+)"#,
-                                    options: .regularExpression) {
-                let raw = cd[range].split(separator: "'").last.map(String.init) ?? ""
-                filename = raw.removingPercentEncoding ?? raw
-            } else if let range = cd.range(of: #"filename\s*=\s*"([^"]+)""#,
-                                           options: .regularExpression) {
-                let raw = cd[range].drop(while: { $0 != "=" })
-                filename = String(raw.dropFirst().trimmingCharacters(in: CharacterSet(charactersIn: "\"; ")))
-            }
+            // RFC 6266 / RFC 5987 parsing. There are three shapes
+            // the server might use:
+            //   1. `filename="foo.zip"`
+            //   2. `filename=foo.zip`           ← unquoted, GitHub's CDN
+            //   3. `filename*=UTF-8''foo.zip`   ← UTF-8 + lang tag
+            //   4. some combination (1+3, 2+3) ← both, with filename* winning per RFC
+            //
+            // v1.0.x only handled (1) and (3), and broke on (2) — every
+            // GitHub release-assets download fell through to the URL
+            // path as filename, which for the CDN ends with a random
+            // hex segment. v1.1.1 handles all four.
+            filename = Self.parseContentDisposition(cd)
         }
-        if filename == nil {
-            // last-resort: derive from URL path
+        if filename == nil || filename?.isEmpty == true {
+            // last-resort: derive from URL path. For GitHub's CDN this
+            // is useless (last path component is a UUID), so it's
+            // effectively a placeholder that the engine then renames
+            // after a successful Content-Disposition probe.
             filename = originalURL.pathComponents.last
         }
 
@@ -307,4 +310,88 @@ public enum ContentSniffer {
 
 public enum ProbeError: Error {
     case notHTTP
+}
+
+// MARK: - Content-Disposition parsing
+
+extension ContentSniffer {
+    /// Parses an RFC 6266 / RFC 5987 `Content-Disposition` header
+    /// into a usable filename, or `nil` if the header is absent
+    /// or unparseable. Per RFC 6266 §4.3, when both `filename=`
+    /// and `filename*=` are present, `filename*=` wins; the
+    /// caller does NOT need to disambiguate.
+    ///
+    /// Supported shapes (any combination of):
+    ///   - `filename="foo.zip"`              (RFC 6266 quoted)
+    ///   - `filename=foo.zip`                (unquoted, RFC 6266 token)
+    ///   - `filename*=UTF-8''foo%20bar.zip`  (RFC 5987 ext-val)
+    ///   - mixed with `;` separators
+    ///
+    /// v1.0.x failed on the unquoted form (GitHub's CDN ships
+    /// `attachment; filename=SuperDownloadManager.app.zip` with
+    /// no quotes) and fell through to the URL path; for GitHub
+    /// release-assets that's a random hex UUID, so downloads
+    /// ended up named `efb1` or `download.bin`.
+    public static func parseContentDisposition(_ header: String) -> String? {
+        // Tokenize on `;` to get individual disposition params.
+        // The first segment is the disposition type ("attachment",
+        // "inline"); subsequent segments are name=value pairs.
+        let segments = header.split(separator: ";", omittingEmptySubsequences: true)
+        var plain: String? = nil
+        var extVal: String? = nil
+        for seg in segments {
+            let s = seg.trimmingCharacters(in: .whitespaces)
+            // Case-insensitive prefix match.
+            if s.lowercased().hasPrefix("filename*=") {
+                let raw = String(s.dropFirst("filename*=".count))
+                extVal = decodeExtVal(raw)
+            } else if s.lowercased().hasPrefix("filename=") {
+                let raw = String(s.dropFirst("filename=".count))
+                plain = decodePlain(raw)
+            }
+        }
+        // RFC 6266: ext-val (filename*) wins when both present.
+        return extVal ?? plain
+    }
+
+    /// Decode `UTF-8''<percent-encoded>` (the RFC 5987 ext-val
+    /// production). We only support the `UTF-8` charset; if
+    /// some other encoding is declared we fall back to
+    /// percent-decoding the whole thing.
+    private static func decodeExtVal(_ raw: String) -> String? {
+        // ext-val = charset  "'" [ language ] "'" value-chars
+        // e.g.   UTF-8''SuperDownloadManager.app.zip
+        //        UTF-8''SDM%20App.zip
+        guard let firstTick = raw.firstIndex(of: "'") else { return nil }
+        let afterFirst = raw.index(after: firstTick)
+        guard let secondTick = raw[afterFirst...].firstIndex(of: "'") else {
+            return nil
+        }
+        // charset is raw[..<firstTick] (we only handle UTF-8; treat
+        // anything else as a warning and still try to decode the
+        // percent-encoded payload).
+        let charset = String(raw[..<firstTick]).uppercased()
+        let value = String(raw[raw.index(after: secondTick)...])
+        let decoded = value.removingPercentEncoding ?? value
+        _ = charset  // currently accepted: UTF-8 / ISO-8859-1 / others
+        return decoded.isEmpty ? nil : decoded
+    }
+
+    /// Decode a plain `filename=...` value, supporting both
+    /// RFC 6266 quoted and unquoted forms. Quoted takes
+    /// precedence when present.
+    private static func decodePlain(_ raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespaces)
+        guard !s.isEmpty else { return nil }
+        if s.hasPrefix("\"") && s.hasSuffix("\"") && s.count >= 2 {
+            let inner = String(s.dropFirst().dropLast())
+            return inner.isEmpty ? nil : inner
+        }
+        // Unquoted token: trim trailing semicolons/whitespace, but
+        // the splitter already removed the `;` so we just need to
+        // handle stray quotes / whitespace.
+        let cleaned = s
+            .trimmingCharacters(in: CharacterSet(charactersIn: ";\" "))
+        return cleaned.isEmpty ? nil : cleaned
+    }
 }
