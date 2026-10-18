@@ -2,6 +2,33 @@ import SwiftUI
 import AppKit
 import SuperDownloadManagerCore
 
+// v1.1.2: sidebar-level filter model — selected item in the
+// main window's left rail. Hashable so SwiftUI's List selection
+// can drive it directly. Combines the legacy "tab" (active /
+// history / schedule) with the v1.1.2 per-category / per-status
+// filters that live under "Active".
+enum SidebarSelection: Hashable {
+    case active(filter: ActiveFilter)
+    case history
+    case schedule
+
+    var isActive: Bool {
+        if case .active = self { return true }
+        return false
+    }
+
+    /// ActiveFilter — what to narrow the live download list by
+    /// when the user clicks a sidebar item under "Active".
+    enum ActiveFilter: Hashable {
+        case all
+        case status(String)         // "downloading" / "paused" / "completed" / "failed" / "queued"
+        case category(DownloadCategory)
+    }
+}
+
+/// KeyPath we use to look up the user-tunable toolbar labels.
+private let kToolbarShowLabelsKey = "sdm.toolbar.showLabels"
+
 // v1.1.2: `GlassEffectContainer` is iOS/macOS 26+; the project
 // deployment target is 26, but compiling on an older SDK still
 // needs an `#available` fallback so the file builds in CI when
@@ -478,45 +505,31 @@ private struct AddURLMenuItem: View {
 
 // MARK: - MainWindow
 
-/// Top-level container for the main window. v1.0.5: bilingual
-/// tabs via `Strings`, `Active` / `History` / `Schedule`.
+/// Top-level container for the main window. v1.0.5 was a
+/// segmented Picker with three tabs; v1.1.2 promotes the same
+/// three sections to a sidebar (Active / History / Schedule)
+/// with collapsible status + category subgroups under Active.
 struct MainWindow: View {
     @ObservedObject var store: DownloadListStore
     let engine: SDMEngine
     @State private var bannerMessage: String? = nil
     @State private var showAddSheet = false
-    @State private var selectedTab: Tab = .active
+    @State private var selection: SidebarSelection = .active(filter: .all)
     @State private var historyVM = HistoryViewModel()
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @Environment(\.strings) private var S
 
-    enum Tab: String, CaseIterable, Identifiable {
-        case active = "active"
-        case history = "history"
-        case schedule = "schedule"
-        var id: String { rawValue }
-    }
-
     var body: some View {
-        VStack(spacing: 0) {
-            TabHeader(selection: $selectedTab)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-            if let msg = bannerMessage {
-                ExpiredLinkBanner(summary: msg,
-                                  onReenter: { bannerMessage = nil })
-            }
-            switch selectedTab {
-            case .active:
-                DownloadListView(store: store)
-            case .history:
-                HistoryView(vm: historyVM, store: store)
-            case .schedule:
-                ScheduleView(store: store)
-            }
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            DownloadSidebar(selection: $selection, store: store)
+                .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 280)
+        } detail: {
+            detail
+                .frame(minWidth: 720, minHeight: 480)
         }
         .onReceive(NotificationCenter.default.publisher(
             for: .sdmShowAddSheet)) { _ in
-            selectedTab = .active
+            selection = .active(filter: .all)
         }
         .onChange(of: store.tasks) { _, new in
             for t in new where t.isTerminal {
@@ -536,57 +549,139 @@ struct MainWindow: View {
             }
         }
     }
+
+    @ViewBuilder
+    private var detail: some View {
+        switch selection {
+        case .active(let filter):
+            DownloadListView(store: store, filter: filter)
+        case .history:
+            HistoryView(vm: historyVM, store: store)
+        case .schedule:
+            ScheduleView(store: store)
+        }
+    }
 }
 
-/// v1.1.2: tab-bar header. Replaces the bare `Picker(.segmented)`
-/// from v1.0.5 — the segmented control was the right *control*,
-/// but it sat on top of `.background(.bar)` with no container,
-/// which read as a flat chrome strip. Wrapping it in a Liquid
-/// Glass capsule on macOS 26 lifts the bar off the content and
-/// tracks the selection lens like the system segmented controls
-/// do. Falls back to a plain `.regularMaterial` capsule on
-/// older SDKs (CI without Xcode 26).
-private struct TabHeader: View {
-    @Binding var selection: MainWindow.Tab
+/// Sidebar: three top-level sections (Active / History /
+/// Schedule); Active expands into a status subgroup (All /
+/// Downloading / Paused / Completed / Failed) and a Categories
+/// subgroup (one row per DownloadCategory, with active counts
+/// next to each label).
+private struct DownloadSidebar: View {
+    @Binding var selection: SidebarSelection
+    @ObservedObject var store: DownloadListStore
     @Environment(\.strings) private var S
 
     var body: some View {
         let S = self.S
-        let picker = Picker("", selection: $selection) {
-            Text(S.tabActive).tag(MainWindow.Tab.active)
-            Text(S.tabHistory).tag(MainWindow.Tab.history)
-            Text(S.tabSchedule).tag(MainWindow.Tab.schedule)
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
+        List(selection: $selection) {
+            Section {
+                sidebarRow(.active(filter: .all),
+                            label: S.sidebarAllDownloads,
+                            icon: "tray.full",
+                            count: store.tasks.count)
+                ForEach(activeStatusRows, id: \.state) { row in
+                    sidebarRow(.active(filter: .status(row.state)),
+                                label: row.label,
+                                icon: row.icon,
+                                count: row.count)
+                }
+            } header: {
+                Label(S.sidebarActive, systemImage: "square.stack.3d.up")
+            }
 
-        Group {
-            if #available(macOS 26.0, *) {
-                picker
-                    .padding(6)
+            Section {
+                ForEach(DownloadCategory.allCases, id: \.self) { cat in
+                    sidebarRow(.active(filter: .category(cat)),
+                                label: cat.folderName,
+                                icon: cat.iconName,
+                                count: store.tasks.filter {
+                                    $0.category == cat
+                                }.count,
+                                tint: cat.tint)
+                }
+            } header: {
+                Label(S.sidebarCategories, systemImage: "folder.badge.gearshape")
+            }
+
+            Section {
+                sidebarRow(.history,
+                            label: S.sidebarHistory,
+                            icon: "clock.arrow.circlepath",
+                            count: nil)
+                sidebarRow(.schedule,
+                            label: S.sidebarSchedule,
+                            icon: "calendar.badge.clock",
+                            count: nil)
+            } header: {
+                Label(S.sidebarOther, systemImage: "ellipsis.circle")
+            }
+        }
+        .listStyle(.sidebar)
+    }
+
+    private var activeStatusRows: [StatusRow] {
+        let counts = Dictionary(grouping: store.tasks, by: \.state)
+            .mapValues { $0.count }
+        return [
+            .init(state: "downloading",
+                  label: S.sidebarDownloading,
+                  icon: "arrow.down.circle",
+                  count: counts["downloading"] ?? 0),
+            .init(state: "queued",
+                  label: S.sidebarQueued,
+                  icon: "hourglass",
+                  count: counts["queued"] ?? 0),
+            .init(state: "paused",
+                  label: S.sidebarPaused,
+                  icon: "pause.circle",
+                  count: counts["paused"] ?? 0),
+            .init(state: "completed",
+                  label: S.sidebarCompleted,
+                  icon: "checkmark.circle",
+                  count: counts["completed"] ?? 0),
+            .init(state: "failed",
+                  label: S.sidebarFailed,
+                  icon: "exclamationmark.triangle",
+                  count: counts["failed"] ?? 0),
+        ]
+    }
+
+    @ViewBuilder
+    private func sidebarRow(
+        _ tag: SidebarSelection,
+        label: String,
+        icon: String,
+        count: Int?,
+        tint: Color? = nil
+    ) -> some View {
+        HStack {
+            Label {
+                Text(label)
+            } icon: {
+                Image(systemName: icon)
+                    .foregroundStyle(tint ?? .accentColor)
+            }
+            Spacer(minLength: 4)
+            if let count, count > 0 {
+                Text("\(count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
                     .background {
-                        Capsule().fill(.clear)
-                    }
-                    .glassEffect(.regular.interactive(), in: Capsule())
-                    .overlay {
-                        Capsule().strokeBorder(
-                            Color.primary.opacity(0.06),
-                            lineWidth: 0.5)
-                    }
-            } else {
-                picker
-                    .padding(6)
-                    .background {
-                        Capsule().fill(.regularMaterial)
-                    }
-                    .overlay {
-                        Capsule().strokeBorder(
-                            Color.primary.opacity(0.08),
-                            lineWidth: 0.5)
+                        Capsule().fill(.quaternary)
                     }
             }
         }
-        .frame(maxWidth: 420)
-        .frame(maxWidth: .infinity, alignment: .center)
+        .tag(tag)
+    }
+
+    private struct StatusRow {
+        let state: String
+        let label: String
+        let icon: String
+        let count: Int
     }
 }

@@ -32,6 +32,7 @@ struct SettingsView: View {
     @AppStorage("sdm.capture.clipboard") private var clipboardCapture: Bool = true
     @AppStorage("sdm.notify.onComplete") private var notifyOnComplete: Bool = true
     @AppStorage("sdm.hideDockWhenWindowClosed") private var hideDockWhenWindowClosed: Bool = false
+    @AppStorage("sdm.toolbar.showLabels") private var showToolbarLabels: Bool = true
 
     init(engine: SDMEngine? = nil) {
         self.engine = engine
@@ -143,6 +144,16 @@ struct SettingsView: View {
                 Text(S.settingsDockHeader)
             } footer: {
                 Text(S.settingsHideDockHint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle(S.settingsToggleShowToolbarLabels,
+                       isOn: $showToolbarLabels)
+            } header: {
+                Text(S.settingsToolbarHeader)
+            } footer: {
+                Text(S.settingsShowToolbarLabelsHint)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

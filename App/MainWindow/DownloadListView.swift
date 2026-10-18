@@ -3,6 +3,38 @@ import AppKit
 import UniformTypeIdentifiers
 import SuperDownloadManagerCore
 
+/// GlassCapsule — `ViewModifier` that wraps a toolbar inside a
+/// Liquid Glass capsule on macOS 26+ (falling back to a plain
+/// `.regularMaterial` capsule on older SDKs). Used by the
+/// DownloadToolbar so the row floats visually over the table
+/// instead of sitting flat against the separator.
+private struct GlassCapsule: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content
+                .background {
+                    Capsule().fill(.clear)
+                }
+                .glassEffect(.regular.interactive(), in: Capsule())
+                .overlay {
+                    Capsule().strokeBorder(
+                        Color.primary.opacity(0.06),
+                        lineWidth: 0.5)
+                }
+        } else {
+            content
+                .background {
+                    Capsule().fill(.regularMaterial)
+                }
+                .overlay {
+                    Capsule().strokeBorder(
+                        Color.primary.opacity(0.08),
+                        lineWidth: 0.5)
+                }
+        }
+    }
+}
+
 /// Tiny Identifiable wrapper around UUID so SwiftUI's
 /// `sheet(item:)` can be driven by a `UUID?` state. v1.0.7
 /// keeps only the task ID in `@State`; the live `TaskSummary`
@@ -19,8 +51,14 @@ private struct Identified: Identifiable {
 /// drag-URL-into-window, and the per-row context menu that P1-4
 /// asked for. Clipboard auto-capture lives in `DownloadListStore`;
 /// per-row action helpers and helpers are kept local.
+/// DownloadListView — Active tab body. v1.1.2 takes a
+/// `SidebarSelection.ActiveFilter` so the sidebar's left rail can
+/// narrow the table by status or by `DownloadCategory`. Toolbar
+/// buttons now toggle between icon+label and icon-only at the
+/// user's request (Settings → Toolbar).
 struct DownloadListView: View {
     @ObservedObject var store: DownloadListStore
+    var filter: SidebarSelection.ActiveFilter = .all
     @State private var showAddSheet = false
     @State private var addURL: String = ""
     @State private var addFilename: String = ""
@@ -32,14 +70,23 @@ struct DownloadListView: View {
     @State private var detailTaskID: UUID? = nil
     @Environment(\.strings) private var S
 
+    /// Filter applied to `store.tasks` before sorting / table.
+    private var visibleTasks: [TaskSummary] {
+        switch filter {
+        case .all:
+            return store.tasks
+        case .status(let st):
+            return store.tasks.filter { $0.state == st }
+        case .category(let cat):
+            return store.tasks.filter { $0.category == cat }
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            toolbar
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(.bar)
+            toolbarCapsule
             Divider()
-            if store.tasks.isEmpty {
+            if visibleTasks.isEmpty {
                 EmptyStateView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -55,6 +102,19 @@ struct DownloadListView: View {
             ClipboardConfirmView(store: store, candidate: candidate)
         }
         .environment(\.strings, S)
+    }
+
+    /// Wrap `DownloadToolbar` in a Liquid Glass capsule on macOS
+    /// 26, falling back to a plain material capsule on older
+    /// SDKs (CI without Xcode 26).
+    @ViewBuilder
+    private var toolbarCapsule: some View {
+        DownloadToolbar(
+            store: store,
+            onAdd: { addError = nil; addFilename = ""; showAddSheet = true })
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .modifier(GlassCapsule())
     }
 
     // MARK: - Table
@@ -181,7 +241,7 @@ struct DownloadListView: View {
     }
 
     private var sortedTasks: [TaskSummary] {
-        store.tasks.sorted(using: sortOrder)
+        visibleTasks.sorted(using: sortOrder)
     }
 
     // MARK: - Per-row inline actions
@@ -257,51 +317,8 @@ struct DownloadListView: View {
     }
 
     // MARK: - Toolbar
-
-    private var toolbar: some View {
-        HStack(spacing: 8) {
-            Button {
-                addError = nil
-                addFilename = ""
-                showAddSheet = true
-            } label: {
-                Label(S.toolbarAddURL, systemImage: "plus")
-            }
-            .keyboardShortcut("n", modifiers: [.command])
-            .help("Add a new download URL (⌘N)")
-
-            Spacer()
-
-            let activeCount = store.tasks.filter {
-                $0.state == "downloading" || $0.state == "queued"
-            }.count
-            let pausedCount = store.tasks.filter { $0.state == "paused" }.count
-
-            Button {
-                store.tasks.filter {
-                    $0.state == "downloading" || $0.state == "queued"
-                }.forEach { store.pause(id: $0.id) }
-            } label: {
-                Label(S.toolbarPauseAll, systemImage: "pause.circle")
-            }
-            .disabled(activeCount == 0)
-
-            Button {
-                store.tasks.filter { $0.state == "paused" }
-                    .forEach { store.resume(id: $0.id) }
-            } label: {
-                Label(S.toolbarResumeAll, systemImage: "play.circle")
-            }
-            .disabled(pausedCount == 0)
-
-            Button {
-                store.clearCompleted()
-            } label: {
-                Label(S.toolbarClearCompleted, systemImage: "trash")
-            }
-            .disabled(!store.tasks.contains { $0.state == "completed" })
-        }
-    }
+    // (v1.1.2: moved to `DownloadToolbar` below; this file
+    // focuses on the table + row plumbing.)
 
     // MARK: - Add URL sheet
 
@@ -434,6 +451,114 @@ struct DownloadListView: View {
     private func byteCount(_ bytes: Int64?) -> String {
         guard let bytes, bytes > 0 else { return "—" }
         return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+}
+
+/// DownloadToolbar — toolbar at the top of the Active download
+/// detail. Replaces the v1.0.5 bare `HStack { Button { Label } … }`
+/// row.
+///
+/// v1.1.2: pure icon-only by default, with a per-button label
+/// toggle that the user can switch on in Settings → Toolbar (the
+/// behaviour parallels Preview's "Show Icons and Text" / "Show
+/// Icons Only" view option). When `sdm.toolbar.showLabels` is
+/// `true`, every button renders an icon + label like v1.0.5 did;
+/// when `false`, only the icon is shown, and the button is sized
+/// to the SF Symbol's natural footprint.
+///
+/// The toolbar's frame is intended to live inside a Liquid Glass
+/// capsule on macOS 26 (the parent `DownloadListView` body
+/// applies `.glassEffect(.regular.interactive(), in: Capsule())`
+/// on the toolbar; the toolbar itself stays text-friendly).
+private struct DownloadToolbar: View {
+    @ObservedObject var store: DownloadListStore
+    var onAdd: () -> Void
+    @Environment(\.strings) private var S
+    @AppStorage("sdm.toolbar.showLabels") private var showLabels: Bool = true
+
+    private var activeCount: Int {
+        store.tasks.filter {
+            $0.state == "downloading" || $0.state == "queued"
+        }.count
+    }
+    private var pausedCount: Int {
+        store.tasks.filter { $0.state == "paused" }.count
+    }
+    private var completedCount: Int {
+        store.tasks.filter { $0.state == "completed" }.count
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            toolbarButton(
+                title: S.toolbarAddURL,
+                systemImage: "plus",
+                help: "Add a new download URL (⌘N)",
+                action: onAdd)
+                .keyboardShortcut("n", modifiers: [.command])
+
+            Spacer(minLength: 8)
+
+            toolbarButton(
+                title: S.toolbarPauseAll,
+                systemImage: "pause.fill",
+                help: "Pause all active downloads",
+                action: {
+                    store.tasks.filter {
+                        $0.state == "downloading" || $0.state == "queued"
+                    }.forEach { store.pause(id: $0.id) }
+                }
+            )
+            .disabled(activeCount == 0)
+
+            toolbarButton(
+                title: S.toolbarResumeAll,
+                systemImage: "play.fill",
+                help: "Resume all paused downloads",
+                action: {
+                    store.tasks.filter { $0.state == "paused" }
+                        .forEach { store.resume(id: $0.id) }
+                }
+            )
+            .disabled(pausedCount == 0)
+
+            toolbarButton(
+                title: S.toolbarClearCompleted,
+                systemImage: "trash",
+                help: "Remove completed downloads from the list",
+                action: { store.clearCompleted() }
+            )
+            .disabled(completedCount == 0)
+        }
+    }
+
+    /// Single toolbar button. When `showLabels == true`, the
+    /// button renders as `Label { text } icon: { sf-symbol }`;
+    /// otherwise the label is dropped and the button is sized
+    /// to the icon's natural frame (icon-only, like Preview).
+    @ViewBuilder
+    private func toolbarButton(
+        title: String,
+        systemImage: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        if showLabels {
+            Button(action: action) {
+                Label(title, systemImage: systemImage)
+                    .labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(.borderless)
+            .help(help)
+        } else {
+            Button(action: action) {
+                Image(systemName: systemImage)
+                    .frame(width: 22, height: 22, alignment: .center)
+            }
+            .buttonStyle(.borderless)
+            .help(help)
+            .accessibilityLabel(title)
+        }
     }
 }
 

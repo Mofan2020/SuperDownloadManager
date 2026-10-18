@@ -411,6 +411,40 @@ private enum Catalog {
         "仅保留菜单栏图标。打开窗口期间，Dock 图标会重新显示。")
     static let settingsDockHeader: (String, String) = (
         "Window & Dock", "窗口与 Dock")
+
+    // v1.1.2: toolbar labels toggle.
+    static let settingsToggleShowToolbarLabels: (String, String) = (
+        "Show toolbar labels",
+        "工具栏显示文字标签")
+    static let settingsShowToolbarLabelsHint: (String, String) = (
+        "Show an icon AND a text label on each toolbar button. Off = icons only.",
+        "同时显示图标与文字标签。关闭时只显示图标。")
+    static let settingsToolbarHeader: (String, String) = (
+        "Toolbar", "工具栏")
+
+    // v1.1.2: Sidebar
+    static let sidebarActive: (String, String) = (
+        "Active", "下载中")
+    static let sidebarAllDownloads: (String, String) = (
+        "All downloads", "全部下载")
+    static let sidebarDownloading: (String, String) = (
+        "Downloading", "下载中")
+    static let sidebarQueued: (String, String) = (
+        "Queued", "等待中")
+    static let sidebarPaused: (String, String) = (
+        "Paused", "已暂停")
+    static let sidebarCompleted: (String, String) = (
+        "Completed", "已完成")
+    static let sidebarFailed: (String, String) = (
+        "Failed", "失败")
+    static let sidebarCategories: (String, String) = (
+        "Categories", "分类")
+    static let sidebarHistory: (String, String) = (
+        "History", "历史")
+    static let sidebarSchedule: (String, String) = (
+        "Schedule", "计划")
+    static let sidebarOther: (String, String) = (
+        "Other", "其他")
 }
 
 /// Resolve the current locale tag to a `Strings` locale. v1.1.2:
@@ -720,6 +754,24 @@ public struct Strings {
     public var settingsToggleHideDockWhenWindowClosed: String { pick(Catalog.settingsToggleHideDockWhenWindowClosed) }
     public var settingsHideDockHint:         String { pick(Catalog.settingsHideDockHint) }
     public var settingsDockHeader:           String { pick(Catalog.settingsDockHeader) }
+
+    // v1.1.2: Toolbar labels
+    public var settingsToggleShowToolbarLabels: String { pick(Catalog.settingsToggleShowToolbarLabels) }
+    public var settingsShowToolbarLabelsHint:  String { pick(Catalog.settingsShowToolbarLabelsHint) }
+    public var settingsToolbarHeader:          String { pick(Catalog.settingsToolbarHeader) }
+
+    // v1.1.2: Sidebar
+    public var sidebarActive:         String { pick(Catalog.sidebarActive) }
+    public var sidebarAllDownloads:  String { pick(Catalog.sidebarAllDownloads) }
+    public var sidebarDownloading:    String { pick(Catalog.sidebarDownloading) }
+    public var sidebarQueued:         String { pick(Catalog.sidebarQueued) }
+    public var sidebarPaused:         String { pick(Catalog.sidebarPaused) }
+    public var sidebarCompleted:      String { pick(Catalog.sidebarCompleted) }
+    public var sidebarFailed:         String { pick(Catalog.sidebarFailed) }
+    public var sidebarCategories:     String { pick(Catalog.sidebarCategories) }
+    public var sidebarHistory:        String { pick(Catalog.sidebarHistory) }
+    public var sidebarSchedule:       String { pick(Catalog.sidebarSchedule) }
+    public var sidebarOther:          String { pick(Catalog.sidebarOther) }
 
     // MARK: - Format helpers
     public func settingsDefaultThreadsValue(_ n: Int) -> String {
