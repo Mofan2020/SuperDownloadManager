@@ -49,6 +49,18 @@ public actor SDMEngine {
     public var strategy: RangeStrategy
     public var parallelismCap: Int
 
+    /// v1.1.4: a single shared `HTTPDownloader` so every
+    /// `DownloadFlow` and `ResumeFlow` shares one
+    /// `URLSession`. Without this each flow instance would
+    /// build its own `URLSession`, each bounded by
+    /// `httpMaximumConnectionsPerHost`, and the cap would
+    /// apply *per session* rather than per host — meaning the
+    /// user's effective parallel chunk limit was capped at
+    /// `min(defaultChunks, 4 or 6)` instead of `defaultChunks`.
+    /// We construct exactly one `URLSessionConfiguration` with
+    /// `httpMaximumConnectionsPerHost = 16` and re-use it.
+    public let downloader: HTTPDownloader
+
     /// v1.0.6: per-task speed limiters. Keyed by task id; missing
     /// entries mean "no per-task limit, fall back to the global
     /// `limiter`". A task with `setSpeedLimit(id:)` builds a
@@ -72,11 +84,17 @@ public actor SDMEngine {
         self.queue = TaskQueue(parallelismCap: parallelismCap)
         self.limiter = SpeedLimiter(rateBytesPerSec: 0)
         self.planner = RangePlanner(strategy: strategy)
+        // One downloader (URLSession) for the whole engine.
+        // HTTPDownloader() with no session argument builds a
+        // dedicated URLSessionConfiguration with
+        // httpMaximumConnectionsPerHost = 16 — see
+        // HTTPDownloader.swift for the rationale.
+        self.downloader = HTTPDownloader()
         // Default to ~/Downloads unless caller overrides.
         let fallback = FileManager.default.urls(for: .downloadsDirectory,
                                                 in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Downloads")
+                .appendingPathComponent("Downloads")
         self.defaultDownloadDir = defaultDownloadDir ?? fallback
     }
 
@@ -208,7 +226,8 @@ public actor SDMEngine {
             destination: realDest,
             strategy: strategy,
             parallelismCap: cap,
-            limiter: flowLimiter)
+            limiter: flowLimiter,
+            downloader: downloader)
 
         let progressTask = Task { [weak self] in
             for await bytes in flow.progressChannel.stream {
@@ -229,13 +248,22 @@ public actor SDMEngine {
                 t.speedBytesPerSec = 0
             }
         } catch {
-            // v1.1.3: if `cancel` set the marker before the
-            // cooperative cancellation threw inside the chunk
-            // workers, *do not* overwrite the queue state with
-            // "failed". The cancel-side already wrote "cancelled",
-            // and rewriting to "failed" would lose the partial
-            // bytes on disk and break the resume flow.
-            if CancelGuard.wasCancelled(id) {
+            // v1.1.3: do *not* mark a cooperative-cancellation as
+            // "failed". The cancel-side set the state to
+            // "cancelled" before `live.task.cancel()`; the chunk
+            // worker's `for try await byte` then raised
+            // `URLError(.cancelled)` (`-999`), which the flow
+            // rewrapped as `FlowError.partial`. We pick the right
+            // state by checking whichever signal is available —
+            // `Task.isCancelled` is reliable for cancellations
+            // initiated by either `cancel(id:)` or `pause(id:)`
+            // (which both end in `live.task.cancel()`). The
+            // `CancelGuard` set is the secondary signal for tasks
+            // that have already been removed from `specs` before
+            // the catch handler runs.
+            let cancelledByUs = CancelGuard.wasCancelled(id)
+                || Task.isCancelled
+            if cancelledByUs {
                 CancelGuard.clear(id)
             } else {
                 await queue.update(id: id) { t in

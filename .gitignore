@@ -23,3 +23,5 @@ Package.resolved
 downloads/     # dev downloads dir
 *.partial
 artifacts/     # local zip-staging directory; CI builds it fresh
+artifacts/
+default.profraw

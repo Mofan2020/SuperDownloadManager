@@ -29,10 +29,34 @@ public struct HTTPDownloader: Sendable {
     public let limiter: SpeedLimiter?
     public let userAgent: String
 
-    public init(session: URLSession = .shared,
+    public init(session: URLSession? = nil,
                 limiter: SpeedLimiter? = nil,
                 userAgent: String = "SDM/1.0 (+https://github.com/Mofan2020/SuperDownloadManager)") {
-        self.session = session
+        // v1.1.4: share a dedicated URLSession with a high per-host
+        // connection limit across all chunk workers instead of the
+        // process-wide `URLSession.shared`. `URLSession.shared` on
+        // macOS silently caps at `httpMaximumConnectionsPerHost = 4`
+        // since macOS 10.x — that cap was the *real* reason users
+        // saw chunks completing one at a time on a fast link: the
+        // 5th–8th chunk workers couldn't open their connection
+        // until one of the first four finished. Bumping the cap to
+        // 16 lets every configured chunk run in parallel from the
+        // moment the engine spawns the TaskGroup.
+        //
+        // Tests and probes are still allowed to pass an explicit
+        // `URLSession` (e.g. URLProtocol mocks); we only fall back
+        // to the shared session if `nil`.
+        if let session {
+            self.session = session
+        } else {
+            let cfg = URLSessionConfiguration.default
+            cfg.httpMaximumConnectionsPerHost = 16
+            cfg.timeoutIntervalForRequest = 60
+            cfg.timeoutIntervalForResource = 600
+            cfg.waitsForConnectivity = false
+            cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+            self.session = URLSession(configuration: cfg)
+        }
         self.limiter = limiter
         self.userAgent = userAgent
     }

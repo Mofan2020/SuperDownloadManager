@@ -21,7 +21,16 @@ final class DownloadFlowEndToEndTests: XCTestCase {
         try super.setUpWithError()
         let optIn = ProcessInfo.processInfo.environment["SDM_E2E"]
         let isCI = ProcessInfo.processInfo.environment["CI"] == "true"
-        if !isCI && optIn != "1" {
+        // v1.1.4: for local debugging, also run when running under
+        // `xcodebuild test` and the test was *explicitly* selected
+        // — i.e. `xcodebuild -only-testing` — without the env vars
+        // needed by CI. Otherwise a developer has to remember to
+        // pass `SDM_E2E=1` through `xcodebuild`, which strips env
+        // vars by default.
+        let onlyTesting = ProcessInfo.processInfo.arguments.contains("-only-testing")
+            || (ProcessInfo.processInfo.environment["ONLY_TESTING"] != nil)
+        let runLocally = !isCI && optIn != "1" && !onlyTesting
+        if runLocally {
             throw XCTSkip("DownloadFlow e2e opts in via SDM_E2E=1 (Python range server required).")
         }
         if isCI && optIn == "0" {
@@ -132,6 +141,95 @@ final class DownloadFlowEndToEndTests: XCTestCase {
         } catch let e as DownloadFlow.FlowError {
             if case .noContentLength = e { /* expected */ } else { XCTFail("got \(e)") }
         }
+    }
+
+    // MARK: - Concurrency regression test (v1.1.4)
+    //
+    // The user reported that chunks complete one-at-a-time even
+    // when 8 of them are queued. The throttle was each chunk's
+    // Range response taking ~1s to start, so 8 chunks in serial
+    // take ~8s while 8 chunks *in parallel* should take ~1s. The
+    // RangeStrategy here forces 8 chunks of ~64 KB each.
+    func testChunksRunInParallelNotSequentially() async throws {
+        let port = UInt16.random(in: 40000..<50000)
+        let script = """
+        import http.server, socketserver, time, os
+        from socketserver import ThreadingMixIn
+        PORT = \(port)
+        TOTAL = \(8 * 64 * 1024)
+
+        class ThreadingHTTPServer(ThreadingMixIn, socketserver.TCPServer):
+            daemon_threads = True
+            pass
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                rng = self.headers.get("Range")
+                if rng and rng.startswith("bytes="):
+                    spec = rng[len("bytes="):]
+                    s, e = spec.split("-")
+                    start = int(s) if s else 0
+                    end = int(e) if e else TOTAL - 1
+                    end = min(end, TOTAL - 1)
+                    length = end - start + 1
+                    self.send_response(206)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.send_header("Content-Length", str(length))
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{TOTAL}")
+                    # Force each chunk to take ~1 s so a serial
+                    # bottleneck is observable.
+                    self.end_headers()
+                    block = 4096
+                    sent = 0
+                    while sent < length:
+                        chunk = b"a" * min(block, length - sent)
+                        try:
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                        except Exception:
+                            return
+                        time.sleep(0.05)
+                        sent += len(chunk)
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(TOTAL))
+                    self.end_headers()
+                    self.wfile.write(b"a" * TOTAL)
+            def log_message(self, *args): pass
+
+        with ThreadingHTTPServer(("127.0.0.1", PORT), H) as httpd:
+            httpd.serve_forever()
+        """
+        let url = try await startServerWithScript(script, port: port)
+        defer { stopServer() }
+        let dest = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sdm-e2e-parallel-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: dest) }
+
+        let flow = DownloadFlow(
+            url: url,
+            destination: dest,
+            strategy: RangeStrategy(
+                initialChunkSize: 64 * 1024,
+                maxChunks: 16,
+                defaultChunks: 8,
+                firstRearrangeAfter: 999
+            ),
+            parallelismCap: 8
+        )
+
+        let startedAt = Date()
+        try await flow.run()
+        let elapsed = Date().timeIntervalSince(startedAt)
+
+        // 8 chunks × 0.8 s each serial = ~6.4 s.
+        // 8 chunks in parallel with the same latency = ~0.8 s.
+        // Allow plenty of head-room for CI jitter.
+        XCTAssertLessThan(elapsed, 4.0,
+            "Chunks appear to be running serially — 8 × 0.8 s = ~6.4 s; " +
+            "expected ~0.8 s if parallelismCap actually fans out. " +
+            "Actual: \(String(format: "%.2f", elapsed))s")
     }
 
     // MARK: - Server helpers
