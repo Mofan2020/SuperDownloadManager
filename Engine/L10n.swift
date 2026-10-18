@@ -46,7 +46,7 @@ private enum Catalog {
     static let menuSettings: (String, String) = (
         "Settings…", "设置…")
     static let menuQuit: (String, String) = (
-        "Quit Super Download Manager", "退出 隙间下载")
+        "Quit Super Download Manager", "退出 Super Download Manager")
 
     static let mainDownloads: (String, String) = (
         "Downloads", "下载")
@@ -117,13 +117,13 @@ private enum Catalog {
     static let settingsSidebarAbout: (String, String) = (
         "About", "关于")
     static let settingsAboutTitle: (String, String) = (
-        "Super Download Manager", "隙间下载")
+        "Super Download Manager", "Super Download Manager")
     static let settingsAboutVersion: (String, String) = (
         "Version", "版本")
     static let settingsAboutLicense: (String, String) = (
         "MIT License", "MIT 协议")
     static let settingsAboutCopyright: (String, String) = (
-        "© 2026 Skyc8266", "© 2026 星空喵")
+        "© 2026 Skyc8266", "© 2026 Skyc8266")
 
     // Toolbar / Add URL
     static let toolbarAddURL: (String, String) = (
@@ -138,7 +138,7 @@ private enum Catalog {
         "Add Download", "添加下载")
     static let addSheetSubtitle: (String, String) = (
         "Enter a URL. SDM will start a multi-threaded download immediately.",
-        "输入 URL，隙间下载将立即开始多线程下载。")
+        "输入 URL，SDM 将立即开始多线程下载。")
     static let addSheetURLField: (String, String) = (
         "URL", "URL")
     static let addSheetFilenameField: (String, String) = (
@@ -158,7 +158,7 @@ private enum Catalog {
         "No downloads yet", "还没有下载")
     static let emptyHint: (String, String) = (
         "Click + or press ⌘N to add a URL. Drop a download in Firefox/Safari to send it to SDM. From a terminal: `sdmdm add <url>`. Drag a URL onto this window.",
-        "点击 + 或按 ⌘N 添加 URL。把 Firefox/Safari 的下载发到隙间下载。终端命令：`sdmdm add <url>`。直接把 URL 拖进窗口。")
+        "点击 + 或按 ⌘N 添加 URL。把 Firefox/Safari 的下载发到 SDM。终端命令：`sdmdm add <url>`。直接把 URL 拖进窗口。")
     static let emptyTipLang: (String, String) = (
         "Settings → Language to switch to 中文.", "设置 → 语言 切换到 English。")
 
@@ -356,7 +356,7 @@ private enum Catalog {
     static let listEmDash: (String, String) = (
         "—", "—")
     static let listAppName: (String, String) = (
-        "Super Download Manager", "隙间下载")
+        "Super Download Manager", "Super Download Manager")
     static let listProgressPercent: (String, String) = (
         "\(0)%", "\(0)%")
     static let listKBPerSec: (String, String) = (

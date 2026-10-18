@@ -7,7 +7,7 @@ import Foundation
 // bound to a Unix Domain Socket at
 // `~/Library/Application Support/SuperDownloadManager/sdmd.sock`.
 // The LaunchAgent plist (P0's
-// `Launcher/templates/com.superdownloadmanager.daemon.plist`)
+// `Launcher/templates/com.skyc8266.superdownloadmanager.daemon.plist`)
 // points at this binary and sets that env var so that even the
 // .app launch behaves as a server.
 //

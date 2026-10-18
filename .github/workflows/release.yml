@@ -128,7 +128,7 @@ jobs:
       - name: Notify (console)
         run: |
           echo "::notice::Pre-release ${{ steps.ver.outputs.tag }} published as **Pre-release**."
-          echo "::notice::星空喵 must run the build, confirm manually, then the agent flips --prerelease=false."
+          echo "::notice::Maintainer must run the build, confirm manually, then the agent flips --prerelease=false."
 
       - name: Upload artifact checksum
         run: |

@@ -11,7 +11,7 @@ import XCTest
 /// Local dev workflow:
 ///   1. Open SuperDownloadManager.app once (auto-installs
 ///      LaunchAgent), or run scripts/install.sh.
-///   2. `launchctl kickstart -k gui/$(id -u)/com.superdownloadmanager.daemon`
+///   2. `launchctl kickstart -k gui/$(id -u)/com.skyc8266.superdownloadmanager.daemon`
 ///   3. `xcodebuild test ... -only-testing:SuperDownloadManagerTests/DispatchServerTests`
 
 final class DispatchServerTests: XCTestCase {

@@ -4,7 +4,7 @@
 
 ## Firefox
 
-1. Make sure SDM is running (status-bar icon present, or `launchctl list | grep com.superdownloadmanager`).
+1. Make sure SDM is running (status-bar icon present, or `launchctl list | grep com.skyc8266.superdownloadmanager`).
 2. Firefox → `about:debugging#/runtime/this-firefox`
 3. **Load Temporary Add-on...** → pick `Extensions/Firefox/manifest.json`
 4. The toolbar shows a purple ↓ icon. Click any download link in Firefox — SDM takes over.

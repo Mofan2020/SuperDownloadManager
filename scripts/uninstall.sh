@@ -2,7 +2,7 @@
 # SDM uninstall — reverses install.sh.
 set -eu
 
-LAUNCH_AGENT_LABEL="com.superdownloadmanager.daemon"
+LAUNCH_AGENT_LABEL="com.skyc8266.superdownloadmanager.daemon"
 LAUNCH_AGENT_PLIST="${HOME}/Library/LaunchAgents/${LAUNCH_AGENT_LABEL}.plist"
 CLI_LINK="${HOME}/.local/bin/sdmdm"
 APP_PATH="${1:-/Applications/SuperDownloadManager.app}"

@@ -36,7 +36,7 @@ public struct SiteRule: Codable, Identifiable, Equatable, Sendable {
 public final class SiteRuleStore: @unchecked Sendable {
     public static let shared = SiteRuleStore()
     private let defaultsKey = "sdm.siteRules"
-    private let keychainService = "com.superdownloadmanager.siteRules"
+    private let keychainService = "com.skyc8266.superdownloadmanager.siteRules"
 
     public func load() -> [SiteRule] {
         guard let data = UserDefaults.standard.data(forKey: defaultsKey) else {

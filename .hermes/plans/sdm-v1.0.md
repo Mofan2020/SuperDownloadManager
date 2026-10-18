@@ -96,7 +96,7 @@ SuperDownloadManager/
 │   ├── install.sh                     # 首次启动调起
 │   ├── autostart.sh
 │   └── templates/
-│       └── com.superdownloadmanager.daemon.plist
+│       └── com.skyc8266.superdownloadmanager.daemon.plist
 ├── Resources/                         # 静态资源
 │   ├── AppIcon.iconmodel/             # 设计源（SVG）
 │   ├── Assets.xcassets                # 编译后 asset catalog
@@ -139,8 +139,8 @@ SuperDownloadManager/
 **验证项**：
 - [ ] `xcodebuild ... build` BUILD SUCCEEDED
 - [ ] `xcodebuild ... build` 0 warning（`-Werror` 严格）
-- [ ] `find build/Build/Products/Debug/SuperDownloadManager.app` 内含 `Contents/MacOS/SuperDownloadManager`、`Contents/Info.plist`、`Contents/Resources/com.superdownloadmanager.daemon.plist`
-- [ ] `codesign -dv SuperDownloadManager.app` 显示 `identifier=com.superdownloadmanager.app`、`signature=adhoc`
+- [ ] `find build/Build/Products/Debug/SuperDownloadManager.app` 内含 `Contents/MacOS/SuperDownloadManager`、`Contents/Info.plist`、`Contents/Resources/com.skyc8266.superdownloadmanager.daemon.plist`
+- [ ] `codesign -dv SuperDownloadManager.app` 显示 `identifier=com.skyc8266.superdownloadmanager.app`、`signature=adhoc`
 - [ ] `git log -1 --stat` 单 commit
 
 **commit**：`P0: XcodeGen 工程骨架，3 个 target，Debug 构建 0 warning`
@@ -240,7 +240,7 @@ SuperDownloadManager/
 4. `Daemon/sdmdmain`：LaunchAgent 安装逻辑；接到 socket 后转发到 DownloadEngine
 5. 现有 CLI target 接入：实装 add/list/pause/resume/cancel/config/sniff/relink
 6. `Launcher/install.sh`：首次启动时调起（用户主动），写 LaunchAgent plist → `launchctl bootstrap gui/$(id -u)`
-7. `Launcher/templates/com.superdownloadmanager.daemon.plist`：`KeepAlive=true` + `RunAtLoad=true`，环境变量 `SDM_CONFIG=~/Library/Preferences/com.superdownloadmanager.app.plist`
+7. `Launcher/templates/com.skyc8266.superdownloadmanager.daemon.plist`：`KeepAlive=true` + `RunAtLoad=true`，环境变量 `SDM_CONFIG=~/Library/Preferences/com.skyc8266.superdownloadmanager.app.plist`
 
 **验证项**：
 - [ ] `~/.local/bin/sdmdm add <url>` 入队成功，CLI 返回 task_id

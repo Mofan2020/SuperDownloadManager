@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.superdownloadmanager.daemon</string>
+    <string>com.skyc8266.superdownloadmanager.daemon</string>
     <key>ProgramArguments</key>
     <array>
         <string>/Applications/SuperDownloadManager.app/Contents/MacOS/sdmd</string>
@@ -15,8 +15,8 @@
     <key>ProcessType</key>
     <string>Background</string>
     <key>StandardOutPath</key>
-    <string>/tmp/com.superdownloadmanager.daemon.out.log</string>
+    <string>/tmp/com.skyc8266.superdownloadmanager.daemon.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/com.superdownloadmanager.daemon.err.log</string>
+    <string>/tmp/com.skyc8266.superdownloadmanager.daemon.err.log</string>
 </dict>
 </plist>

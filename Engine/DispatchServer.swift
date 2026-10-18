@@ -20,7 +20,7 @@ public final class DispatchServer: @unchecked Sendable {
     public init(port: UInt16 = 7955,
                 onAdd: @escaping (URL, String?, String?) -> Void) {
         self.port = port
-        self.queue = DispatchQueue(label: "com.superdownloadmanager.dispatch")
+        self.queue = DispatchQueue(label: "com.skyc8266.superdownloadmanager.dispatch")
         self.onAdd = onAdd
     }
 
