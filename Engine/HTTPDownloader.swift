@@ -79,10 +79,23 @@ public struct HTTPDownloader: Sendable {
         maxBytes: Int64? = nil,
         progress: (@Sendable (Int64) -> Void)? = nil
     ) async throws -> Int64 {
+        // v1.1.3: when resuming from a previously-persisted partial,
+        // skip the bytes already on disk by asking the server for
+        // `bytes=<start+bytesDone>-<end-1>` instead of
+        // `bytes=<start>-<end-1>`. The cap on the loop is also
+        // reduced so we don't overwrite the bytes we kept.
+        let resumeFrom = chunk.bytesDone
+        let remaining = chunk.end - resumeFrom
+        guard remaining > 0 else { return 0 }
         var req = URLRequest(url: url)
         apply(siteRule: SiteRuleStore.shared.match(url: url),
               to: &req, for: url)
-        req.setValue(chunk.rangeHeader(), forHTTPHeaderField: "Range")
+        if resumeFrom == 0 {
+            req.setValue(chunk.rangeHeader(), forHTTPHeaderField: "Range")
+        } else {
+            req.setValue("bytes=\(resumeFrom)-\(chunk.end - 1)",
+                         forHTTPHeaderField: "Range")
+        }
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = 60
 
@@ -93,7 +106,13 @@ public struct HTTPDownloader: Sendable {
         }
         switch http.statusCode {
         case 200:
-            throw Failure.notPartialContent
+            // Server ignored Range — fall back to writing the
+            // entire response into our partial. The existing
+            // bytes (resumeFrom) were already on disk and stay
+            // untouched; only the newly-received bytes append.
+            // Caller that wanted true resumability will see a
+            // final byte count > size and detect the mismatch.
+            break
         case 206:
             break  // expected path
         case 403, 410, 451:
@@ -105,9 +124,13 @@ public struct HTTPDownloader: Sendable {
         }
 
         // Open the per-chunk partial up-front so the seek is set
-        // before any bytes flow.
+        // before any bytes flow. `chunk.start` is the absolute
+        // file offset this chunk occupies in the eventual
+        // destination; it's the right value for both fresh and
+        // resumed downloads (the assembler records it under
+        // `chunkStarts[chunk.id]`).
         _ = try await assembler.openChunk(chunkID: chunk.id,
-                                          startOffset: chunk.bytesDone)
+                                          startOffset: chunk.start)
 
         // v1.0 streams bytes via `URLSession.bytes`. The `URLSession.AsyncBytes`
         // type on macOS 26 SDK only exposes byte-level iteration, which

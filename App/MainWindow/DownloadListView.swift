@@ -4,21 +4,32 @@ import UniformTypeIdentifiers
 import SuperDownloadManagerCore
 
 /// GlassCapsule — `ViewModifier` that wraps a toolbar inside a
-/// Liquid Glass capsule on macOS 26+ (falling back to a plain
-/// `.regularMaterial` capsule on older SDKs). Used by the
-/// DownloadToolbar so the row floats visually over the table
-/// instead of sitting flat against the separator.
+/// capsule that *looks* like Liquid Glass on macOS 26+ but uses
+/// `.regularMaterial` (not the truly interactive glass effect)
+/// underneath. v1.1.3 had used `.glassEffect(.regular.interactive())`
+/// and three of the four toolbar buttons (Pause All / Resume
+/// All / Clear Completed) stopped responding to clicks; the
+/// `.interactive()` glass variant captures click events intended
+/// for the subview buttons in macOS 26's first release, and
+/// the "Add URL" button worked only because it had no `.disabled`
+/// modifier and was the first to receive focus during the
+/// window's initial active-state toggle. Switching to plain
+/// `.regularMaterial` + a hand-drawn stroke keeps the visual
+/// approximation of a glass capsule while letting every child
+/// button receive clicks.
+///
+/// Falls back to a `.regularMaterial` capsule on older SDKs as
+/// well so older CI toolchains link without #available blocks.
 private struct GlassCapsule: ViewModifier {
     func body(content: Content) -> some View {
         if #available(macOS 26.0, *) {
             content
                 .background {
-                    Capsule().fill(.clear)
+                    Capsule().fill(.regularMaterial)
                 }
-                .glassEffect(.regular.interactive(), in: Capsule())
                 .overlay {
                     Capsule().strokeBorder(
-                        Color.primary.opacity(0.06),
+                        Color.primary.opacity(0.10),
                         lineWidth: 0.5)
                 }
         } else {

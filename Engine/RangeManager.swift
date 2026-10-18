@@ -97,6 +97,21 @@ public actor RangePlanner {
 
     public func allChunks() -> [Chunk] { chunks }
 
+    /// v1.1.3: replace the plan wholesale with the given chunks.
+    /// Used by `DownloadFlow` to seed `bytesDone` from any
+    /// pre-existing partial files before the chunk workers are
+    /// spawned. The plan layout (start, end, id) is preserved —
+    /// only `bytesDone` typically changes.
+    public func replaceChunks(_ newChunks: [Chunk]) {
+        // Validate that the number of chunks doesn't change so
+        // the worker Tasks that reference the same id remain
+        // valid. Renumbering would orphan the running work; the
+        // download must complete + restart for that.
+        precondition(newChunks.count == chunks.count,
+                     "replaceChunks: chunk count must match")
+        chunks = newChunks
+    }
+
     public func consume(chunkID: Int, bytes: Int64) {
         guard let idx = chunks.firstIndex(where: { $0.id == chunkID }) else { return }
         chunks[idx].bytesDone = min(chunks[idx].end, chunks[idx].bytesDone + bytes)

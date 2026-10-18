@@ -229,10 +229,20 @@ public actor SDMEngine {
                 t.speedBytesPerSec = 0
             }
         } catch {
-            await queue.update(id: id) { t in
-                t.state = "failed"
-                t.errorMessage = String(describing: error)
-                t.speedBytesPerSec = 0
+            // v1.1.3: if `cancel` set the marker before the
+            // cooperative cancellation threw inside the chunk
+            // workers, *do not* overwrite the queue state with
+            // "failed". The cancel-side already wrote "cancelled",
+            // and rewriting to "failed" would lose the partial
+            // bytes on disk and break the resume flow.
+            if CancelGuard.wasCancelled(id) {
+                CancelGuard.clear(id)
+            } else {
+                await queue.update(id: id) { t in
+                    t.state = "failed"
+                    t.errorMessage = String(describing: error)
+                    t.speedBytesPerSec = 0
+                }
             }
         }
         progressTask.cancel()
@@ -251,12 +261,40 @@ public actor SDMEngine {
     /// can resume later (resume itself restarts from byte 0 in
     /// v1.0.3; chunk-state preservation lands in v1.0.4).
     public func cancel(id: UUID) async {
-        if let live = specs.removeValue(forKey: id) {
-            live.task.cancel()
-        }
+        // v1.1.3: set the state *before* cancelling the live task,
+        // so the cancellation `catch` in `runFlow` (which would
+        // otherwise mark the task "failed" because the cooperative
+        // `Task.isCancelled` throws a `CancellationError` that the
+        // flow treats as a partial failure) cannot overwrite
+        // "cancelled". The state is what's stored in the queue
+        // table and drives the toolbar's Pause/Resume enabled
+        // states, so this matters even when the user only looks at
+        // the row.
         await queue.update(id: id) { t in
             if t.state != "completed" { t.state = "cancelled" }
         }
+        if let live = specs.removeValue(forKey: id) {
+            // Suppress the `runFlow` catch handler's overwrite to
+            // "failed": a small cancellation marker the catch
+            // reads to know it's a peer-initiated cancel, not a
+            // real failure.
+            CancelGuard.mark(id: id)
+            live.task.cancel()
+        }
+    }
+
+    /// v1.1.3: small bit set used by `cancel` to communicate with
+    /// `runFlow`'s catch handler. We can't pass a CancellationError
+    /// back from cancel itself (the cancel does not produce a
+    /// thrown error), and a sibling Task property would race with
+    /// the cooperative cancellation. A process-scoped marker the
+    /// catch handler reads is the simplest model that still keeps
+    /// the queue state coherent.
+    private enum CancelGuard {
+        private static var ids: Set<UUID> = []
+        static func mark(id: UUID) { ids.insert(id) }
+        static func wasCancelled(_ id: UUID) -> Bool { ids.contains(id) }
+        static func clear(_ id: UUID) { ids.remove(id) }
     }
 
     /// Pause a running task. v1.0.3 implements "soft pause" by

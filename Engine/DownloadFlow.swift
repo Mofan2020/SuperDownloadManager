@@ -90,12 +90,51 @@ public struct DownloadFlow: Sendable {
         // 2. Plan + assembler.
         let planner = RangePlanner(strategy: strategy)
         await planner.startPlan(contentLength: contentLength)
-        let chunks = await planner.allChunks()
+        // v1.1.3: scan pre-existing per-chunk partials left on
+        // disk by a previous (paused / cancelled / crashed)
+        // session. Those files are named
+        // `<dest>.sdm.partial-<chunkID>` and carry the bytes the
+        // worker had already persisted before interruption.
+        // Pre-loading `chunk.bytesDone` from disk is what makes
+        // resume work — without this step, a paused download
+        // would re-download every byte from scratch.
+        var chunks = await planner.allChunks()
+        var preExistingBytes: Int64 = 0
+        for i in chunks.indices {
+            let partialPath = destination
+                .appendingPathExtension("sdm.partial-\(chunks[i].id)")
+            let size: Int64 = (try? FileManager.default
+                .attributesOfItem(atPath: partialPath.path)[.size] as? Int64) ?? 0
+            if size > 0 {
+                let cap = chunks[i].end - chunks[i].start
+                let clamped = min(size, cap)
+                if clamped > 0 {
+                    chunks[i].bytesDone = clamped
+                    preExistingBytes += clamped
+                }
+            }
+        }
+        await planner.replaceChunks(chunks)
+
         let n = max(1, min(chunks.count, parallelismCap))
-        let activeChunks = Array(chunks.prefix(n))
+        let activeChunks: [Chunk] = chunks
+            .prefix(n)
+            .filter { $0.bytesDone < $0.size }
+        // Always re-decode so the progress channel can include
+        // pre-existing bytes from the very first tick.
+        if preExistingBytes > 0 {
+            progressChannel.report(preExistingBytes)
+        }
 
         let assembler = FileAssembler(destination: destination)
         for chunk in activeChunks {
+            // Pass the per-chunk's *planned* startOffset — the
+            // absolute byte position this chunk occupies in the
+            // final destination file. `chunk.bytesDone` is how
+            // far into the chunk range the worker has already
+            // persisted on a resume; that's tracked separately
+            // by `chunk.bytesDone` and by `chunkWritten` in the
+            // assembler itself.
             _ = try? await assembler.openChunk(
                 chunkID: chunk.id,
                 startOffset: chunk.start)
@@ -148,20 +187,21 @@ public struct DownloadFlow: Sendable {
         }
 
         // 4. Merge + sidecar.
-        // v1.1.2: the assembler exposes both sync (finalize) and
+        // v1.1.3: the assembler exposes both sync (finalize) and
         // async (finalizeAsync) entry points. The flow is itself
         // an async function, but the merge IO is short and the
         // sync version is what tests cover; dispatch off the
         // actor via `finalizeAsync` keeps the engine's task
         // scheduler happy.
         do {
-            try await assembler.finalizeAsync(chunksInOrder: activeChunks.map { $0.id })
+            try await assembler.finalizeAsync(
+                chunksInOrder: chunks.map { $0.id })
         } catch {
             throw FlowError.mergeFailed(error)
         }
         let state = ResumeState.from(probe: probe,
                                      filename: destination.lastPathComponent,
-                                     chunks: activeChunks)
+                                     chunks: chunks)
         do {
             try state.write(to: destination)
         } catch {

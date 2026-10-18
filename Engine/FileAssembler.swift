@@ -203,13 +203,37 @@ public final class FileAssembler: @unchecked Sendable {
             at: destination.deletingLastPathComponent(),
             withIntermediateDirectories: true)
         let partial = destination.appendingPathExtension("sdm.partial-\(chunkID)")
-        FileManager.default.createFile(atPath: partial.path, contents: nil)
-        let handle = try FileHandle(forWritingTo: partial)
+        // v1.1.3: open the per-chunk partial in *append* mode
+        // (`forUpdating`) so a previously-paused download can
+        // resume — v1.0.x used `forWritingTo`, which truncates
+        // the file every time and silently destroyed any bytes
+        // already on disk.
+        var preExistingSize: Int64 = 0
+        if !FileManager.default.fileExists(atPath: partial.path) {
+            FileManager.default.createFile(atPath: partial.path,
+                                            contents: nil,
+                                            attributes: nil)
+        } else {
+            // Existing partial — record its current size as the
+            // chunk's `bytesDone` so the planner starts from
+            // there instead of zero.
+            preExistingSize = (try? FileManager.default
+                .attributesOfItem(atPath: partial.path)[.size] as? Int64) ?? 0
+        }
+        // `forUpdating` keeps the existing contents and starts
+        // writing at the end of the file.
+        let handle = try FileHandle(forUpdating: partial)
+        if preExistingSize > 0 {
+            // `seekToEnd` shouldn't fail when the file we just
+            // opened exists — if it does, we'll catch it on the
+            // first `write(contentsOf:)` below.
+            do { try handle.seekToEnd() } catch { /* best-effort */ }
+        }
         handles[chunkID] = handle
         chunkLocks[chunkID] = NSLock()
         partialPaths[chunkID] = partial
         chunkStarts[chunkID] = startOffset
-        chunkWritten[chunkID] = 0
+        chunkWritten[chunkID] = preExistingSize
         return handle
     }
 
