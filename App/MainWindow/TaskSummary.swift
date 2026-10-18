@@ -30,7 +30,7 @@ public struct TaskSummary: Identifiable, Equatable {
 
     public var fractionDone: Double {
         guard let total = totalBytes, total > 0 else { return 0 }
-        return Double(bytesDone) / Double(total)
+        return min(1.0, max(0.0, Double(bytesDone) / Double(total)))
     }
 
     public var speedDescription: String {

@@ -332,6 +332,14 @@ public actor SDMEngine {
         guard var live = specs[id] else { return }
         live.isPaused = true
         specs[id] = live
+        // v1.1.6: pause is a sibling of cancel from the resume
+        // task's point of view — both end in `live.task.cancel()`,
+        // and the resume catch handler reads `CancelGuard` (or
+        // `Task.isCancelled`) to decide between "failed" and the
+        // user-initiated state. Marking the guard here keeps the
+        // behaviour symmetric with `cancel(id:)` and stops pause
+        // mid-resume from being reported as "failed".
+        CancelGuard.mark(id: id)
         live.task.cancel()
         await queue.update(id: id) { t in
             t.state = "paused"
@@ -407,9 +415,37 @@ public actor SDMEngine {
                     destinationDirectory: summary.destination.deletingLastPathComponent())])
                 return
             }
-            await queue.update(id: id) { t in
-                t.state = "failed"
-                t.errorMessage = String(describing: error)
+            // v1.1.6: distinguish cooperative cancellation (the
+            // user's pause/cancel) from a real network/parse
+            // failure. The resume task runs in `live.task`; when
+            // the user clicks pause/cancel, `live.task.cancel()`
+            // fires, `URLSession.data(for:)` raises
+            // `URLError(.cancelled)`, and the catch below must
+            // NOT mark "failed" — leaving the task in "cancelled"
+            // (set by `cancel()` itself, or "paused" if it was a
+            // pause that beat the cancel) so the user can resume
+            // from the .part file on disk. Without this check,
+            // every pause mid-resume was reported as "failed".
+            let cancelledByUs = CancelGuard.wasCancelled(id)
+                || Task.isCancelled
+            if cancelledByUs {
+                CancelGuard.clear(id)
+                // `pause()` already set state to "paused" and
+                // `cancel()` already set it to "cancelled"; if
+                // neither ran (e.g. the cancel raced ahead of
+                // the resume's spawn), fall back to "cancelled"
+                // instead of "failed".
+                await queue.update(id: id) { t in
+                    if t.state != "paused" && t.state != "completed" {
+                        t.state = "cancelled"
+                    }
+                    t.speedBytesPerSec = 0
+                }
+            } else {
+                await queue.update(id: id) { t in
+                    t.state = "failed"
+                    t.errorMessage = String(describing: error)
+                }
             }
         }
     }

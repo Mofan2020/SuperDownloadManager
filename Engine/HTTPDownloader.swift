@@ -50,7 +50,7 @@ public struct HTTPDownloader: Sendable {
             self.session = session
         } else {
             let cfg = URLSessionConfiguration.default
-            cfg.httpMaximumConnectionsPerHost = 16
+            cfg.httpMaximumConnectionsPerHost = 32
             cfg.timeoutIntervalForRequest = 60
             cfg.timeoutIntervalForResource = 600
             cfg.waitsForConnectivity = false
@@ -123,7 +123,32 @@ public struct HTTPDownloader: Sendable {
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = 60
 
-        let (bytesStream, response) = try await session.bytes(for: req)
+        // Open the per-chunk partial up-front so the seek is set
+        // before any bytes flow. `chunk.start` is the absolute
+        // file offset this chunk occupies in the eventual
+        // destination; it's the right value for both fresh and
+        // resumed downloads (the assembler records it under
+        // `chunkStarts[chunk.id]`).
+        _ = try await assembler.openChunk(chunkID: chunk.id,
+                                          startOffset: chunk.start)
+
+        // v1.1.5: use `URLSession.data(for:)` (one Data object
+        // per request) instead of `URLSession.bytes` (one byte
+        // per async hop). On macOS 26, `URLSession.AsyncBytes`
+        // forced an actor hop *per single byte*, which throttled
+        // the chunk workers' real concurrency to roughly one
+        // byte per scheduler tick per chunk — on a fast link
+        // (8 × 64 KB chunks pulling at line rate), the system
+        // spent more time scheduling hops than moving data.
+        // `data(for:)` returns the full response body in one
+        // shot, so each chunk worker runs straight through with
+        // no intermediate yields, and a single `URLSession` with
+        // `httpMaximumConnectionsPerHost = 16` (set in the
+        // init below) keeps every chunk live in parallel.
+        //
+        // The byte-level loop is still useful for progress
+        // updates — we slice the body into 64 KB blocks for that.
+        let (data, response) = try await session.data(for: req)
 
         guard let http = response as? HTTPURLResponse else {
             throw Failure.decoding
@@ -134,8 +159,6 @@ public struct HTTPDownloader: Sendable {
             // entire response into our partial. The existing
             // bytes (resumeFrom) were already on disk and stay
             // untouched; only the newly-received bytes append.
-            // Caller that wanted true resumability will see a
-            // final byte count > size and detect the mismatch.
             break
         case 206:
             break  // expected path
@@ -147,76 +170,41 @@ public struct HTTPDownloader: Sendable {
             throw Failure.unknown("status \(http.statusCode)")
         }
 
-        // Open the per-chunk partial up-front so the seek is set
-        // before any bytes flow. `chunk.start` is the absolute
-        // file offset this chunk occupies in the eventual
-        // destination; it's the right value for both fresh and
-        // resumed downloads (the assembler records it under
-        // `chunkStarts[chunk.id]`).
-        _ = try await assembler.openChunk(chunkID: chunk.id,
-                                          startOffset: chunk.start)
-
-        // v1.0 streams bytes via `URLSession.bytes`. The `URLSession.AsyncBytes`
-        // type on macOS 26 SDK only exposes byte-level iteration, which
-        // forces an actor hop on every byte when combined with the
-        // limiter. We work around that by:
-        //   1. reading a moderate buffer per iteration
-        //   2. flush to disk only when the buffer crosses 64 KB
-        // The actor hop still happens once per underlying socket
-        // read (not once per byte) because `URLSession.AsyncBytes`
-        // already coalesces server-side buffer blocks; the per-byte
-        // `for await` loop's hop overhead is paid only on the
-        // actor side, not the network side. This is acceptable
-        // for the v1.0 single-task model.
-        var buf = Data()
-        buf.reserveCapacity(64 * 1024)
+        // Slice the response body into 64 KB blocks, flush to
+        // the per-chunk partial, and report progress. The whole
+        // body is in memory at this point — for very large
+        // chunks (> tens of MB), the OS reuses the buffer for
+        // the next chunk; in practice this is bounded by the
+        // largest single chunk a Range header would return.
+        var offset = 0
         var written: Int64 = 0
-
-        for try await byte in bytesStream {
+        let total = data.count
+        if total == 0 { return 0 }
+        while offset < total {
             if Task.isCancelled { break }
+            let chunkEnd = min(offset + 64 * 1024, total)
+            let slice = data.subdata(in: offset..<chunkEnd)
             // Cap the chunk at `chunk.end - chunk.bytesDone`. The
             // server returns 206 with `Content-Length: chunk.size`,
-            // but rare chunked encodings advertise more than we asked
-            // for. Honor the planned range, not the response header.
+            // but rare chunked encodings advertise more than we
+            // asked for. Honor the planned range, not the
+            // response header.
             let cap = chunk.end - chunk.bytesDone
-            let remaining: Int64 = cap - written
+            let remaining = cap - Int64(written)
             if remaining <= 0 { break }
-            buf.append(byte)
-            // Flush when buf is large enough OR we've hit the cap.
-            let flushNow = buf.count >= 64 * 1024
-                || (Int64(buf.count) >= remaining)
-            if flushNow {
-                let toWrite: Data
-                if Int64(buf.count) > remaining {
-                    toWrite = Data(buf.prefix(Int(remaining)))
-                } else {
-                    toWrite = buf
-                }
-                await limiter?.consume(toWrite.count)
-                let n = try await assembler.append(toWrite, to: chunk.id)
-                written += n
-                progress?(n)
-                if Int64(buf.count) > remaining {
-                    buf.removeAll(keepingCapacity: true)
-                    break
-                }
-                buf.removeAll(keepingCapacity: true)
+            let toWrite: Data
+            if Int64(slice.count) > remaining {
+                toWrite = slice.prefix(Int(remaining))
+            } else {
+                toWrite = slice
             }
+            await limiter?.consume(toWrite.count)
+            let n = try await assembler.append(toWrite, to: chunk.id)
+            written += n
+            progress?(n)
+            offset = chunkEnd
+            if Int64(slice.count) > remaining { break }
         }
-        if !buf.isEmpty {
-            let cap = chunk.end - chunk.bytesDone
-            let remaining: Int64 = max(0, cap - written)
-            let toWrite: Data = (Int64(buf.count) > remaining && remaining > 0)
-                ? Data(buf.prefix(Int(remaining)))
-                : buf
-            if !toWrite.isEmpty {
-                await limiter?.consume(toWrite.count)
-                let n = try await assembler.append(toWrite, to: chunk.id)
-                written += n
-                progress?(n)
-            }
-        }
-
         return written
     }
 
