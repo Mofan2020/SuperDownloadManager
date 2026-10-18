@@ -422,6 +422,21 @@ private enum Catalog {
     static let settingsToolbarHeader: (String, String) = (
         "Toolbar", "工具栏")
 
+    // v1.1.8: opt-in TLS bypass. Lets the user bypass
+    // validation against a host's CA chain (useful when
+    // behind a corporate reverse proxy whose leaf isn't
+    // in the system keychain). Off by default; on = every
+    // HTTPS connection accepts the server's `SecTrust`
+    // without chain validation.
+    static let settingsNetworkHeader: (String, String) = (
+        "Network", "网络")
+    static let settingsToggleIgnoreSSL: (String, String) = (
+        "Allow ignoring SSL certificate errors",
+        "允许忽略 SSL 证书错误")
+    static let settingsIgnoreSSLHint: (String, String) = (
+        "Disables TLS chain validation for every connection. Use this if a host is reverse-proxied through an edge whose certificate isn't in the system keychain. Off by default — only turn on for sources you trust.",
+        "关闭所有连接的 TLS 证书链校验。如果下载源在反向代理后面，而代理的证书不在系统钥匙串里时打开。默认关闭，仅对信任的来源打开。")
+
     // v1.1.2: Sidebar
     static let sidebarActive: (String, String) = (
         "Active", "下载中")
@@ -776,6 +791,9 @@ public struct Strings {
     public var settingsToggleShowToolbarLabels: String { pick(Catalog.settingsToggleShowToolbarLabels) }
     public var settingsShowToolbarLabelsHint:  String { pick(Catalog.settingsShowToolbarLabelsHint) }
     public var settingsToolbarHeader:          String { pick(Catalog.settingsToolbarHeader) }
+    public var settingsToggleIgnoreSSL:        String { pick(Catalog.settingsToggleIgnoreSSL) }
+    public var settingsIgnoreSSLHint:          String { pick(Catalog.settingsIgnoreSSLHint) }
+    public var settingsNetworkHeader:          String { pick(Catalog.settingsNetworkHeader) }
 
     // v1.1.2: Sidebar
     public var sidebarActive:         String { pick(Catalog.sidebarActive) }

@@ -108,6 +108,15 @@ public actor SDMEngine {
         parallelismCap = clamped
     }
 
+    /// v1.1.8: Settings UI calls this when "允许忽略 SSL
+    /// 验证" is toggled. The downloader's URLSession
+    /// delegate owns a flag that's swapped atomically; in-
+    /// flight chunk requests that error after the swap
+    /// simply retry on the next attempt.
+    public func setIgnoreSSL(_ value: Bool) {
+        downloader.setIgnoreSSL(value)
+    }
+
     public func setSpeedLimit(_ bytesPerSec: Double) async {
         // v1.0.6: actually push the new rate into the live
         // limiter. The previous v1.0.x code stored the rate but

@@ -33,6 +33,7 @@ struct SettingsView: View {
     @AppStorage("sdm.notify.onComplete") private var notifyOnComplete: Bool = true
     @AppStorage("sdm.hideDockWhenWindowClosed") private var hideDockWhenWindowClosed: Bool = false
     @AppStorage("sdm.toolbar.showLabels") private var showToolbarLabels: Bool = true
+    @AppStorage("sdm.network.ignoreSSL") private var ignoreSSL: Bool = false
 
     init(engine: SDMEngine? = nil) {
         self.engine = engine
@@ -62,6 +63,15 @@ struct SettingsView: View {
         .environment(\.strings, strings)
         .navigationTitle(strings.settingsWindowTitle)
         .frame(width: 720, height: 480)
+        .onAppear {
+            // First time settings opens, push the persisted
+            // toggle value to the live engine so the
+            // downloader's URLSession delegate agrees with
+            // what the UI displays. SDMEngine is an actor,
+            // so the call has to be `await`ed even from the
+            // main-isolated SwiftUI body.
+            Task { await engine?.setIgnoreSSL(ignoreSSL) }
+        }
     }
 
     @State private var section: SettingsSection = .general
@@ -154,6 +164,18 @@ struct SettingsView: View {
                 Text(S.settingsToolbarHeader)
             } footer: {
                 Text(S.settingsShowToolbarLabelsHint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle(S.settingsToggleIgnoreSSL, isOn: $ignoreSSL)
+                    .onChange(of: ignoreSSL) { _, newValue in
+                        Task { await engine?.setIgnoreSSL(newValue) }
+                    }
+            } header: {
+                Text(S.settingsNetworkHeader)
+            } footer: {
+                Text(S.settingsIgnoreSSLHint)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

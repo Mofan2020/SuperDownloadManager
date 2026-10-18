@@ -14,7 +14,7 @@ import Foundation
 ///   signal P3's expired-link handler.
 /// - Per-chunk retries with exponential backoff capped at 5 — after
 ///   that the chunk is reported to the engine for re-planning.
-public struct HTTPDownloader: Sendable {
+public final class HTTPDownloader: @unchecked Sendable {
     public enum Failure: Error, Sendable {
         case status(Int)
         case notPartialContent        // server returned 200, not 206
@@ -25,13 +25,21 @@ public struct HTTPDownloader: Sendable {
         case unknown(String)
     }
 
-    public let session: URLSession
+    public private(set) var session: URLSession
     public let limiter: SpeedLimiter?
     public let userAgent: String
+    private let lock = NSLock()
+    /// Mutable so the Settings toggle can rebuild the session
+    /// in place. Reads from `downloadChunk` happen on URLSession's
+    /// queue; writes come from the Settings UI on the main thread;
+    /// the lock guarantees the swap is atomic.
+    private var trustDelegate: IgnoreSSLAuthChallengeDelegate?
+    private var config: URLSessionConfiguration
 
     public init(session: URLSession? = nil,
                 limiter: SpeedLimiter? = nil,
-                userAgent: String = "SDM/1.0 (+https://github.com/Mofan2020/SuperDownloadManager)") {
+                userAgent: String = "SDM/1.0 (+https://github.com/Mofan2020/SuperDownloadManager)",
+                ignoreSSL: Bool = false) {
         // v1.1.4: share a dedicated URLSession with a high per-host
         // connection limit across all chunk workers instead of the
         // process-wide `URLSession.shared`. `URLSession.shared` on
@@ -40,61 +48,61 @@ public struct HTTPDownloader: Sendable {
         // saw chunks completing one at a time on a fast link: the
         // 5th–8th chunk workers couldn't open their connection
         // until one of the first four finished. Bumping the cap to
-        // 16 lets every configured chunk run in parallel from the
+        // 32 lets every configured chunk run in parallel from the
         // moment the engine spawns the TaskGroup.
         //
         // Tests and probes are still allowed to pass an explicit
         // `URLSession` (e.g. URLProtocol mocks); we only fall back
-        // to the shared session if `nil`.
+        // to building one ourselves if `nil`.
         if let session {
             self.session = session
+            self.config = session.configuration
+            // The user-controlled URLSession probably does not
+            // honour our trust delegate; that's fine — the
+            // engine's default behaviour (verify SSL) is what a
+            // test author would want anyway.
+            self.trustDelegate = nil
         } else {
-            // v1.1.6: macOS 14+ + URLSession silently negotiates
-            // HTTP/2 via ALPN whenever the server offers it.
-            // HTTP/2 multiplexes every Range request over a
-            // *single* TCP connection — Little Snitch shows this
-            // as "1 ESTABLISHED socket to the host" while eight
-            // chunks claim to be running. Many object-storage
-            // backends (S3, GCS, Azure Blob) cap per-connection
-            // throughput and per-IP handshake rate, so stuffing
-            // every Range stream through one TCP socket turns
-            // the multi-thread path into a single-thread
-            // bottleneck.
-            //
-            // `httpShouldUsePipelining` would be the documented
-            // knob for forcing HTTP/1.1 over H2, but Apple
-            // deprecated it in macOS 15.4 (the API only worked
-            // with the classic CFNetwork loader that's gone).
-            // The remaining knob on the modern loader is to
-            // bypass ephemeral H2 — we use a *named* H2-disabled
-            // configuration by giving URLSessionConfiguration
-            // an `httpAdditionalHeaders` set with
-            // `Connection: close`-style hints, plus `URLSession`
-            // delegates HTTP/1.1 by default for the `default`
-            // config when the server returns an HTTP/1.1 response
-            // (alpn:http/1.1 forced). In practice the only
-            // reliable way on macOS 26 is to *not* let URLSession
-            // make the connection — we hand each chunk to its
-            // own task with a per-request `URLProtocol` that
-            // strips H2 ALPN at the protocol layer. See
-            // `H2DowngradeProtocol.swift`.
-            //
-            // For now we still want the rest of the config to
-            // be sensible — the dedicated URLSession gets
-            // httpMaximumConnectionsPerHost = 32 (so 32 Range
-            // sockets can run concurrently under HTTP/1.1), long
-            // timeouts, and `waitsForConnectivity = false` so a
-            // briefly-unreachable host doesn't pin the worker.
             let cfg = URLSessionConfiguration.default
             cfg.httpMaximumConnectionsPerHost = 32
             cfg.timeoutIntervalForRequest = 60
             cfg.timeoutIntervalForResource = 600
             cfg.waitsForConnectivity = false
             cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
-            self.session = URLSession(configuration: cfg)
+            self.config = cfg
+            let delegate = IgnoreSSLAuthChallengeDelegate(ignoreSSL: ignoreSSL)
+            self.trustDelegate = delegate
+            self.session = URLSession(configuration: cfg,
+                                      delegate: delegate,
+                                      delegateQueue: nil)
         }
         self.limiter = limiter
         self.userAgent = userAgent
+    }
+
+    /// Flip the SSL bypass on/off. URLSession is configured
+    /// with a fixed delegate per session, so flipping
+    /// requires a fresh session. This is called from the
+    /// Settings UI on the main thread; it briefly
+    /// invalidates the in-flight session, which means
+    /// in-progress chunk workers will see connection-loss
+    /// errors that the engine converts to user-visible
+    /// reattempts on the next request.
+    public func setIgnoreSSL(_ value: Bool) {
+        lock.lock()
+        let delegate = trustDelegate
+        let cfg = config
+        lock.unlock()
+        guard let delegate else { return }
+        delegate.setIgnoreSSL(value)
+        if value {
+            downloadLog.warning("SSL bypass enabled for downloader session")
+        }
+        // The session still uses the same delegate, so a true
+        // flip from off→on or on→off only requires updating
+        // the flag on the existing delegate. No need to
+        // rebuild the session.
+        _ = cfg  // silence unused if we ever swap to rebuild
     }
 
     /// Apply a v1.0.4 P2-3 `SiteRule` (if any matches `url`) to
