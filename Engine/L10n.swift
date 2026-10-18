@@ -82,6 +82,9 @@ private enum Catalog {
         "Startup & Updates", "启动与更新")
     static let settingsOpenAtLogin: (String, String) = (
         "Open at login", "开机自启")
+    static let settingsOpenAtLoginHint: (String, String) = (
+        "Registers the app with macOS as a login item.",
+        "向 macOS 注册为登录项。")
     static let settingsUpdateChannel: (String, String) = (
         "Update channel", "更新通道")
     static let settingsUpdateStable: (String, String) = (
@@ -398,15 +401,54 @@ private enum Catalog {
         "System notifications on complete", "完成时系统通知")
     static let settingsCategorySection: (String, String) = (
         "Categories", "分类")
+
+    // v1.1.2: Dock visibility toggle.
+    static let settingsToggleHideDockWhenWindowClosed: (String, String) = (
+        "Hide dock icon when window is closed",
+        "关闭窗口后隐藏 Dock 图标")
+    static let settingsHideDockHint: (String, String) = (
+        "Keep a menu-bar icon only. The dock icon reappears while a window is open.",
+        "仅保留菜单栏图标。打开窗口期间，Dock 图标会重新显示。")
+    static let settingsDockHeader: (String, String) = (
+        "Window & Dock", "窗口与 Dock")
 }
 
-/// Resolve the current locale tag to a `Strings` locale.
+/// Resolve the current locale tag to a `Strings` locale. v1.1.2:
+/// `system` is now resolved from the OS preferred language list
+/// instead of always returning English (the v1.0.7 bug — picking
+/// "Follow system" gave English unless the user manually changed
+/// languages; switching languages via Settings → General → Region
+/// didn't update the UI either).
 private func resolve(_ tag: LocaleTag) -> Catalog.Pair {
     switch tag {
     case .en:     return .en
     case .zhHans: return .zh
-    case .system: return .en   // default until overridden
+    case .system: return resolveSystemLocale()
     }
+}
+
+/// Decide whether the OS default locale should render as 中文 or
+/// English. Checks `Bundle.main.preferredLocalizations` first
+/// (Apple-recommended API — accounts for the user's actual app
+/// language preferences), then falls back to `Locale.preferredLanguages`.
+private func resolveSystemLocale() -> Catalog.Pair {
+    let preferred = Bundle.main.preferredLocalizations
+        .isEmpty
+        ? Locale.preferredLanguages
+        : Bundle.main.preferredLocalizations
+    for tag in preferred {
+        let lower = tag.lowercased()
+        // Match Chinese (Simplified / Traditional / regional
+        // variants) — any 简中 user is most likely expecting
+        // 简体中文. Traditional / HK / TW users would normally
+        // pick 中文 explicitly; the UI only ships 简中, so route
+        // everything `zh*` here.
+        if lower.hasPrefix("zh") { return .zh }
+        if lower.hasPrefix("en") { return .en }
+    }
+    // No positive match — default to English (matches the
+    // developmentLanguage of the bundle).
+    return .en
 }
 
 /// Per-key accessor. Read from `Strings.current.<key>` once you've
@@ -452,6 +494,7 @@ public struct Strings {
     // Settings → Startup
     public var settingsSectionStartup: String { pick(Catalog.settingsSectionStartup) }
     public var settingsOpenAtLogin: String { pick(Catalog.settingsOpenAtLogin) }
+    public var settingsOpenAtLoginHint: String { pick(Catalog.settingsOpenAtLoginHint) }
     public var settingsUpdateChannel: String { pick(Catalog.settingsUpdateChannel) }
     public var settingsUpdateStable: String { pick(Catalog.settingsUpdateStable) }
     public var settingsUpdatePrerelease: String { pick(Catalog.settingsUpdatePrerelease) }
@@ -672,6 +715,11 @@ public struct Strings {
     public var settingsToggleClipboardCapture: String { pick(Catalog.settingsToggleClipboardCapture) }
     public var settingsToggleSystemNotifications: String { pick(Catalog.settingsToggleSystemNotifications) }
     public var settingsCategorySection:         String { pick(Catalog.settingsCategorySection) }
+
+    // v1.1.2: Dock visibility
+    public var settingsToggleHideDockWhenWindowClosed: String { pick(Catalog.settingsToggleHideDockWhenWindowClosed) }
+    public var settingsHideDockHint:         String { pick(Catalog.settingsHideDockHint) }
+    public var settingsDockHeader:           String { pick(Catalog.settingsDockHeader) }
 
     // MARK: - Format helpers
     public func settingsDefaultThreadsValue(_ n: Int) -> String {

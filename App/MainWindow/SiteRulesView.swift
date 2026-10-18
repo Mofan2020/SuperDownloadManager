@@ -2,9 +2,15 @@ import SwiftUI
 import AppKit
 import SuperDownloadManagerCore
 
-/// SiteRulesView — v1.0.4 P2-3. Editor for per-hostname request
-/// rules. Add a hostname, set Referer / User-Agent / Cookie /
-/// Basic Auth. The engine applies matching rules at request time.
+/// SiteRulesView — v1.1.2 layout pass. v1.0.7 wrapped the editor
+/// in a fixed `.frame(width: 580, height: 540)`, which clashed
+/// with the `NavigationSplitView` detail column on macOS 26 —
+/// the inner field stack could exceed the column on resize, and
+/// the trailing button group fell off the right edge on wide
+/// detail panes. v1.1.2 switches to a Form-style layout with
+/// `.frame(maxWidth: .infinity, minHeight: …)`, full-width
+/// `TextField`s, and a scroll view so the editor adapts to the
+/// detail column without breaking the rest of Settings.
 struct SiteRulesView: View {
     @Environment(\.strings) private var S
     @State private var rules: [SiteRule] = SiteRuleStore.shared.load()
@@ -17,15 +23,18 @@ struct SiteRulesView: View {
     @State private var error: String? = nil
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(S.siteRulesTitle)
-                .font(.title3.weight(.semibold))
-            Text(S.siteRulesExplanation)
-                .font(.callout)
-                .foregroundStyle(.secondary)
+        let S = self.S
+        return Form {
+            Section {
+                Text(S.siteRulesExplanation)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } header: {
+                Text(S.siteRulesTitle)
+            }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text(S.siteRulesAddHint).font(.caption).foregroundStyle(.secondary)
+            Section {
                 TextField(S.siteRulesHost, text: $newHost)
                     .textFieldStyle(.roundedBorder)
                 TextField(S.siteRulesReferer, text: $newReferer)
@@ -42,6 +51,7 @@ struct SiteRulesView: View {
                 }
                 HStack {
                     Button(S.siteRulesAdd) { commit() }
+                        .keyboardShortcut(.defaultAction)
                     Button(S.siteRulesClearAll) {
                         SiteRuleStore.shared.clearAll()
                         rules = []
@@ -50,40 +60,32 @@ struct SiteRulesView: View {
                 if let err = error {
                     Text(err).font(.caption).foregroundStyle(.red)
                 }
+            } header: {
+                Text(S.siteRulesAddHint)
             }
-            .frame(maxWidth: 540)
-            Divider()
-            Text(S.siteRulesExisting)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if rules.isEmpty {
-                Text(S.siteRulesEmpty)
-                    .foregroundStyle(.tertiary)
-                    .padding(.vertical, 8)
-            } else {
-                ForEach(rules) { rule in
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text(rule.host).font(.body.weight(.medium))
-                            if let r = rule.referer { Text(S.siteRulesRefererShort(r)).font(.caption).foregroundStyle(.secondary) }
-                            if let ua = rule.userAgent { Text(S.siteRulesUserAgentShort(ua)).font(.caption).foregroundStyle(.secondary) }
-                            if let c = rule.cookies { Text(S.siteRulesCookieShort(c)).font(.caption).foregroundStyle(.secondary) }
-                            if let u = rule.basicAuthUser { Text(S.siteRulesBasicAuthShort(u)).font(.caption).foregroundStyle(.secondary) }
-                        }
-                        Spacer()
-                        Button {
-                            SiteRuleStore.shared.remove(id: rule.id)
-                            rules = SiteRuleStore.shared.load()
-                        } label: { Image(systemName: "trash") }
-                        .buttonStyle(.borderless)
+
+            Section {
+                if rules.isEmpty {
+                    Text(S.siteRulesEmpty)
+                        .foregroundStyle(.tertiary)
+                        .padding(.vertical, 8)
+                } else {
+                    ForEach(rules) { rule in
+                        SiteRuleRow(rule: rule,
+                                    S: S,
+                                    onDelete: {
+                                        SiteRuleStore.shared.remove(id: rule.id)
+                                        rules = SiteRuleStore.shared.load()
+                                    })
                     }
-                    .padding(.vertical, 4)
                 }
+            } header: {
+                Text(S.siteRulesExisting)
             }
-            Spacer()
         }
+        .formStyle(.grouped)
         .padding(20)
-        .frame(width: 580, height: 540)
+        .frame(maxWidth: .infinity, minHeight: 380, alignment: .topLeading)
     }
 
     private func commit() {
@@ -108,5 +110,41 @@ struct SiteRulesView: View {
         newUser = ""
         newPass = ""
         error = nil
+    }
+}
+
+/// One row in the existing-rules list. Pulled out so the parent
+/// `Form` can stay flat and so the password field never sneaks
+/// into the summary line.
+private struct SiteRuleRow: View {
+    let rule: SiteRule
+    let S: Strings
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(rule.host).font(.body.weight(.medium))
+                if let r = rule.referer {
+                    Text(S.siteRulesRefererShort(r)).font(.caption).foregroundStyle(.secondary)
+                }
+                if let ua = rule.userAgent {
+                    Text(S.siteRulesUserAgentShort(ua)).font(.caption).foregroundStyle(.secondary)
+                }
+                if let c = rule.cookies {
+                    Text(S.siteRulesCookieShort(c)).font(.caption).foregroundStyle(.secondary)
+                }
+                if let u = rule.basicAuthUser {
+                    Text(S.siteRulesBasicAuthShort(u)).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 8)
+            Button(role: .destructive, action: onDelete) {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .help("Remove")
+        }
+        .padding(.vertical, 4)
     }
 }

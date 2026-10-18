@@ -2,6 +2,55 @@ import SwiftUI
 import AppKit
 import SuperDownloadManagerCore
 
+// v1.1.2: `GlassEffectContainer` is iOS/macOS 26+; the project
+// deployment target is 26, but compiling on an older SDK still
+// needs an `#available` fallback so the file builds in CI when
+// Xcode hasn't been updated.
+@available(macOS 26.0, *)
+private struct TabBarGlassContainer<Content: View>: View {
+    let tint: Color
+    let content: () -> Content
+    init(tint: Color = .accentColor, @ViewBuilder content: @escaping () -> Content) {
+        self.tint = tint
+        self.content = content
+    }
+    var body: some View {
+        content()
+            .padding(6)
+            .background {
+                Capsule().fill(.clear)
+            }
+            .glassEffect(.regular.interactive(), in: Capsule())
+            .overlay {
+                Capsule().strokeBorder(
+                    Color.primary.opacity(0.06),
+                    lineWidth: 0.5)
+            }
+    }
+}
+
+/// Tab-bar fallback for macOS < 26 (not used in practice — the
+/// project deployment target is 26.0 — but the build references
+/// it so older CI toolchains still link).
+private struct TabBarPlainContainer<Content: View>: View {
+    let content: () -> Content
+    init(@ViewBuilder content: @escaping () -> Content) {
+        self.content = content
+    }
+    var body: some View {
+        content()
+            .padding(6)
+            .background {
+                Capsule().fill(.regularMaterial)
+            }
+            .overlay {
+                Capsule().strokeBorder(
+                    Color.primary.opacity(0.08),
+                    lineWidth: 0.5)
+            }
+    }
+}
+
 /// SDM v1.0.3 — top-level app.
 ///
 /// v1.0.1: bilingual EN/中文 + locale override; "Open Main
@@ -94,9 +143,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static var sharedMainWindow: NSWindow?
     private var statusItem: NSStatusItem?
 
+    // v1.1.2: Track how many "real" app windows are currently
+    // open. The SwiftUI `WindowGroup` keeps detached window
+    // instances around after `cmd-W`, so we count on the live
+    // key/front visibility rather than `NSApp.windows.count`.
+    // When the count drops to zero and the user has opted in
+    // ("Hide dock icon when window is closed"), we switch to
+    // `.accessory` so the dock icon disappears. As soon as any
+    // window becomes key again, we restore `.regular`.
+    private var visibleMainWindowCount: Int = 0
+    private var observeTokens: [NSObjectProtocol] = []
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         installStatusItem()
         registerURLEventHandler()
+        installDockVisibilityObservers()
+        // v1.1.2: reconcile the "Open at login" AppStorage value
+        // with the system's login-item registration. v1.0.4 stored
+        // the Bool but never called SMAppService, so toggling in
+        // Settings had no effect. We do this idempotently here so
+        // any pre-v1.1.2 user who flipped the toggle and then quit
+        // gets registered (or un-registered) on next launch.
+        LaunchAtLogin.syncFromStorage()
+        // Apply the user's dock preference on launch, but only
+        // once SwiftUI has actually opened the main window (the
+        // WindowGroup default) — otherwise we'd dock-hide the
+        // app at startup just because the user toggled it last
+        // session.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            [weak self] in
+            self?.updateDockVisibilityForCurrentState(force: true)
+        }
         NSLog("SDM AppDelegate: launched; statusItem=\(String(describing: statusItem))")
     }
 
@@ -246,6 +323,123 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let win = AppDelegate.sharedMainWindow {
             win.makeKeyAndOrderFront(nil)
         }
+        // openWindow may have just created a new NSWindow — give
+        // SwiftUI a tick to actually attach it before we make any
+        // activation policy decisions based on visibility.
+        DispatchQueue.main.async { [weak self] in
+            self?.updateDockVisibilityForCurrentState()
+        }
+    }
+
+    // MARK: - Dock visibility (v1.1.2)
+
+    /// Hook the two NSWindow lifecycle notifications and watch the
+    /// toggle in AppStorage. `NotificationCenter.addObserver`
+    /// returns tokens so we don't leak handlers when the
+    /// AppDelegate is replaced (it isn't in practice, but the
+    /// safe pattern keeps memory clean across relaunches).
+    private func installDockVisibilityObservers() {
+        let nc = NotificationCenter.default
+        let didBecomeKey = nc.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                // `queue: .main` already pins delivery to the main
+                // thread, so we can re-enter the MainActor without
+                // an async hop. `assumeIsolated` is the runtime
+                // assertion the Swift 5 / minimal-concurrency
+                // mode wants here.
+                MainActor.assumeIsolated {
+                    self?.handleWindowBecameKey()
+                }
+            }
+        let willClose = nc.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: nil, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    // Ignore close notifications for transient panels
+                    // (NSAlert, NSOpenPanel, NSSavePanel, …) — they
+                    // would otherwise force a flip to .accessory
+                    // after every Add URL sheet. NSWindow exposes
+                    // `styleMask` (a bitmask of NSWindow.StyleMask),
+                    // NOT a `classification` field — check the bits.
+                    if let win = note.object as? NSWindow {
+                        let mask = win.styleMask
+                        if mask.contains(.nonactivatingPanel)
+                            || win.isSheet {
+                            return
+                        }
+                    }
+                    self?.handleWindowWillClose()
+                }
+            }
+        observeTokens = [didBecomeKey, willClose]
+
+        // The toggle is a @AppStorage Bool, but SwiftUI writes
+        // through `UserDefaults.standard.set`, so listening to
+        // the global `UserDefaults.didChangeNotification` and
+        // checking the key catches every edit (the user could
+        // also flip it via `defaults write` from terminal).
+        let defaultsChanged = nc.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: UserDefaults.standard,
+            queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.updateDockVisibilityForCurrentState(force: true)
+                }
+            }
+        observeTokens.append(defaultsChanged)
+    }
+
+    /// Bumped whenever any NSWindow becomes key. The `didBecomeKey`
+    /// notification can fire for sheets too — but sheets can't
+    /// become key over a closed parent, so incrementing here on
+    /// any key window is good enough for the visibility model
+    /// (we only ever switch to `.regular` on a count > 0).
+    private func handleWindowBecameKey() {
+        visibleMainWindowCount = max(visibleMainWindowCount, 1)
+        updateDockVisibilityForCurrentState()
+    }
+
+    /// Decremented when any window closes. We clamp at zero; even
+    /// if notifications fire out of order (a stale willClose
+    /// from an already-closed window), the dock check stays
+    /// correct because we use the clamped value.
+    private func handleWindowWillClose() {
+        // Use a small grace period so that a window-close
+        // immediately followed by an openWindow (cmd-W then
+        // click tray icon) doesn't transiently flip to
+        // .accessory — macOS animates the dock re-add back in
+        // otherwise.
+        let captured = max(0, visibleMainWindowCount - 1)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            [weak self] in
+            guard let self = self else { return }
+            self.visibleMainWindowCount = captured
+            self.updateDockVisibilityForCurrentState()
+        }
+    }
+
+    /// Apply the user's preference against the current state.
+    /// `force: true` ignores the "don't change policy mid-launch"
+    /// guard and is used right after `applicationDidFinishLaunching`
+    /// to settle the initial value.
+    private func updateDockVisibilityForCurrentState(force: Bool = false) {
+        let hide = UserDefaults.standard.bool(forKey: "sdm.hideDockWhenWindowClosed")
+        let hasVisibleWindow = visibleMainWindowCount > 0
+            || (AppDelegate.sharedMainWindow?.isVisible ?? false)
+
+        if hide && !hasVisibleWindow {
+            // Menu-bar-only mode — dock is hidden.
+            NSApp.setActivationPolicy(.accessory)
+        } else {
+            // Default for any app that owns a SwiftUI WindowGroup.
+            NSApp.setActivationPolicy(.regular)
+        }
+    }
+
+    deinit {
+        let nc = NotificationCenter.default
+        for token in observeTokens { nc.removeObserver(token) }
     }
 }
 
@@ -304,15 +498,9 @@ struct MainWindow: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $selectedTab) {
-                Text(S.tabActive).tag(Tab.active)
-                Text(S.tabHistory).tag(Tab.history)
-                Text(S.tabSchedule).tag(Tab.schedule)
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(.bar)
+            TabHeader(selection: $selectedTab)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
             if let msg = bannerMessage {
                 ExpiredLinkBanner(summary: msg,
                                   onReenter: { bannerMessage = nil })
@@ -347,5 +535,58 @@ struct MainWindow: View {
                 Task { await historyVM.append(entry) }
             }
         }
+    }
+}
+
+/// v1.1.2: tab-bar header. Replaces the bare `Picker(.segmented)`
+/// from v1.0.5 — the segmented control was the right *control*,
+/// but it sat on top of `.background(.bar)` with no container,
+/// which read as a flat chrome strip. Wrapping it in a Liquid
+/// Glass capsule on macOS 26 lifts the bar off the content and
+/// tracks the selection lens like the system segmented controls
+/// do. Falls back to a plain `.regularMaterial` capsule on
+/// older SDKs (CI without Xcode 26).
+private struct TabHeader: View {
+    @Binding var selection: MainWindow.Tab
+    @Environment(\.strings) private var S
+
+    var body: some View {
+        let S = self.S
+        let picker = Picker("", selection: $selection) {
+            Text(S.tabActive).tag(MainWindow.Tab.active)
+            Text(S.tabHistory).tag(MainWindow.Tab.history)
+            Text(S.tabSchedule).tag(MainWindow.Tab.schedule)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+
+        Group {
+            if #available(macOS 26.0, *) {
+                picker
+                    .padding(6)
+                    .background {
+                        Capsule().fill(.clear)
+                    }
+                    .glassEffect(.regular.interactive(), in: Capsule())
+                    .overlay {
+                        Capsule().strokeBorder(
+                            Color.primary.opacity(0.06),
+                            lineWidth: 0.5)
+                    }
+            } else {
+                picker
+                    .padding(6)
+                    .background {
+                        Capsule().fill(.regularMaterial)
+                    }
+                    .overlay {
+                        Capsule().strokeBorder(
+                            Color.primary.opacity(0.08),
+                            lineWidth: 0.5)
+                    }
+            }
+        }
+        .frame(maxWidth: 420)
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 }

@@ -31,6 +31,7 @@ struct SettingsView: View {
     @AppStorage("sdm.classify.enabled") private var classifyEnabled: Bool = true
     @AppStorage("sdm.capture.clipboard") private var clipboardCapture: Bool = true
     @AppStorage("sdm.notify.onComplete") private var notifyOnComplete: Bool = true
+    @AppStorage("sdm.hideDockWhenWindowClosed") private var hideDockWhenWindowClosed: Bool = false
 
     init(engine: SDMEngine? = nil) {
         self.engine = engine
@@ -135,6 +136,16 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section {
+                Toggle(S.settingsToggleHideDockWhenWindowClosed,
+                       isOn: $hideDockWhenWindowClosed)
+            } header: {
+                Text(S.settingsDockHeader)
+            } footer: {
+                Text(S.settingsHideDockHint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .padding(20)
@@ -173,9 +184,13 @@ struct SettingsView: View {
         let S = strings
         return Form {
             Section {
-                Toggle(S.settingsOpenAtLogin, isOn: $openAtLogin)
+                Toggle(S.settingsOpenAtLogin, isOn: openAtLoginBinding)
             } header: {
                 Text(S.settingsSectionStartup)
+            } footer: {
+                Text(S.settingsOpenAtLoginHint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Section {
                 Picker(S.settingsUpdateChannel, selection: $updateChannel) {
@@ -188,6 +203,20 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding(20)
+    }
+
+    /// v1.1.2: wraps the `openAtLogin` AppStorage so flipping the
+    /// Toggle immediately registers or un-registers the app with
+    /// SMAppService. v1.0.4 only wrote the Bool — the helper was
+    /// never called, so the toggle did nothing.
+    private var openAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { openAtLogin },
+            set: { newValue in
+                openAtLogin = newValue
+                LaunchAtLogin.setEnabled(newValue)
+            }
+        )
     }
 
     private var aboutSection: some View {
