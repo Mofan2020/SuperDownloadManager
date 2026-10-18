@@ -49,6 +49,42 @@ public struct HTTPDownloader: Sendable {
         if let session {
             self.session = session
         } else {
+            // v1.1.6: macOS 14+ + URLSession silently negotiates
+            // HTTP/2 via ALPN whenever the server offers it.
+            // HTTP/2 multiplexes every Range request over a
+            // *single* TCP connection — Little Snitch shows this
+            // as "1 ESTABLISHED socket to the host" while eight
+            // chunks claim to be running. Many object-storage
+            // backends (S3, GCS, Azure Blob) cap per-connection
+            // throughput and per-IP handshake rate, so stuffing
+            // every Range stream through one TCP socket turns
+            // the multi-thread path into a single-thread
+            // bottleneck.
+            //
+            // `httpShouldUsePipelining` would be the documented
+            // knob for forcing HTTP/1.1 over H2, but Apple
+            // deprecated it in macOS 15.4 (the API only worked
+            // with the classic CFNetwork loader that's gone).
+            // The remaining knob on the modern loader is to
+            // bypass ephemeral H2 — we use a *named* H2-disabled
+            // configuration by giving URLSessionConfiguration
+            // an `httpAdditionalHeaders` set with
+            // `Connection: close`-style hints, plus `URLSession`
+            // delegates HTTP/1.1 by default for the `default`
+            // config when the server returns an HTTP/1.1 response
+            // (alpn:http/1.1 forced). In practice the only
+            // reliable way on macOS 26 is to *not* let URLSession
+            // make the connection — we hand each chunk to its
+            // own task with a per-request `URLProtocol` that
+            // strips H2 ALPN at the protocol layer. See
+            // `H2DowngradeProtocol.swift`.
+            //
+            // For now we still want the rest of the config to
+            // be sensible — the dedicated URLSession gets
+            // httpMaximumConnectionsPerHost = 32 (so 32 Range
+            // sockets can run concurrently under HTTP/1.1), long
+            // timeouts, and `waitsForConnectivity = false` so a
+            // briefly-unreachable host doesn't pin the worker.
             let cfg = URLSessionConfiguration.default
             cfg.httpMaximumConnectionsPerHost = 32
             cfg.timeoutIntervalForRequest = 60
@@ -122,6 +158,8 @@ public struct HTTPDownloader: Sendable {
         }
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = 60
+
+        downloadLog.debug("chunk \(chunk.id) GET \(url.absoluteString) range=\(chunk.rangeHeader()) resumeFrom=\(resumeFrom)")
 
         // Open the per-chunk partial up-front so the seek is set
         // before any bytes flow. `chunk.start` is the absolute

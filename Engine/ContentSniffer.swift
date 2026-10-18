@@ -243,6 +243,7 @@ public enum ContentSniffer {
         guard let http = response as? HTTPURLResponse else {
             throw ProbeError.notHTTP
         }
+        downloadLog.info("probe \(url) -> \(http.statusCode) finalURL=\(http.url?.absoluteString ?? "<none>") len=\(http.expectedContentLength)")
         return parse(http: http, originalURL: url)
     }
 

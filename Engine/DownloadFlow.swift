@@ -87,6 +87,22 @@ public struct DownloadFlow: Sendable {
             throw FlowError.noContentLength
         }
 
+        // v1.1.6: when the probe followed a redirect, the
+        // chunk workers' range requests need to use the
+        // *final* URL, not the original. URLSession's
+        // automatic redirect-follow works for short-lived
+        // probes but for a long-running chunk worker it's
+        // the cause of the user's "Little Snitch shows 1
+        // connection that hangs" symptom: the session opens
+        // a connection to the host, gets a 302 to a CDN, the
+        // CDN keeps the half-open TCP socket around, and
+        // every subsequent chunk request queues behind it.
+        // By re-rooting every chunk on the resolved URL we
+        // sidestep the redirect chain entirely. `probe.url`
+        // holds `http.url ?? originalURL`, and `http.url`
+        // already points at the post-redirect endpoint.
+        let downloadURL = probe.url
+
         // 2. Plan + assembler.
         let planner = RangePlanner(strategy: strategy)
         await planner.startPlan(contentLength: contentLength)
@@ -151,7 +167,7 @@ public struct DownloadFlow: Sendable {
         do {
             try await withThrowingTaskGroup(of: Void.self) { group in
                 for chunk in activeChunks {
-                    let url = self.url
+                    let url = downloadURL
                     let chunkCopy = chunk
                     let cp = chunkProgress
                     group.addTask {
