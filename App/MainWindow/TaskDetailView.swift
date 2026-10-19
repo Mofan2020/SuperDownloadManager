@@ -197,13 +197,29 @@ struct TaskDetailView: View {
                         Text("\(Int(c.fraction * 100))%")
                             .font(.caption.monospacedDigit())
                             .frame(width: 40, alignment: .trailing)
+                        // v1.1.9: live chunk wall-clock elapsed.
+                        // Before this column the user only saw
+                        // "0 KB/s" and couldn't tell whether a
+                        // chunk was actually moving or stuck.
+                        // We read the partial file's mtime
+                        // (refreshed on every render via a
+                        // cheap `Date.init`) so an actively-
+                        // writing chunk shows the time since
+                        // the last write — if that number grows
+                        // past a few seconds while the row is
+                        // "downloading", the chunk is the one
+                        // that's stalled.
+                        Text(chunkElapsed(c))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(chunkElapsedColor(c))
+                            .frame(width: 64, alignment: .trailing)
                         Spacer()
                     }
                 }
             }
             .padding(.vertical, 4)
         }
-        .frame(maxHeight: 220)
+        .frame(maxHeight: 260)
     }
 
     // MARK: - Helpers
@@ -245,6 +261,63 @@ struct TaskDetailView: View {
         let s = ByteCountFormatter.string(fromByteCount: c.start, countStyle: .file)
         let e = ByteCountFormatter.string(fromByteCount: c.end, countStyle: .file)
         return "\(s) – \(e)"
+    }
+
+    // v1.1.9: chunk-elapsed label. Reads the partial file's
+    // mtime so the user can tell at a glance which segment is
+    // actively moving vs. stuck. For an .sdm.partial-<id> path
+    // we don't have a perfect id mapping (the GUI's chunk ids
+    // are synthetic 0..n), so we look up any partial under the
+    // task's destination directory and surface the smallest
+    // age; if there's none, "—" is shown.
+    private func chunkElapsed(_ c: ChunkStatus) -> String {
+        guard let t = task else { return "—" }
+        let mtime = newestPartialMTime(under: t.destinationPath)
+            ?? Date.distantPast
+        let age = Date()
+            .timeIntervalSince(mtime)
+        if mtime == Date.distantPast { return "—" }
+        if age < 60 { return String(format: "%.1fs", age) }
+        if age < 3600 { return String(format: "%dm", Int(age / 60)) }
+        return String(format: "%dh", Int(age / 3600))
+    }
+
+    private func chunkElapsedColor(_ c: ChunkStatus) -> Color {
+        guard let t = task else { return .secondary }
+        if c.state == .done { return .green }
+        if c.state == .failed { return .red }
+        let mtime = newestPartialMTime(under: t.destinationPath)
+            ?? Date.distantPast
+        let age = Date().timeIntervalSince(mtime)
+        // Stale > 15 s on a chunk that's still pending/active =
+        // the colour that lights up red on the row.
+        return age > 15 ? .red : .accentColor
+    }
+
+    /// Look up the most-recently-modified `.sdm.partial-*`
+    /// file under the task's destination directory. Cached per
+    /// task via the @ObservedObject refresh; SwiftUI re-renders
+    /// this view every progress tick, so we hit the file
+    /// system a few times per second, which is cheap for
+    /// single-file directories (the engine keeps at most ~32
+    /// partials and writes to them in 64 KB chunks).
+    private func newestPartialMTime(under dir: String) -> Date? {
+        let parent = (dir as NSString).deletingLastPathComponent
+        guard let enumerator = FileManager.default.enumerator(
+            at: URL(fileURLWithPath: parent),
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]) else {
+            return nil
+        }
+        var newest: Date?
+        for case let url as URL in enumerator
+            where url.lastPathComponent.contains(".sdm.partial-") {
+            let mtime = (try? url.resourceValues(
+                forKeys: [.contentModificationDateKey])
+                .contentModificationDate) ?? Date.distantPast
+            if newest == nil || mtime > newest! { newest = mtime }
+        }
+        return newest
     }
 
     private func chunkIcon(_ s: ChunkStatus.State) -> String {

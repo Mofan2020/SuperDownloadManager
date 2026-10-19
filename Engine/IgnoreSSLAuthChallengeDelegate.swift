@@ -79,8 +79,13 @@ public final class IgnoreSSLAuthChallengeDelegate: NSObject, URLSessionDelegate,
         // can see what's happening when downloads quietly
         // succeed despite a broken chain. This is the only
         // place we log a deliberately-broken TLS connection
-        // in the engine layer.
-        downloadLog.warning("SSL bypass active for host=\(challenge.protectionSpace.host, privacy: .public) port=\(challenge.protectionSpace.port, privacy: .public)")
+        // in the engine layer. v1.1.9 dropped the OSLog
+        // `privacy: .public` annotation: the proxy logger
+        // forwards plain `String` to `SDMLogger`, which
+        // records the value unredacted into the file log
+        // anyway. The host/port/IP is diagnostic info the
+        // user wants to see.
+        downloadLog.warning("SSL bypass active for host=\(challenge.protectionSpace.host) port=\(challenge.protectionSpace.port)")
 
         completionHandler(.useCredential, URLCredential(trust: trust))
     }

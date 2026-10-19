@@ -193,7 +193,20 @@ public actor SDMEngine {
         // the user didn't override the filename, rename the
         // destination to use it.
         do {
-            let p = try await HTTPDownloader().probe(spec.url)
+            // v1.1.9: use the shared engine downloader so the
+            // probe inherits the user's IgnoreSSL bypass and the
+            // 32-conn session config. v1.1.8 (and earlier) built
+            // a transient `HTTPDownloader()` whose trust delegate
+            // was nil — fine for prodding a normal server, but the
+            // moment a CDN rejected its leaf chain the *probe* step
+            // silently threw and only the catch swallowed it
+            // (line below); the chunk workers then ran their own
+            // probe from scratch, doubling round-trips and racing
+            // against the user-visible "downloading forever" stall
+            // we shipped for v1.1.0–v1.1.8. Always go through
+            // the shared downloader so probe + chunks behave the
+            // same way.
+            let p = try await downloader.probe(spec.url)
             await queue.update(id: id) { t in
                 if let real = p.suggestedFilename, !real.isEmpty,
                    spec.filenameOverride == nil {
@@ -393,7 +406,13 @@ public actor SDMEngine {
     private func runResume(id: UUID, summary: TaskQueue.TaskSummary) async {
         let probe: ContentProbe
         do {
-            probe = try await HTTPDownloader().probe(summary.url)
+            // v1.1.9: same probe-via-shared-downloader fix as
+            // `runFlow` above. The transient `HTTPDownloader()`
+            // from v1.1.8 used a fresh URLSession with no trust
+            // delegate and no IgnoreSSL awareness — exactly the
+            // kind of inconsistency we want to kill across the
+            // whole engine.
+            probe = try await downloader.probe(summary.url)
         } catch {
             await queue.update(id: id) { t in
                 t.state = "failed"

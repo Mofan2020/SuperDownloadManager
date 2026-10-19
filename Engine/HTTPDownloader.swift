@@ -167,7 +167,18 @@ public final class HTTPDownloader: @unchecked Sendable {
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = 60
 
-        downloadLog.debug("chunk \(chunk.id) GET \(url.absoluteString) range=\(chunk.rangeHeader()) resumeFrom=\(resumeFrom)")
+        // v1.1.9: explicit chunk-level diagnostics. The user
+        // observed "0 KB/s forever, no error" and Little Snitch
+        // showed almost no connections — that signature maps to
+        // either (a) chunk never goes out, (b) chunk goes out but
+        // URLSession never receives headers, (c) headers arrive
+        // but body stalls. Logging the four timestamps + byte
+        // counts makes Console.app output sufficient to identify
+        // which stage actually stalls. Subsystem stays at
+        // `com.skyc8266.superdownloadmanager` so existing Console
+        // recipes keep matching.
+        let chunkStartWall = Date()
+        downloadLog.notice("chunk \(chunk.id) start GET \(url.absoluteString) range=\(chunk.rangeHeader()) resumeFrom=\(resumeFrom) bytesDone=\(chunk.bytesDone)")
 
         // Open the per-chunk partial up-front so the seek is set
         // before any bytes flow. `chunk.start` is the absolute
@@ -196,9 +207,11 @@ public final class HTTPDownloader: @unchecked Sendable {
         // updates — we slice the body into 64 KB blocks for that.
         let (data, response) = try await session.data(for: req)
 
+        let headersReceivedWall = Date()
         guard let http = response as? HTTPURLResponse else {
             throw Failure.decoding
         }
+        let responseHead = "status=\(http.statusCode) contentLength=\(http.value(forHTTPHeaderField: "Content-Length") ?? "<nil>") contentRange=\(http.value(forHTTPHeaderField: "Content-Range") ?? "<nil>")"
         switch http.statusCode {
         case 200:
             // Server ignored Range — fall back to writing the
@@ -209,12 +222,22 @@ public final class HTTPDownloader: @unchecked Sendable {
         case 206:
             break  // expected path
         case 403, 410, 451:
+            downloadLog.notice("chunk \(chunk.id) http=4xx \(responseHead) elapsedHeaders=\(headersReceivedWall.timeIntervalSince(chunkStartWall))s")
             throw Failure.forbidden
         case 429, 500..<600:
+            downloadLog.notice("chunk \(chunk.id) http=5xx \(responseHead) elapsedHeaders=\(headersReceivedWall.timeIntervalSince(chunkStartWall))s")
             throw Failure.status(http.statusCode)
         default:
+            downloadLog.notice("chunk \(chunk.id) http=? \(responseHead) elapsedHeaders=\(headersReceivedWall.timeIntervalSince(chunkStartWall))s")
             throw Failure.unknown("status \(http.statusCode)")
         }
+
+        // v1.1.9: log how long `URLSession.data(for:)` actually
+        // took to deliver the body. If headers arrive quickly but
+        // body stage hangs (a known Fastly HTTP/2 failure mode on
+        // macOS 26), this is the timestamp that surfaces it.
+        let bodyReceivedWall = Date()
+        downloadLog.notice("chunk \(chunk.id) body received bytes=\(data.count) elapsedHeaders=\(headersReceivedWall.timeIntervalSince(chunkStartWall))s elapsedTotal=\(bodyReceivedWall.timeIntervalSince(chunkStartWall))s")
 
         // Slice the response body into 64 KB blocks, flush to
         // the per-chunk partial, and report progress. The whole

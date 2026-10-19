@@ -437,6 +437,70 @@ private enum Catalog {
         "Disables TLS chain validation for every connection. Use this if a host is reverse-proxied through an edge whose certificate isn't in the system keychain. Off by default — only turn on for sources you trust.",
         "关闭所有连接的 TLS 证书链校验。如果下载源在反向代理后面，而代理的证书不在系统钥匙串里时打开。默认关闭，仅对信任的来源打开。")
 
+    // v1.1.9: Logs sidebar entry + section titles
+    static let settingsSidebarLogs: (String, String) = (
+        "Logs", "日志")
+    static let settingsSectionLogs: (String, String) = (
+        "Logs & diagnostics", "诊断日志")
+    static let settingsLogsLevelLabel: (String, String) = (
+        "Minimum log level", "最低日志级别")
+    static let settingsLogsLevelHint: (String, String) = (
+        "Lower levels include everything above. Debug is the most verbose; Error only fatal faults.",
+        "低于此级别的不记录。Debug 最详细；Error 只看致命。")
+    static let settingsLogsPersistenceLabel: (String, String) = (
+        "Save log to disk", "保存日志到磁盘")
+    static let settingsLogsPersistenceHint: (String, String) = (
+        "Writes to ~/Library/Logs/SuperDownloadManager/sdm.log alongside Console.app.",
+        "写到 ~/Library/Logs/SuperDownloadManager/sdm.log，与 Console.app 同步。")
+    static let settingsLogsRetentionLabel: (String, String) = (
+        "Keep rotated logs for (days)", "轮转日志保留天数")
+    static let settingsLogsMaxBytesLabel: (String, String) = (
+        "Rotate when file exceeds (KB)", "日志文件达到此大小时轮转（KB）")
+    static let settingsLogsMaxLinesLabel: (String, String) = (
+        "Cap total lines (after cleanup)", "清理后总行数上限")
+    static let settingsLogsPreviewButton: (String, String) = (
+        "Preview log…", "预览日志…")
+    static let settingsLogsOpenConsoleButton: (String, String) = (
+        "Open in Console.app", "在 Console.app 中打开")
+    static let settingsLogsRevealInFinder: (String, String) = (
+        "Reveal log file in Finder", "在访达中显示日志文件")
+    static let settingsLogsPreviewTitle: (String, String) = (
+        "Log preview", "日志预览")
+    static let settingsLogsPreviewEmpty: (String, String) = (
+        "No log entries yet. Start a download to populate the log.",
+        "暂无日志。开始一次下载以生成日志。")
+    static let settingsLogsPreviewPath: (String, String) = (
+        "File", "文件")
+    static let settingsLogsPreviewLines: (String, String) = (
+        "lines", "行")
+    static let settingsLogsPreviewFilter: (String, String) = (
+        "Filter", "过滤")
+    static let settingsLogsPreviewCopy: (String, String) = (
+        "Copy", "复制")
+    static let settingsLogsPreviewClose: (String, String) = (
+        "Close", "关闭")
+    static let settingsLogsPreviewSubsystem: (String, String) = (
+        "Subsystem: com.skyc8266.superdownloadmanager",
+        "子系统：com.skyc8266.superdownloadmanager")
+    static let taskDetailLiveChunks: (String, String) = (
+        "Live chunks", "实时分块")
+    static let taskDetailChunkHeader: (String, String) = (
+        "Chunk", "块")
+    static let taskDetailChunkBytes: (String, String) = (
+        "Bytes", "字节")
+    static let taskDetailChunkElapsed: (String, String) = (
+        "Elapsed", "耗时")
+    static let taskDetailChunkStatus: (String, String) = (
+        "Status", "状态")
+    static let taskDetailChunkPending: (String, String) = (
+        "queued", "排队中")
+    static let taskDetailChunkDownloading: (String, String) = (
+        "downloading", "下载中")
+    static let taskDetailChunkDone: (String, String) = (
+        "done", "完成")
+    static let taskDetailChunkFailed: (String, String) = (
+        "failed", "失败")
+
     // v1.1.2: Sidebar
     static let sidebarActive: (String, String) = (
         "Active", "下载中")
@@ -794,6 +858,37 @@ public struct Strings {
     public var settingsToggleIgnoreSSL:        String { pick(Catalog.settingsToggleIgnoreSSL) }
     public var settingsIgnoreSSLHint:          String { pick(Catalog.settingsIgnoreSSLHint) }
     public var settingsNetworkHeader:          String { pick(Catalog.settingsNetworkHeader) }
+
+    // v1.1.9: Logs sidebar + section labels
+    public var settingsSidebarLogs:            String { pick(Catalog.settingsSidebarLogs) }
+    public var settingsSectionLogs:            String { pick(Catalog.settingsSectionLogs) }
+    public var settingsLogsLevelLabel:         String { pick(Catalog.settingsLogsLevelLabel) }
+    public var settingsLogsLevelHint:          String { pick(Catalog.settingsLogsLevelHint) }
+    public var settingsLogsPersistenceLabel:   String { pick(Catalog.settingsLogsPersistenceLabel) }
+    public var settingsLogsPersistenceHint:    String { pick(Catalog.settingsLogsPersistenceHint) }
+    public var settingsLogsRetentionLabel:     String { pick(Catalog.settingsLogsRetentionLabel) }
+    public var settingsLogsMaxBytesLabel:      String { pick(Catalog.settingsLogsMaxBytesLabel) }
+    public var settingsLogsMaxLinesLabel:      String { pick(Catalog.settingsLogsMaxLinesLabel) }
+    public var settingsLogsPreviewButton:      String { pick(Catalog.settingsLogsPreviewButton) }
+    public var settingsLogsOpenConsoleButton:  String { pick(Catalog.settingsLogsOpenConsoleButton) }
+    public var settingsLogsRevealInFinder:     String { pick(Catalog.settingsLogsRevealInFinder) }
+    public var settingsLogsPreviewTitle:       String { pick(Catalog.settingsLogsPreviewTitle) }
+    public var settingsLogsPreviewEmpty:       String { pick(Catalog.settingsLogsPreviewEmpty) }
+    public var settingsLogsPreviewPath:        String { pick(Catalog.settingsLogsPreviewPath) }
+    public var settingsLogsPreviewLines:       String { pick(Catalog.settingsLogsPreviewLines) }
+    public var settingsLogsPreviewFilter:      String { pick(Catalog.settingsLogsPreviewFilter) }
+    public var settingsLogsPreviewCopy:        String { pick(Catalog.settingsLogsPreviewCopy) }
+    public var settingsLogsPreviewClose:       String { pick(Catalog.settingsLogsPreviewClose) }
+    public var settingsLogsPreviewSubsystem:   String { pick(Catalog.settingsLogsPreviewSubsystem) }
+    public var taskDetailLiveChunks:           String { pick(Catalog.taskDetailLiveChunks) }
+    public var taskDetailChunkHeader:          String { pick(Catalog.taskDetailChunkHeader) }
+    public var taskDetailChunkBytes:           String { pick(Catalog.taskDetailChunkBytes) }
+    public var taskDetailChunkElapsed:         String { pick(Catalog.taskDetailChunkElapsed) }
+    public var taskDetailChunkStatus:          String { pick(Catalog.taskDetailChunkStatus) }
+    public var taskDetailChunkPending:         String { pick(Catalog.taskDetailChunkPending) }
+    public var taskDetailChunkDownloading:     String { pick(Catalog.taskDetailChunkDownloading) }
+    public var taskDetailChunkDone:            String { pick(Catalog.taskDetailChunkDone) }
+    public var taskDetailChunkFailed:          String { pick(Catalog.taskDetailChunkFailed) }
 
     // v1.1.2: Sidebar
     public var sidebarActive:         String { pick(Catalog.sidebarActive) }

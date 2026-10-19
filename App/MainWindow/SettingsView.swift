@@ -34,6 +34,17 @@ struct SettingsView: View {
     @AppStorage("sdm.hideDockWhenWindowClosed") private var hideDockWhenWindowClosed: Bool = false
     @AppStorage("sdm.toolbar.showLabels") private var showToolbarLabels: Bool = true
     @AppStorage("sdm.network.ignoreSSL") private var ignoreSSL: Bool = false
+    // v1.1.9: log-system knobs. We mirror the in-memory
+    // SDMLogger.settings into UserDefaults so the Settings UI
+    // can drive them via @AppStorage (instant view updates, no
+    // extra plumbing). The level is stored as the raw Int
+    // matching SDMLogLevel; @AppStorage needs an Int-compatible
+    // type so we use `Int`.
+    @AppStorage("sdm.logs.level")        private var logLevelRaw: Int = SDMLogLevel.info.rawValue
+    @AppStorage("sdm.logs.persistence")    private var logPersistence: Bool = true
+    @AppStorage("sdm.logs.retentionDays")  private var logRetentionDays: Int = 14
+    @AppStorage("sdm.logs.maxBytesKB")     private var logMaxBytesKB: Int = 4096
+    @AppStorage("sdm.logs.maxLines")       private var logMaxLines: Int = 5000
 
     init(engine: SDMEngine? = nil) {
         self.engine = engine
@@ -77,7 +88,7 @@ struct SettingsView: View {
     @State private var section: SettingsSection = .general
 
     enum SettingsSection: String, CaseIterable, Identifiable {
-        case general, defaults, categories, siteRules, startup, about
+        case general, defaults, categories, siteRules, startup, logs, about
         var id: String { rawValue }
     }
 
@@ -89,6 +100,7 @@ struct SettingsView: View {
         case .categories: CategoryRulesEditor()
         case .siteRules:  SiteRulesView()
         case .startup:    startupSection
+        case .logs:       logsSection
         case .about:      aboutSection
         }
     }
@@ -101,6 +113,7 @@ struct SettingsView: View {
         case .categories: return S.settingsSidebarCategories
         case .siteRules:  return S.settingsSidebarSiteRules
         case .startup:    return S.settingsSidebarStartup
+        case .logs:       return S.settingsSidebarLogs
         case .about:      return S.settingsSidebarAbout
         }
     }
@@ -112,6 +125,7 @@ struct SettingsView: View {
         case .categories: return "folder.badge.gearshape"
         case .siteRules:  return "globe"
         case .startup:    return "power"
+        case .logs:       return "doc.text.magnifyingglass"
         case .about:      return "info.circle"
         }
     }
@@ -269,6 +283,243 @@ struct SettingsView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(20)
+    }
+
+    // MARK: - Logs section (v1.1.9)
+
+    @State private var showLogPreview: Bool = false
+
+    private var logsSection: some View {
+        let S = strings
+        return Form {
+            Section {
+                // Min log level picker. Bound through a derived
+                // Binding<Int> so the @AppStorage int converts to
+                // SDMLogLevel rawValue, and onChange pushes the new
+                // value into the central logger.
+                Picker(S.settingsLogsLevelLabel, selection: Binding(
+                    get: { logLevelRaw },
+                    set: { newVal in
+                        logLevelRaw = newVal
+                        SDMLogger.shared.updateSettings(currentLogSettings())
+                    })) {
+                    ForEach(SDMLogLevel.allCases, id: \.rawValue) { lv in
+                        Text(lv.displayName).tag(lv.rawValue)
+                    }
+                }
+                .labelsHidden()
+            } header: {
+                Text(S.settingsSectionLogs)
+            } footer: {
+                Text(S.settingsLogsLevelHint).font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle(S.settingsLogsPersistenceLabel, isOn: Binding(
+                    get: { logPersistence },
+                    set: { newVal in
+                        logPersistence = newVal
+                        SDMLogger.shared.updateSettings(currentLogSettings())
+                    }))
+            } footer: {
+                Text(S.settingsLogsPersistenceHint).font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
+                HStack {
+                    Text(S.settingsLogsRetentionLabel)
+                    Spacer()
+                    TextField("", value: Binding(
+                        get: { logRetentionDays },
+                        set: { newVal in
+                            logRetentionDays = newVal
+                            SDMLogger.shared.updateSettings(currentLogSettings())
+                        }), format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                        .multilineTextAlignment(.trailing)
+                }
+                HStack {
+                    Text(S.settingsLogsMaxBytesLabel)
+                    Spacer()
+                    TextField("", value: Binding(
+                        get: { logMaxBytesKB },
+                        set: { newVal in
+                            logMaxBytesKB = newVal
+                            SDMLogger.shared.updateSettings(currentLogSettings())
+                        }), format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 100)
+                        .multilineTextAlignment(.trailing)
+                }
+                HStack {
+                    Text(S.settingsLogsMaxLinesLabel)
+                    Spacer()
+                    TextField("", value: Binding(
+                        get: { logMaxLines },
+                        set: { newVal in
+                            logMaxLines = newVal
+                            SDMLogger.shared.updateSettings(currentLogSettings())
+                        }), format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 100)
+                        .multilineTextAlignment(.trailing)
+                }
+            }
+
+            Section {
+                Button(S.settingsLogsPreviewButton) {
+                    showLogPreview = true
+                }
+                Button(S.settingsLogsOpenConsoleButton) {
+                    // Console.app uses the `x-man-page://` URL
+                    // scheme to open directly to a subsystem
+                    // filter. macOS 14+ has the universal `open
+                    // console://subsystem=<id>` form; on older
+                    // releases we fall back to NSWorkspace.open
+                    // with a console URL. Both work; the link is
+                    // a stable hand-off.
+                    let url = URL(string: "x-man-page://console.app/subsystem/com.skyc8266.superdownloadmanager")!
+                    NSWorkspace.shared.open(url)
+                }
+                Button(S.settingsLogsRevealInFinder) {
+                    NSWorkspace.shared.activateFileViewerSelecting([SDMLogger.fileURL])
+                }
+            } header: {
+                Text(S.settingsSectionLogs)
+            } footer: {
+                Text(S.settingsLogsPreviewSubsystem).font(.caption).foregroundStyle(.tertiary)
+            }
+        }
+        .formStyle(.grouped)
+        .padding(20)
+        .sheet(isPresented: $showLogPreview) {
+            LogPreviewSheet()
+                .environment(\.strings, S)
+        }
+    }
+
+    /// Compose the current settings from the @AppStorage ints so
+    /// the central logger sees a single coherent snapshot every
+    /// time a knob changes (rather than five separate calls).
+    private func currentLogSettings() -> SDMLogSettings {
+        SDMLogSettings(
+            level: SDMLogLevel(rawValue: logLevelRaw) ?? .info,
+            retentionDays: logRetentionDays,
+            maxBytesPerFile: logMaxBytesKB * 1024,
+            maxLines: logMaxLines,
+            persistenceEnabled: logPersistence)
+    }
+}
+
+// MARK: - Log preview sheet (v1.1.9)
+
+/// Lightweight read-only viewer for the on-disk log file. Loads
+/// on appear, refreshes when the user re-opens, and offers
+/// copy-to-clipboard. Filter is a simple substring match against
+/// the raw message — no regex parser to maintain.
+struct LogPreviewSheet: View {
+    @Environment(\.strings) private var S
+    @Environment(\.dismiss) private var dismiss
+    @State private var entries: [SDMLogEntry] = []
+    @State private var filter: String = ""
+    @State private var loaded: Bool = false
+
+    var filtered: [SDMLogEntry] {
+        guard !filter.isEmpty else { return entries }
+        return entries.filter { e in
+            e.message.localizedCaseInsensitiveContains(filter) ||
+            e.category.localizedCaseInsensitiveContains(filter)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(S.settingsLogsPreviewTitle).font(.title3.weight(.semibold))
+                Spacer()
+                Text("\(filtered.count) \(S.settingsLogsPreviewLines)").foregroundStyle(.secondary).font(.caption)
+            }.padding([.horizontal, .top], 16)
+            HStack {
+                Text(S.settingsLogsPreviewPath).foregroundStyle(.secondary).font(.caption)
+                Text(SDMLogger.fileURL.path).font(.caption.monospaced()).lineLimit(1).truncationMode(.middle)
+                Spacer()
+            }.padding(.horizontal, 16).padding(.bottom, 6)
+            HStack {
+                Text(S.settingsLogsPreviewFilter).foregroundStyle(.secondary)
+                TextField("", text: $filter).textFieldStyle(.roundedBorder)
+            }.padding(.horizontal, 16).padding(.bottom, 8)
+            Divider()
+            if !loaded {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if filtered.isEmpty {
+                Text(S.settingsLogsPreviewEmpty)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(filtered.reversed()) { e in
+                            HStack(alignment: .top, spacing: 8) {
+                                Text(formattedTimestamp(e.timestamp))
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 100, alignment: .leading)
+                                Text("[\(e.level.shortTag)]")
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(color(for: e.level))
+                                    .frame(width: 50, alignment: .leading)
+                                Text("[\(e.category)]")
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.tertiary)
+                                    .frame(width: 110, alignment: .leading)
+                                Text(e.message)
+                                    .font(.caption.monospaced())
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }.padding(.horizontal, 16)
+                        }
+                    }.padding(.vertical, 8)
+                }
+            }
+            Divider()
+            HStack {
+                Spacer()
+                Button(S.settingsLogsPreviewCopy) {
+                    let text = filtered.map { e in
+                        "\(e.timestamp) [\(e.level.shortTag)] [\(e.category)] \(e.message)"
+                    }.joined(separator: "\n")
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                }
+                Button(S.settingsLogsPreviewClose) { dismiss() }
+                    .keyboardShortcut(.escape, modifiers: [])
+            }.padding(12)
+        }
+        .frame(width: 760, height: 540)
+        .task {
+            // `.task` runs on appear and cancels on disappear.
+            // We read off the ioQueue so the user never sees a
+            // hang on the main thread.
+            entries = await SDMLogger.shared.readAll()
+            loaded = true
+        }
+    }
+
+    private func formattedTimestamp(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f.string(from: d)
+    }
+
+    private func color(for level: SDMLogLevel) -> Color {
+        switch level {
+        case .debug:   return .secondary
+        case .info:    return .primary
+        case .notice:  return .blue
+        case .warning: return .orange
+        case .error:   return .red
+        }
     }
 }
 
