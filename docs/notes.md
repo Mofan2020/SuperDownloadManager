@@ -30,6 +30,7 @@ asset 是 `SuperDownloadManager.app.zip`（ad-hoc 签名、解压拖 `/Applicati
 | 3 | **动态分段策略激进版** | 初版合并阈值 0.3、分裂阈值 1.5，可通过 GUI 切保守；实测数据后迭代 |
 | 4 | **无 CLI 的 `sdmd` 子进程实际启动** | P0 只声明源码层 stub，`@main` 入口在 P4 真正的 `sdmd` target 上写 |
 | 5 | **GUI 截图实测** | TCC 限制（Screen Recording / Accessibility）下，agent session 无权限截图；GUI 验证落到星空喵手测。CLI 端到端测试 agent 可跑 |
+| 6 | **Little Snitch + ad-hoc 签名应用的出站 0 字节** | 实测：2026-10-19 `release-assets.githubusercontent.com`（GitHub release CDN，DNS 解析到 `185.199.108-111.133` Fastly）curl 直连 0.4 s 通 200，URLSession / NWConnection 同一个进程内拉同一 URL 卡到 60 s timeout（`kCFStreamErrorCodeKey=-2102, kCFStreamErrorDomainKey=4`）。根因：Little Snick NetworkExtension 默认拦截未在规则表里的进程出站请求（ad-hoc 签名应用 `SDM.app` 与 `swiftc` 编译的临时二进制都属于这一类）；curl/nc 因为 Apple 签名 + 长期 allow 自动放行。**这不是 engine bug**，但在 ad-hoc + Little Snick 环境下表现为"下载速度 0 KB/s、UI 无错"与"以前修了几次还是这样"。**验证 / 临时绕开**：Little Snick → Rules → 找到 SuperDownloadManager → Connect Mode = Allow Once / Allow Any Time。**工程代码不用改**——已发布的 v1.1.8 忽略 SSL 选项对这条 URL 不相关，是 Little Snick 根本没把连接交给 curl 外的栈 |
 
 ## 借鉴 / 算法事实
 
