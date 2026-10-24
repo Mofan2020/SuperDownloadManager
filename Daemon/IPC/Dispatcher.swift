@@ -1,4 +1,5 @@
 import Foundation
+import SuperDownloadManagerCore
 
 /// Dispatcher — P4 router between IPC requests and `SDMEngine`.
 ///
@@ -125,7 +126,7 @@ public actor Dispatcher {
         case "speed":
             if case let .int(bps) = v {
                 await engine.setSpeedLimit(Double(bps))
-            } else if case let .int(bps) = v {} else if let d = v.flatMap(jsonDouble) {
+            } else if let d = v.flatMap(jsonDouble) {
                 await engine.setSpeedLimit(d)
             }
             return .success(id: req.id, result: .object(["speed": v ?? .null]))

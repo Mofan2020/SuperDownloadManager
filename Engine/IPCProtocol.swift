@@ -2,6 +2,13 @@ import Foundation
 
 /// IPC protocol — P4 daemon wire format.
 ///
+/// v1.1.10: this file moved from `Daemon/IPC/Protocol.swift` into
+/// the framework. The `sdmdm` CLI and the `sdmd` daemon are
+/// separate targets that both need these types; keeping them in
+/// the daemon folder meant the CLI target could not compile at all
+/// ("cannot find type 'IPCRequest' in scope"), so the command-line
+/// surface was never actually buildable.
+///
 /// Request shape:
 ///   {"id": "...uuid-or-counter", "method": "add", "params": {...}}
 /// Response shape:
@@ -25,6 +32,16 @@ public struct IPCRequest: Codable, Sendable {
     public var id: String
     public var method: String
     public var params: [String: AnyJSON]?
+
+    /// v1.1.10: an explicit public initializer. A public struct's
+    /// memberwise init is internal by default, so the `sdmdm` CLI
+    /// (a separate module) could not construct a request at all —
+    /// "extra arguments at positions #1, #2, #3 in call".
+    public init(id: String, method: String, params: [String: AnyJSON]?) {
+        self.id = id
+        self.method = method
+        self.params = params
+    }
 }
 
 public struct IPCResponse: Codable, Sendable {

@@ -71,6 +71,26 @@ public final class FileAssembler: @unchecked Sendable {
         try _append(data, to: chunkID)
     }
 
+    /// v1.1.10: how many bytes this chunk has already persisted.
+    ///
+    /// The streaming transport needs this to build the `Range`
+    /// header for a retry: after a dropped connection the chunk
+    /// resumes from the last byte that actually reached the disk,
+    /// not from the last byte the server sent.
+    public func bytesWritten(for chunkID: Int) throws -> Int64 {
+        queueLock.lock()
+        let written = chunkWritten[chunkID]
+        let path = partialPaths[chunkID]
+        queueLock.unlock()
+        if let written { return written }
+        // The chunk was not opened in this session — fall back to
+        // the partial file's size on disk.
+        guard let path else { return 0 }
+        return (try? FileManager.default
+            .attributesOfItem(atPath: path.path)[.size] as? Int64) ?? 0
+    }
+
+    /// Close a chunk's handle and forget its bookkeeping.
     public func closeChunk(chunkID: Int) {
         queueLock.lock()
         if let h = handles.removeValue(forKey: chunkID) {

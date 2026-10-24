@@ -99,6 +99,36 @@ targets:
         buildPhase: resources
     dependencies:
       - target: SuperDownloadManagerCore
+    # v1.1.10: the daemon and the CLI are copied into the app
+    # bundle's MacOS directory so they ship with the app and can
+    # find the embedded framework (their rpath is
+    # `@executable_path/../Frameworks`). Before this they existed
+    # only in the build directory, so `install.sh`'s symlink to
+    # `Contents/MacOS/sdmdm` pointed at nothing and the whole
+    # command-line surface was unusable in a real install.
+    postBuildScripts:
+      - name: Embed sdmd + sdmdm into the app bundle
+        script: |
+          set -e
+          # The tool targets build into the *products* directory
+          # (next to the .app), not into the app bundle itself, so
+          # copy them in and make them executable.
+          DST_DIR="${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/MacOS"
+          mkdir -p "${DST_DIR}"
+          for tool in sdmd sdmdm; do
+            BIN="${BUILT_PRODUCTS_DIR}/${tool}"
+            if [ ! -f "${BIN}" ]; then
+              BIN="${CONFIGURATION_BUILD_DIR}/${tool}"
+            fi
+            if [ -f "${BIN}" ]; then
+              cp -f "${BIN}" "${DST_DIR}/${tool}"
+              chmod +x "${DST_DIR}/${tool}"
+              echo "sdm: embedded ${tool} from ${BIN}"
+            else
+              echo "sdm: warning — ${tool} not found in ${BUILT_PRODUCTS_DIR}"
+            fi
+          done
+        basedOnDependencyAnalysis: false
     info:
       path: App/Info.plist
       properties:
@@ -187,6 +217,11 @@ schemes:
     build:
       targets:
         SuperDownloadManager: all
+        # v1.1.10: the daemon and the CLI must be built before the
+        # app's copy phase runs, otherwise the app bundle ships
+        # without them.
+        SDMD: all
+        SDMDM: all
     run:
       config: Debug
     profile:

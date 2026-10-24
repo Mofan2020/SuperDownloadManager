@@ -1,4 +1,5 @@
 import Foundation
+import SuperDownloadManagerCore
 
 /// SocketServer — P4 daemon IPC.
 ///
@@ -98,24 +99,81 @@ public actor SocketServer {
 
     private func handleClient(fd: Int32) async {
         defer { close(fd) }
-        let handle = FileHandle(fileDescriptor: fd)
+        // v1.1.10: read the socket with raw POSIX `read(2)`.
+        //
+        // `FileHandle.read(upToCount:)` is *not* a "read whatever is
+        // available" call — it loops until it has the full requested
+        // count or the peer closes. With a 4096-byte request the
+        // daemon sat waiting for bytes that never came, while the
+        // client sat waiting for the reply: a deadlock. `read(2)`
+        // returns whatever the kernel has, which is what a
+        // line-oriented protocol needs.
         var buf = Data()
+        let chunk = [UInt8](repeating: 0, count: 4096)
         while !Task.isCancelled {
-            let chunk: Data
+            let data: Data
             do {
-                chunk = try await handle.read(upToCount: 4096) ?? Data()
+                data = try await readBlocking(fd: fd, buffer: chunk)
             } catch {
                 break
             }
-            if chunk.isEmpty { break }
-            buf.append(chunk)
+            if data.isEmpty { break }
+            buf.append(data)
             // split on newlines
             while let nl = buf.firstIndex(of: 0x0A) {
                 let line = buf.prefix(upTo: nl)
                 buf.removeSubrange(buf.startIndex...nl)
                 if line.isEmpty { continue }
                 let response = await self.handler(line)
-                handle.write(response + Data([0x0A]))
+                var out = response
+                out.append(0x0A)
+                do {
+                    try writeAll(fd: fd, data: out)
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    /// Read whatever the socket has, without blocking the actor.
+    ///
+    /// The read blocks the calling thread until data arrives, so it
+    /// runs on a background queue and the result comes back through
+    /// a continuation.
+    private func readBlocking(fd: Int32, buffer: [UInt8]) async throws -> Data {
+        try await withCheckedThrowingContinuation { cont in
+            DispatchQueue.global(qos: .utility).async {
+                var scratch = [UInt8](repeating: 0, count: buffer.count)
+                let n = scratch.withUnsafeMutableBytes { raw -> Int in
+                    guard let base = raw.baseAddress else { return -1 }
+                    return Darwin.read(fd, base, raw.count)
+                }
+                if n < 0 {
+                    if errno == EINTR {
+                        cont.resume(returning: Data())
+                        return
+                    }
+                    cont.resume(throwing: SocketError.bind("read() failed errno=\(errno)"))
+                    return
+                }
+                cont.resume(returning: Data(scratch[0..<max(n, 0)]))
+            }
+        }
+    }
+
+    /// Write every byte, retrying on EINTR.
+    private func writeAll(fd: Int32, data: Data) throws {
+        try data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let base = raw.baseAddress else { return }
+            var sent = 0
+            while sent < raw.count {
+                let n = Darwin.write(fd, base.advanced(by: sent), raw.count - sent)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    throw SocketError.bind("write() failed errno=\(errno)")
+                }
+                sent += n
             }
         }
     }

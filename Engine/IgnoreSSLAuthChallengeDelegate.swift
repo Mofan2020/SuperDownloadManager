@@ -59,9 +59,12 @@ public final class IgnoreSSLAuthChallengeDelegate: NSObject, URLSessionDelegate,
         return _ignoreSSL
     }
 
-    public func urlSession(
-        _ session: URLSession,
-        didReceive challenge: URLAuthenticationChallenge,
+    /// v1.1.10: the challenge handler is factored out so a session
+    /// whose delegate is *not* this object (e.g. the streaming
+    /// `ChunkStreamDelegate`) can still route server-trust
+    /// challenges through the same bypass decision.
+    public func handle(
+        _ challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
         let allowed = ignoreSSL
@@ -88,5 +91,18 @@ public final class IgnoreSSLAuthChallengeDelegate: NSObject, URLSessionDelegate,
         downloadLog.warning("SSL bypass active for host=\(challenge.protectionSpace.host) port=\(challenge.protectionSpace.port)")
 
         completionHandler(.useCredential, URLCredential(trust: trust))
+    }
+
+    /// Keep the `URLSessionDelegate` conformance: URLSession calls
+    /// this entry point on whichever object is the session's
+    /// delegate. The streaming `ChunkStreamDelegate` forwards to
+    /// `handle(_:completionHandler:)` so both paths share one
+    /// bypass decision.
+    public func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        handle(challenge, completionHandler: completionHandler)
     }
 }

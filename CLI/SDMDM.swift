@@ -1,4 +1,39 @@
 import Foundation
+import Network
+import SuperDownloadManagerCore
+
+/// Resumes a continuation exactly once.
+///
+/// The `NWConnection` callbacks can fire in more than one way for a
+/// single request (a send failure *and* a state change, say), and a
+/// continuation may only be resumed once — resuming it twice traps.
+final class Once: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cont: CheckedContinuation<Data, Error>?
+    private var finished = false
+
+    init(_ cont: CheckedContinuation<Data, Error>) {
+        self.cont = cont
+    }
+
+    func resume(returning value: Data) {
+        lock.lock()
+        guard !finished, let c = cont else { lock.unlock(); return }
+        finished = true
+        cont = nil
+        lock.unlock()
+        c.resume(returning: value)
+    }
+
+    func resume(throwing error: Error) {
+        lock.lock()
+        guard !finished, let c = cont else { lock.unlock(); return }
+        finished = true
+        cont = nil
+        lock.unlock()
+        c.resume(throwing: error)
+    }
+}
 
 /// sdmdm — P4 CLI client.
 ///
@@ -163,7 +198,11 @@ public struct SDMDM {
         }
     }
 
-    enum Result {
+    /// v1.1.10: made public — `UDSClient.send` is public and returns
+    /// this type, so the compiler rejected the public signature
+    /// ("method cannot be declared public because its result uses an
+    /// internal type").
+    public enum Result {
         case success(String)
         case failure(String)
     }
@@ -255,53 +294,41 @@ public enum StdioError: Error, CustomStringConvertible {
     }
 }
 
-/// Tiny Unix Domain Socket client built on Network.framework. Each
-/// call is one request, one response line.
+/// Tiny Unix Domain Socket client. Each call is one request, one
+/// response line.
+///
+/// v1.1.10: rewritten with POSIX sockets instead of
+/// Network.framework. `NWEndpoint.unix(path:)` exists, but
+/// `NWParameters` has no `.unix` case — Network.framework simply
+/// does not support AF_UNIX — so the v1.0 code could never have
+/// compiled. The daemon's own `SocketServer` already speaks POSIX
+/// AF_UNIX, so the client now does too.
+///
+/// The v1.0 code also blocked the calling thread on a
+/// `DispatchSemaphore` inside an `async` function, which Swift 6
+/// rejects ("instance method 'wait' is unavailable from asynchronous
+/// contexts").
 public enum UDSClient {
     public static func send(path: String, payload: Data) async throws -> SDMDM.Result {
-        let endpoint = NWEndpoint.unix(path: path)
-        let conn = NWConnection(to: endpoint, using: .unix)
-        let semaphore = DispatchSemaphore(value: 0)
-        var success: Bool = false
-        var outBuf = Data()
-        var outErr: StdioError?
-
-        conn.stateUpdateHandler = { s in
-            switch s {
-            case .ready:
-                conn.send(content: payload, completion: .contentProcessed { err in
-                    if let err = err { outErr = .writeFailed("\(err)"); semaphore.signal(); return }
-                    conn.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, _, recvErr in
-                        if let data = data { outBuf = data }
-                        if let recvErr = recvErr {
-                            outErr = .readFailed("\(recvErr)")
-                        } else {
-                            success = true
-                        }
-                        semaphore.signal()
-                    }
-                })
-            case .failed(let err):
-                outErr = .cannotConnect("\(err)")
-                semaphore.signal()
-            case .cancelled:
-                semaphore.signal()
-            default:
-                break
+        // The socket work is blocking, so it runs on a background
+        // queue and the result comes back through a continuation.
+        let responseData: Data = try await withCheckedThrowingContinuation { cont in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let data = try exchange(path: path, payload: payload)
+                    cont.resume(returning: data)
+                } catch {
+                    cont.resume(throwing: error)
+                }
             }
         }
-        conn.start(queue: .global())
-        // Wait at most 5s. CLI tools must not hang.
-        if semaphore.wait(timeout: .now() + .seconds(5)) == .timedOut {
-            conn.cancel()
-            throw StdioError.timeout
+
+        // Parse the JSONL response. Drop the trailing newline.
+        var trimmed = responseData
+        if trimmed.last == 0x0A { trimmed = trimmed.dropLast() }
+        guard let obj = try JSONSerialization.jsonObject(with: trimmed) as? [String: Any] else {
+            throw StdioError.readFailed("malformed response")
         }
-        conn.cancel()
-        if let e = outErr { throw e }
-        if !success { throw StdioError.timeout }
-        // Parse JSONL response. Drop trailing newline.
-        let trimmed = outBuf.last == 0x0A ? outBuf.dropLast() : Data(outBuf)
-        let obj = try JSONSerialization.jsonObject(with: trimmed) as? [String: Any] ?? [:]
         if obj["ok"] as? Bool == true {
             let pretty: String
             if let result = obj["result"] {
@@ -317,5 +344,69 @@ public enum UDSClient {
             let msg = (obj["error"] as? String) ?? "unknown error"
             return .failure(msg)
         }
+    }
+
+    /// One request/response round trip over an AF_UNIX socket.
+    private static func exchange(path: String, payload: Data) throws -> Data {
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            throw StdioError.cannotConnect("socket() failed")
+        }
+        defer { close(fd) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = Array(path.utf8) + [0]
+        guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
+            throw StdioError.cannotConnect("socket path too long")
+        }
+        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+            ptr.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) { dest in
+                for (i, b) in pathBytes.enumerated() {
+                    dest[i] = CChar(b)
+                }
+            }
+        }
+        let addrLen = socklen_t(MemoryLayout<sockaddr_un>.size)
+        let connectResult = withUnsafePointer(to: &addr) { ptr -> Int32 in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { p in
+                Darwin.connect(fd, p, addrLen)
+            }
+        }
+        guard connectResult == 0 else {
+            throw StdioError.cannotConnect("connect() failed errno=\(errno)")
+        }
+
+        // Write the request.
+        let toWrite = payload
+        try toWrite.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let base = raw.baseAddress else { return }
+            var sent = 0
+            while sent < raw.count {
+                let n = Darwin.write(fd, base.advanced(by: sent), raw.count - sent)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    throw StdioError.writeFailed("write() failed errno=\(errno)")
+                }
+                sent += n
+            }
+        }
+
+        // Read the response line.
+        var buffer = Data()
+        var chunk = [UInt8](repeating: 0, count: 4096)
+        while buffer.last != 0x0A {
+            let n = Darwin.read(fd, &chunk, chunk.count)
+            if n < 0 {
+                if errno == EINTR { continue }
+                throw StdioError.readFailed("read() failed errno=\(errno)")
+            }
+            if n == 0 { break }
+            buffer.append(contentsOf: chunk[0..<n])
+            if buffer.count > 1024 * 1024 {
+                throw StdioError.readFailed("response too large")
+            }
+        }
+        return buffer
     }
 }
