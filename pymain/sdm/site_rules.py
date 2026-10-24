@@ -12,7 +12,7 @@ import base64
 import json
 import threading
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from . import paths
@@ -36,7 +36,7 @@ class SiteRule:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "SiteRule":
+    def from_dict(cls, data: dict) -> SiteRule:
         return cls(
             id=data.get("id") or str(uuid.uuid4()),
             host=data.get("host", ""),
@@ -94,7 +94,7 @@ class Keychain:
                     capture_output=True,
                 )
                 return True
-            except Exception as err:  # noqa: BLE001
+            except Exception as err:
                 log.warning(CAT_STORE, f"钥匙串写入失败（改用内存存储）: {err}")
                 self._backend = "memory"
         elif self._backend == "dpapi":
@@ -119,7 +119,7 @@ class Keychain:
                     text=True,
                 )
                 return result.stdout.strip() or None
-            except Exception:  # noqa: BLE001
+            except Exception:
                 return None
         if self._backend == "dpapi":
             value = self._dpapi_get(key)
@@ -139,7 +139,7 @@ class Keychain:
                     check=False,
                     capture_output=True,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         elif self._backend == "dpapi":
             self._dpapi_remove(key)
@@ -157,7 +157,7 @@ class Keychain:
             class DATA_BLOB(ctypes.Structure):
                 _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
 
-            windll = getattr(ctypes, "windll")
+            windll = ctypes.windll
             crypt32 = windll.crypt32
             kernel32 = windll.kernel32
 
@@ -181,7 +181,7 @@ class Keychain:
                 return True
             finally:
                 kernel32.LocalFree(out_blob.pbData)
-        except Exception:  # noqa: BLE001
+        except Exception:
             return False
 
     @staticmethod
@@ -203,7 +203,7 @@ class Keychain:
                 return None
             encrypted = base64.b64decode(data[key])
 
-            windll = getattr(ctypes, "windll")
+            windll = ctypes.windll
             crypt32 = windll.crypt32
             kernel32 = windll.kernel32
 
@@ -221,7 +221,7 @@ class Keychain:
                 return decrypted.decode("utf-16-le")
             finally:
                 kernel32.LocalFree(out_blob.pbData)
-        except Exception:  # noqa: BLE001
+        except Exception:
             return None
 
     @staticmethod
@@ -235,14 +235,14 @@ class Keychain:
             data = _json.loads(store.read_text(encoding="utf-8"))
             data.pop(key, None)
             store.write_text(_json.dumps(data, indent=2), encoding="utf-8")
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
 
 class SiteRuleStore:
     """规则列表的读写。"""
 
-    _instance: "SiteRuleStore | None" = None
+    _instance: SiteRuleStore | None = None
     _instance_lock = threading.Lock()
 
     def __init__(self, path: Path | None = None) -> None:
@@ -251,7 +251,7 @@ class SiteRuleStore:
         self._lock = threading.Lock()
 
     @classmethod
-    def shared(cls) -> "SiteRuleStore":
+    def shared(cls) -> SiteRuleStore:
         with cls._instance_lock:
             if cls._instance is None:
                 cls._instance = cls()
@@ -332,7 +332,7 @@ class SiteRuleStore:
         if rule.basic_auth_user:
             password = self.get_password(rule.basic_auth_user, rule.host)
             if password:
-                raw = f"{rule.basic_auth_user}:{password}".encode("utf-8")
+                raw = f"{rule.basic_auth_user}:{password}".encode()
                 token = base64.b64encode(raw).decode("ascii")
                 headers["Authorization"] = f"Basic {token}"
         return headers

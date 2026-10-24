@@ -8,8 +8,6 @@
 from __future__ import annotations
 
 import http.server
-import os
-import socket
 import socketserver
 import tempfile
 import threading
@@ -51,10 +49,10 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
     #: 是否返回 403
     force_status: int = 0
 
-    def log_message(self, *args):  # noqa: A002 — 静默
+    def log_message(self, *args):
         pass
 
-    def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler 的接口
+    def do_GET(self) -> None:
         if self.force_status:
             self.send_response(self.force_status)
             self.send_header("Content-Length", "0")
@@ -206,7 +204,7 @@ class RangeServer:
             pass
         self._tmpdir.cleanup()
 
-    def __enter__(self) -> "RangeServer":
+    def __enter__(self) -> RangeServer:
         return self
 
     def __exit__(self, *exc) -> None:

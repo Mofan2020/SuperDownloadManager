@@ -12,9 +12,9 @@ import json
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable
 
 from . import paths
 from .logging_setup import CAT_STORE, get_logger
@@ -33,7 +33,7 @@ class ScheduledItem:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "ScheduledItem":
+    def from_dict(cls, data: dict) -> ScheduledItem:
         return cls(
             id=data.get("id") or str(uuid.uuid4()),
             url=data.get("url", ""),
@@ -125,6 +125,6 @@ class ScheduleStore:
                 if self._on_fire is not None:
                     try:
                         self._on_fire(item)
-                    except Exception as err:  # noqa: BLE001
+                    except Exception as err:
                         log.error(CAT_STORE, f"计划任务触发失败: {err}")
             self._stop.wait(1.0)

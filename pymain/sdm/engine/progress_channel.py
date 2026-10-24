@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 
 class ProgressChannel:

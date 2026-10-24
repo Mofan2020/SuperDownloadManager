@@ -62,6 +62,14 @@ jobs:
             build/release/SuperDownloadManager-macOS.zip
           cd build/release
           shasum -a 256 SuperDownloadManager-macOS.zip | tee SuperDownloadManager-macOS.zip.sha256
+          # CLI 单独打一个包。.app 里已经带了（Contents/Helpers/），
+          # 但用户可能只想拿命令行工具，不装整个 app。
+          cd ..
+          ditto -c -k --sequesterRsrc --keepParent \
+            pymain/dist/macos/sdm \
+            build/release/sdm-macOS.zip
+          cd build/release
+          shasum -a 256 sdm-macOS.zip | tee sdm-macOS.zip.sha256
 
       - uses: actions/upload-artifact@v4
         with:
@@ -182,6 +190,8 @@ jobs:
             build/release/SuperDownloadManager-Windows.zip
             build/release/SuperDownloadManager-Windows.zip.sha256
             build/release/sdm-Windows.zip
+            build/release/sdm-macOS.zip
+            build/release/sdm-macOS.zip.sha256
           draft: false
           prerelease: true
           generate_release_notes: false

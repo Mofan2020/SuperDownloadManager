@@ -41,7 +41,7 @@ class FlakyRangeHandler(RangeFileHandler):
     _counter: int = 0
     _lock = threading.Lock()
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         if self.fail_every:
             with FlakyRangeHandler._lock:
                 FlakyRangeHandler._counter += 1
@@ -164,7 +164,7 @@ def test_retry_does_not_corrupt_chunk_boundaries(tmp_path: Path) -> None:
             assert len(got) == len(want), f"长度不对：{len(got)} vs {len(want)}"
             if got != want:
                 # 找出第一个不同的偏移
-                for i, (a, b) in enumerate(zip(got, want)):
+                for i, (a, b) in enumerate(zip(got, want, strict=True)):
                     if a != b:
                         raise AssertionError(f"第 {i} 字节不同：{a} != {b}（分片边界 {i // 65536}）")
         finally:
@@ -228,10 +228,11 @@ def test_partial_file_preserved_on_failure(tmp_path: Path) -> None:
     """传输失败后，已落盘的字节要留着，下次能接着下。"""
 
     async def _inner() -> None:
-        from .range_server import RangeServer
-        from sdm.engine.http_downloader import HTTPDownloader
         from sdm.engine.file_assembler import FileAssembler
+        from sdm.engine.http_downloader import HTTPDownloader
         from sdm.engine.range_planner import Chunk
+
+        from .range_server import RangeServer
 
         srv = RangeServer(total_bytes=256 * 1024, chunk_delay=0.05)
         try:

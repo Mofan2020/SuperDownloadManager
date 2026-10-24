@@ -14,8 +14,8 @@ from __future__ import annotations
 import json
 import socket
 import threading
-from typing import Callable
-from urllib.parse import parse_qs, unquote, urlparse
+from collections.abc import Callable
+from urllib.parse import parse_qs, urlparse
 
 from ..logging_setup import CAT_NET, get_logger
 
@@ -72,7 +72,7 @@ class DispatchServer:
         while not self._stop.is_set():
             try:
                 client, _ = self._server.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 break
@@ -120,7 +120,7 @@ class DispatchServer:
             if self.on_add is not None:
                 try:
                     self.on_add(url, filename, referer)
-                except Exception as err:  # noqa: BLE001
+                except Exception as err:
                     log.error(CAT_NET, f"扩展派单失败: {err}")
                     return self._http(500, '{"ok":false,"error":"dispatch failed"}')
             body = json.dumps(

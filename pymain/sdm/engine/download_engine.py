@@ -16,19 +16,18 @@ Python 版不用这套：每个任务有自己的 `asyncio.Task`，状态变更
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import enum
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 from ..logging_setup import CAT_ENGINE, CAT_QUEUE, get_logger
-from .filenames import sanitize_filename
-from .categories import DownloadCategory, category_from_url
-from .content_sniffer import ContentProbe
+from .categories import category_from_url
 from .download_flow import DownloadFlow, FlowError, FlowFailure
-from .file_assembler import FileAssembler
+from .file_assembler import _unlink_with_retry
+from .filenames import sanitize_filename
 from .http_downloader import DownloadError, HTTPDownloader
 from .progress_channel import ProgressChannel
 from .range_planner import RangeStrategy
@@ -271,7 +270,7 @@ class DownloadEngine:
         # CDN 拒证书时探测静默失败，任务就永远卡在「下载中」。
         try:
             probe = await self.downloader.probe(spec.url)
-        except Exception:  # noqa: BLE001
+        except Exception:
             # 探测失败不直接判死——下面的正式流程会再探一次，
             # 那时才会带着真实错误信息回来（403 会在那里被
             # 正确归类成「等待新链接」）。
@@ -449,6 +448,7 @@ class DownloadEngine:
         """
         live = self.live.get(task_id)
         summary = self.tasks.get(task_id)
+        running = None
         if live is not None:
             live.cancelled = True
             live.paused = False
@@ -456,10 +456,19 @@ class DownloadEngine:
                 live.flow.cancel()
             if live.task is not None and not live.task.done():
                 live.task.cancel()
+                running = live.task
         if summary is not None:
             if summary.state != TaskState.COMPLETED.value:
                 summary.state = TaskState.CANCELLED.value
             summary.speed_bytes_per_sec = 0.0
+        # 等分片任务真正停下再删文件。
+        #
+        # task.cancel() 只是请求取消，任务还在收尾、文件还开着。
+        # macOS 上删打开的文件没事（inode 留到最后一个句柄关闭），
+        # Windows 上直接 PermissionError——分片就留下了。
+        if running is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(asyncio.shield(running), timeout=5.0)
         # 删掉分片临时文件。放在这里而不是 flow.cancel() 里，
         # 因为 pause 也要调 flow.cancel()——那一路要保留分片。
         self._discard_partials(task_id, summary)
@@ -467,18 +476,22 @@ class DownloadEngine:
     def _discard_partials(self, task_id: str, summary: TaskSummary | None) -> None:
         """删掉某个任务的分片临时文件。
 
-        任务已经不在 live 里（取消过了）时，用 destination 反推
+        优先走 flow 的 discard_partials()——它知道分片文件在哪，
+        而且会先把文件句柄关掉。Windows 上文件开着就删不掉
+        （PermissionError），自己按文件名 glob 删会漏。
+
+        flow 已经不在了（任务早就结束了）时，用 destination 反推
         分片文件名——分片名是 `<目标名>.sdm.partial-<id>`。
         """
+        live = self.live.get(task_id)
+        if live is not None and live.flow is not None:
+            live.flow.discard_partials()
         if summary is None:
             return
         base = Path(summary.destination)
         try:
             for path in base.parent.glob(base.name + ".sdm.partial-*"):
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
+                _unlink_with_retry(path)
         except OSError:
             pass
 
@@ -508,7 +521,7 @@ class DownloadEngine:
         if sidecar.exists():
             try:
                 original = ResumeState.read(sidecar)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 original = None
         if original is None:
             original = ResumeState(

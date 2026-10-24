@@ -33,7 +33,7 @@ def open_file(path: str | Path) -> bool:
         else:
             subprocess.run(["xdg-open", str(target)], check=False, capture_output=True, timeout=10)
         return True
-    except Exception as err:  # noqa: BLE001
+    except Exception as err:
         log.warning(CAT_GUI, f"打开文件失败: {err}")
         return False
 
@@ -67,7 +67,7 @@ def reveal_in_finder(path: str | Path) -> bool:
                 timeout=10,
             )
         return True
-    except Exception as err:  # noqa: BLE001
+    except Exception as err:
         log.warning(CAT_GUI, f"在访达中显示失败: {err}")
         return False
 
@@ -84,7 +84,7 @@ def open_url(url: str) -> bool:
         else:
             subprocess.run(["xdg-open", url], check=False, capture_output=True, timeout=10)
         return True
-    except Exception as err:  # noqa: BLE001
+    except Exception as err:
         log.warning(CAT_GUI, f"打开链接失败: {err}")
         return False
 
@@ -108,13 +108,12 @@ def set_open_at_login(enabled: bool) -> bool:
 
 
 def _set_open_at_login_macos(enabled: bool) -> bool:
-    from . import paths
     from .version import BUNDLE_ID
 
     label = f"{BUNDLE_ID}.autostart"
     agents = Path.home() / "Library" / "LaunchAgents"
     plist = agents / f"{label}.plist"
-    launchctl = ["launchctl", "load"]  # noqa: S607
+    launchctl = ["launchctl", "load"]
 
     if not enabled:
         try:
@@ -158,7 +157,7 @@ def _set_open_at_login_macos(enabled: bool) -> bool:
     try:
         plist.write_text(content, encoding="utf-8")
         subprocess.run(
-            launchctl + [str(plist)],
+            [*launchctl, str(plist)],
             check=False,
             capture_output=True,
             timeout=10,
@@ -188,7 +187,7 @@ def _set_open_at_login_windows(enabled: bool) -> bool:
                 except FileNotFoundError:
                     pass
         return True
-    except Exception as err:  # noqa: BLE001
+    except Exception as err:
         log.warning(CAT_GUI, f"开机自启设置失败: {err}")
         return False
 

@@ -1,0 +1,53 @@
+[project]
+name = "sdm"
+version = "2.0.0"
+description = "SuperDownloadManager — 跨平台下载管理器"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+exclude = [
+    "build",
+    "dist",
+    "*.egg-info",
+]
+
+[tool.ruff.lint]
+# 规则集显式写死。ruff 的默认规则集随版本变化——0.17 默认开了
+# YTT/ASYNC/UP 等一大堆，同一份代码换个 ruff 版本就红。写死之后
+# 本地和 CI 跑的是同一套。
+select = [
+    "E",    # pycodestyle 错误
+    "W",    # pycodestyle 警告
+    "F",    # pyflakes
+    "I",    # import 排序
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "SIM",  # simplify
+    "RUF",  # ruff 专属
+]
+ignore = [
+    "E501",    # 行长由 formatter 管
+    "SIM108",  # 三元表达式不总是更清楚
+    "SIM105",  # try/except/pass 这里都带注释说明为什么，suppress 反而丢上下文
+    "B008",    # 函数调用做默认参数（FastAPI 风格，这里用不上但无害）
+    "RUF001",  # 全角标点——中文注释里正常
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "E402",    # 测试里 import 顺序无所谓
+    "B011",    # assert False 是故意的
+    "SIM117",  # 嵌套 with 读起来更清楚
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

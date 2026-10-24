@@ -21,7 +21,7 @@ import platform
 import subprocess
 import threading
 import time
-from typing import Callable
+from collections.abc import Callable
 
 from .engine.categories import is_likely_file_url
 from .logging_setup import CAT_GUI, get_logger
@@ -64,7 +64,7 @@ class ClipboardMonitor:
         while not self._stop.is_set():
             try:
                 self._check()
-            except Exception as err:  # noqa: BLE001
+            except Exception as err:
                 log.debug(CAT_GUI, f"剪贴板检查失败: {err}")
             self._stop.wait(self._interval)
 
@@ -131,9 +131,8 @@ def _read_macos() -> tuple[str | None, int]:
 def _read_windows() -> tuple[str | None, int]:
     try:
         import ctypes
-        from ctypes import wintypes
 
-        windll = getattr(ctypes, "windll")
+        windll = ctypes.windll
         user32 = windll.user32
         kernel32 = windll.kernel32
 
@@ -155,7 +154,7 @@ def _read_windows() -> tuple[str | None, int]:
             return text, hash(text)
         finally:
             user32.CloseClipboard()
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None, -1
 
 

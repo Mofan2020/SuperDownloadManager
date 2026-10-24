@@ -49,7 +49,7 @@ class SpeedRule:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "SpeedRule":
+    def from_dict(cls, data: dict) -> SpeedRule:
         return cls(
             int(data.get("from_minute", 0)),
             int(data.get("to_minute", 0)),
@@ -119,7 +119,7 @@ class SpeedPolicy:
             }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "SpeedPolicy":
+    def from_dict(cls, data: dict) -> SpeedPolicy:
         return cls(
             [SpeedRule.from_dict(r) for r in data.get("rules", []) if isinstance(r, dict)],
             float(data.get("ceiling", 0.0)),

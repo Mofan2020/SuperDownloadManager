@@ -17,16 +17,16 @@ from __future__ import annotations
 import asyncio
 import enum
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from ..logging_setup import CAT_ENGINE, get_logger
 from .content_sniffer import ContentProbe, ProbeError
 from .file_assembler import FileAssembler
-from .http_downloader import DownloadError, DownloadFailure, HTTPDownloader
+from .http_downloader import DownloadError, HTTPDownloader
 from .progress_channel import ChunkProgress, ProgressChannel
-from .range_planner import Chunk, RangePlanner, RangeStrategy, SpeedSample
+from .range_planner import Chunk, RangePlanner, RangeStrategy
 from .resume_state import ResumeState
 from .speed_limiter import SpeedLimiter
 
@@ -114,6 +114,17 @@ class DownloadFlow:
             if not task.done():
                 task.cancel()
 
+    def discard_partials(self) -> None:
+        """删掉分片临时文件（引擎层取消任务时用）。
+
+        公开方法——引擎层要通过它删，不能自己按文件名 glob 删。
+        自己 glob 删会漏掉文件句柄：Windows 上文件还开着，
+        unlink 直接 PermissionError，分片就留在下载目录里了。
+
+        暂停（pause）不能调这个——暂停要保留分片。
+        """
+        self._cleanup_partials()
+
     def _cleanup_partials(self) -> None:
         """删掉所有分片临时文件。
 
@@ -129,7 +140,7 @@ class DownloadFlow:
             return
         try:
             assembler.cleanup_partials()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     async def run(self) -> FlowOutcome:
@@ -144,7 +155,7 @@ class DownloadFlow:
             if err.is_expired_link:
                 raise FlowError(FlowFailure.EXPIRED_LINK.value, err.message) from err
             raise FlowError(FlowFailure.PROBE_FAILED.value, err.message) from err
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             raise FlowError(FlowFailure.PROBE_FAILED.value, str(err)) from err
 
         content_length = probe.content_length
@@ -221,7 +232,7 @@ class DownloadFlow:
         # 4. 合并 + sidecar
         try:
             await asyncio.to_thread(assembler.finalize, [c.id for c in chunks])
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             raise FlowError(FlowFailure.MERGE_FAILED.value, str(err)) from err
 
         state = ResumeState.from_probe(probe, self.destination.name, chunks)
@@ -312,7 +323,7 @@ class DownloadFlow:
                     raise asyncio.CancelledError()
                 self._chunk_started_at[chunk.id] = time.monotonic()
                 headers = dict(self.headers)
-                result = await self.downloader.download_chunk(
+                await self.downloader.download_chunk(
                     url=url,
                     chunk=chunk,
                     assembler=assembler,
@@ -321,7 +332,6 @@ class DownloadFlow:
                     limiter=self.limiter,
                 )
                 self._notify_chunk_progress()
-                planner_done = result.bytes_written
                 # 分片完成：把 planner 里的 bytes_done 顶到末尾。
                 for c in active:
                     if c.id == chunk.id:
@@ -364,7 +374,7 @@ class DownloadFlow:
             })
         try:
             self.on_chunk_progress(states)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     def _chunk_idle_seconds(self, chunk_id: int, now: float) -> float | None:

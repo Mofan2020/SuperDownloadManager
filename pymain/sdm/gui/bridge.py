@@ -16,18 +16,16 @@ import hashlib
 import json
 import subprocess
 import threading
-import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .. import paths
 from ..engine.categories import DownloadCategory, category_from_url
 from ..engine.download_engine import DownloadEngine, StartSpec, TaskState
-from ..engine.speed_display import format_duration, format_rate, format_size
-from ..history_store import HistoryEntry, HistoryStore
+from ..history_store import HistoryStore
 from ..i18n import I18n, available_languages
-from ..logging_setup import CAT_GUI, CAT_STORE, LogSettings, get_logger
+from ..logging_setup import CAT_GUI, get_logger
 from ..notifications import notify
 from ..schedules import ScheduleStore
 from ..settings import SettingsStore
@@ -81,7 +79,7 @@ class GuiBridge:
         try:
             args = json.dumps(payload, ensure_ascii=False)
             self._window.evaluate_js(f"{func}({args})")
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             log.debug(CAT_GUI, f"调用前端 {func} 失败: {err}")
 
     def _run(self, coro) -> None:
@@ -255,11 +253,9 @@ class GuiBridge:
             elif paths.is_windows():
                 subprocess.run(["clip"], input=text.encode("utf-16-le"), check=True, timeout=5)
             else:
-                import subprocess
-
                 subprocess.run(["xclip", "-selection", "clipboard"], input=text.encode("utf-8"), check=True, timeout=5)
             return {"ok": True}
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             return {"ok": False, "error": str(err)}
 
     def compute_checksum(self, path: str) -> dict:
@@ -295,7 +291,7 @@ class GuiBridge:
             else:
                 target.unlink()
             return {"ok": True}
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             return {"ok": False, "error": str(err)}
 
     # -- 设置 --------------------------------------------------------
@@ -442,7 +438,7 @@ class GuiBridge:
         try:
             dialog_type = getattr(webview, "FOLDER_DIALOG", 2)
             result = self._window.create_file_dialog(dialog_type)
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             return {"ok": False, "error": str(err)}
         if not result:
             return {"ok": False, "cancelled": True}

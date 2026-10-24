@@ -19,7 +19,6 @@ import enum
 from dataclasses import dataclass
 
 from ..logging_setup import CAT_ENGINE, get_logger
-from .content_sniffer import ContentProbe
 from .http_downloader import HTTPDownloader
 from .resume_state import ResumeState
 
@@ -57,7 +56,7 @@ class ExpiredLinkHandler:
     async def evaluate_relink(self, candidate: str) -> RelinkResult:
         try:
             probe = await self.downloader.probe(candidate)
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             return RelinkResult(
                 RelinkDecision.UNSAFE_REJECT,
                 f"新链接探测失败: {err}",

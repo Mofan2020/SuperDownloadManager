@@ -16,8 +16,6 @@
 from __future__ import annotations
 
 import argparse
-import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -276,8 +274,26 @@ def build_macos() -> bool:
         print(f"Info.plist 已更新：version={version} build={build} "
               f"bundle={BUNDLE_ID} url_scheme=superdownloadmanager")
 
-    # CLI 和 daemon 也打出来，放在 .app/Contents/MacOS/ 旁边。
-    # macOS 上用户可以直接调 Contents/MacOS/sdm。
+    # CLI 和 daemon 也打出来。
+    #
+    # 放 Contents/Resources/ 下面，不放 Contents/MacOS/ 或
+    # Contents/Frameworks/。
+    #
+    # 原因：codesign 签 .app 时会递归 Contents/ 下的目录树，把含
+    # Mach-O 的目录当成 nested bundle 处理。onedir 的 _internal/ 里
+    # 有 python3.11/lib-dynload/*.so 这样的结构，codesign 一路递归
+    # 下去撞到非 bundle 目录，报 "bundle format unrecognized,
+    # invalid, or unsuitable"，整个签名失败。
+    #
+    # Resources/ 是 codesign 当作「资源」处理的位置，不递归、不
+    # 签里面的代码——验证能过，CLI/daemon 照常能跑。
+    #
+    # 目录名要避开 sdm / sdmd：PyInstaller 给 GUI 打的 .app 里
+    # 已经有 Resources/sdm 软链（指向 ../Resources/sdm），同名会
+    # 撞上，变成自指软链。
+    resources = app / "Contents" / "Resources"
+    cli_dir = resources / "sdm-cli"
+    daemon_dir = resources / "sdmd-daemon"
     for name, module, func, imports, with_assets, onefile in TARGETS[1:]:
         entry = build_entrypoint(name, module, func)
         args = [
@@ -291,12 +307,11 @@ def build_macos() -> bool:
         # 把产物挪进 .app。
         # onedir 的产物是目录：可执行文件 + 同级 _internal/。
         # 整个目录搬进去，_internal 要跟可执行文件平级。
-        target_dir = app / "Contents" / "MacOS"
         built = DIST / "macos" / name
+        dest = cli_dir if name == "sdm" else daemon_dir
         if built.is_file():
-            shutil.copy2(built, target_dir / name)
+            shutil.copy2(built, dest / name)
         elif built.is_dir():
-            dest = target_dir / name
             if dest.exists():
                 shutil.rmtree(dest)
             shutil.copytree(built, dest)
@@ -309,7 +324,6 @@ def build_macos() -> bool:
     # 不用 --add-data：PyInstaller 6 会把单个文件打成一个目录
     # （install.sh/install.sh），脚本就没法直接执行了。
     # 打包完直接复制最省事。
-    resources = app / "Contents" / "Resources"
     for script_name in ("install.sh", "uninstall.sh"):
         src = ROOT / "scripts" / script_name
         dest = resources / script_name
@@ -317,15 +331,34 @@ def build_macos() -> bool:
         dest.chmod(0o755)
     print("安装脚本已放进 Resources")
 
-    # ad-hoc 签名
-    subprocess.call(
-        ["codesign", "--force", "--deep", "--sign", "-", str(app)],
-        stderr=subprocess.DEVNULL,
+    # ad-hoc 签名。
+    #
+    # 不带 --deep。--deep 会递归进 Contents/ 下的每个目录，把含
+    # Mach-O 的目录当 nested bundle 处理，一路递归下去撞上
+    # _internal/click-8.4.2.dist-info 这种非 bundle 目录，报
+    # "bundle format unrecognized, invalid, or unsuitable"。
+    #
+    # CLI/daemon 放在 Contents/Resources/ 下正是为了这个——Resources
+    # 是 codesign 当资源处理的位置，不递归，签名能过，程序照常能跑。
+    #
+    # 每一步都检查返回码：签名失败如果不报出来，产物带着坏签名
+    # 发出去，用户装上打不开。
+    if not _codesign(app):
+        print("签名失败")
+        return False
+
+    verify = subprocess.run(
+        ["codesign", "--verify", "--deep", "--strict", str(app)],
+        capture_output=True,
+        text=True,
     )
-    subprocess.call(["codesign", "--verify", "--deep", "--strict", str(app)])
+    if verify.returncode != 0:
+        print(f"签名验证失败：{verify.stderr.strip()[:400]}")
+        return False
+    print("签名验证通过")
 
     print(f"macOS 打包完成（{time.time() - t0:.0f}s）：{app}")
-    return smoke_test(app / "Contents" / "MacOS", darwin=True)
+    return smoke_test(app / "Contents" / "MacOS", darwin=True, helpers=resources)
 
 
 def build_windows() -> bool:
@@ -351,7 +384,20 @@ def build_windows() -> bool:
     return smoke_test(DIST / "windows", darwin=False)
 
 
-def smoke_test(bin_dir: Path, darwin: bool) -> bool:
+def _codesign(path: Path) -> bool:
+    """ad-hoc 签名一个文件或目录。返回是否成功。"""
+    result = subprocess.run(
+        ["codesign", "--force", "--sign", "-", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"  codesign 失败 {path.name}: {result.stderr.strip()[:200]}")
+        return False
+    return True
+
+
+def smoke_test(bin_dir: Path, darwin: bool, helpers: Path | None = None) -> bool:
     """验证打出来的可执行文件真能启动。
 
     打包成功不等于能运行——入口函数名写错、依赖没 collect 到，
@@ -384,13 +430,25 @@ def smoke_test(bin_dir: Path, darwin: bool) -> bool:
     # `ping` 在 daemon 没跑时应该报连接失败，退出码非 0 但不该有 traceback。
     #
     # CLI 是 onedir：可执行文件在 <name>/<name> 里。
-    cli = bin_dir / ("sdm" if darwin else "sdm.exe")
-    if not cli.is_file():
-        # onedir 形态：<name>/<name> 才是可执行文件，
-        # <name>/ 本身是目录。
-        nested = bin_dir / "sdm" / ("sdm" if darwin else "sdm.exe")
-        if nested.is_file():
-            cli = nested
+    #
+    # macOS 上 CLI 在 Contents/Resources/sdm-cli/sdm。
+    # Windows 上 CLI 和 GUI 一起打包，在 bin_dir/sdm/sdm.exe。
+    cli_name = "sdm" if darwin else "sdm.exe"
+    cli = None
+    search_dirs = [bin_dir]
+    if helpers is not None:
+        search_dirs.insert(0, helpers)
+    for search_dir in search_dirs:
+        for candidate in (
+            search_dir / cli_name,
+            search_dir / "sdm" / cli_name,
+            search_dir / "sdm-cli" / cli_name,
+        ):
+            if candidate.is_file():
+                cli = candidate
+                break
+        if cli is not None:
+            break
     if cli.is_file():
         started = time.monotonic()
         result = subprocess.run(
@@ -402,7 +460,7 @@ def smoke_test(bin_dir: Path, darwin: bool) -> bool:
         elapsed = time.monotonic() - started
         combined = result.stdout + result.stderr
         if "Traceback" in combined:
-            print(f"  冒烟：sdm 启动就崩了")
+            print("  冒烟：sdm 启动就崩了")
             print(combined[-1500:])
             ok = False
         else:

@@ -14,7 +14,6 @@ import asyncio
 import json
 import sys
 import threading
-import time
 from pathlib import Path
 
 from .. import paths
@@ -73,14 +72,14 @@ def run_self_test(report_path: str | None = None) -> int:
     try:
         engine = DownloadEngine()
         check("引擎初始化", True, f"并发上限 {engine.parallelism_cap}")
-    except Exception as err:  # noqa: BLE001
+    except Exception as err:
         check("引擎初始化", False, str(err))
 
     # 文案
     try:
         catalog = I18n("zh-Hans").catalog()
         check("文案表", len(catalog) > 100, f"{len(catalog)} 条")
-    except Exception as err:  # noqa: BLE001
+    except Exception as err:
         check("文案表", False, str(err))
 
     # 前端资源
@@ -88,7 +87,7 @@ def run_self_test(report_path: str | None = None) -> int:
         assets = Path(__file__).parent / "assets"
         index = assets / "index.html"
         check("前端资源", index.exists(), str(index))
-    except Exception as err:  # noqa: BLE001
+    except Exception as err:
         check("前端资源", False, str(err))
 
     ok = all(passed for _, passed, _ in checks)

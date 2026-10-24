@@ -25,14 +25,14 @@ import enum
 import random
 import ssl
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable
 
 import httpx
 
 from ..logging_setup import CAT_CHUNK, CAT_NET, get_logger
-from .content_sniffer import USER_AGENT, ContentProbe, ProbeError, probe as sniffer_probe
+from .content_sniffer import USER_AGENT, ContentProbe, ProbeError
+from .content_sniffer import probe as sniffer_probe
 from .file_assembler import FileAssembler
 from .range_planner import Chunk
 from .speed_limiter import SpeedLimiter
@@ -181,7 +181,7 @@ class HTTPDownloader:
         if self._client is not None:
             try:
                 await self._client.aclose()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
             self._client = None
 
@@ -208,7 +208,7 @@ class HTTPDownloader:
                 last_error = err
             except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPError) as err:
                 last_error = err
-            except Exception as err:  # noqa: BLE001
+            except Exception as err:
                 last_error = err
 
             if attempt >= self.max_retries:
@@ -298,7 +298,7 @@ class HTTPDownloader:
                 last_error = DownloadError(DownloadFailure.NETWORK, str(err))
             except asyncio.CancelledError:
                 raise
-            except Exception as err:  # noqa: BLE001
+            except Exception as err:
                 last_error = DownloadError(DownloadFailure.UNKNOWN, str(err))
 
             backoff = self.retry_backoff * (2**attempt)

@@ -10,10 +10,8 @@
 from __future__ import annotations
 
 import enum
-import logging
 import queue
 import threading
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -57,7 +55,7 @@ class LogSettings:
     max_lines: int = 5000
     persistence_enabled: bool = True
 
-    def validated(self) -> "LogSettings":
+    def validated(self) -> LogSettings:
         """夹紧用户填的值，避免 -7 或 999999999 把清理逻辑弄崩。"""
         return LogSettings(
             level=LogLevel(min(LogLevel.ERROR, max(LogLevel.DEBUG, self.level))),
@@ -89,7 +87,7 @@ class SDMLogger:
     这样下载热路径上的 log 调用只是 put 到队列，不做磁盘 IO。
     """
 
-    _instance: "SDMLogger | None" = None
+    _instance: SDMLogger | None = None
     _instance_lock = threading.Lock()
 
     def __init__(self) -> None:
@@ -106,7 +104,7 @@ class SDMLogger:
         self._started = False
 
     @classmethod
-    def shared(cls) -> "SDMLogger":
+    def shared(cls) -> SDMLogger:
         with cls._instance_lock:
             if cls._instance is None:
                 cls._instance = cls()
@@ -209,7 +207,7 @@ class SDMLogger:
                 break
             try:
                 self._append_to_disk(entry)
-            except Exception:  # noqa: BLE001 — 日志失败绝不能影响下载
+            except Exception:
                 pass
         # 退出前把剩余的排空
         while True:
@@ -221,7 +219,7 @@ class SDMLogger:
                 break
             try:
                 self._append_to_disk(entry)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
     def _append_to_disk(self, entry: LogEntry) -> None:

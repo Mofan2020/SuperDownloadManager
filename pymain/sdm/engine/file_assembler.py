@@ -15,10 +15,31 @@ from __future__ import annotations
 
 import os
 import shutil
-import time
 import threading
+import time
 from pathlib import Path
 from typing import BinaryIO
+
+
+def _unlink_with_retry(path: Path, attempts: int = 20, delay: float = 0.05) -> bool:
+    """删文件，失败就重试。
+
+    Windows 上文件被别的句柄打开时 unlink 会抛 PermissionError。
+    分片任务取消后还在收尾，句柄要过一会儿才释放，所以重试几次。
+
+    macOS 上第一次就成功，这条路径主要是给 Windows 用的。
+    """
+    for i in range(attempts):
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if i == attempts - 1:
+                return False
+            time.sleep(delay)
+    return False
 
 
 class AssemblerError(Exception):
@@ -64,7 +85,8 @@ class FileAssembler:
             else:
                 path.touch()
 
-            handle = open(path, "r+b")
+            # 不用 with：句柄要长期持有，分片写完才关。
+            handle = open(path, "r+b")  # noqa: SIM115
             if pre_existing > 0:
                 handle.seek(0, os.SEEK_END)
             self._handles[chunk_id] = handle
@@ -191,8 +213,30 @@ class FileAssembler:
             except OSError:
                 pass
 
+    def close_all(self) -> None:
+        """关掉所有分片文件的句柄。
+
+        Windows 上文件被打开时删不掉。取消任务要删分片，得先
+        把句柄都关掉——POSIX 上删打开的文件只是延迟释放 inode，
+        Windows 上直接 PermissionError。
+        """
+        with self._queue_lock:
+            handles = list(self._handles.values())
+            self._handles.clear()
+            self._chunk_locks.clear()
+        for handle in handles:
+            try:
+                handle.close()
+            except OSError:
+                pass
+
     def cleanup_partials(self) -> None:
-        """删掉所有分片临时文件（取消任务时用）。"""
+        """删掉所有分片临时文件（取消任务时用）。
+
+        Windows 上正在被写的文件删不掉——unlink 抛 PermissionError。
+        所以要重试：分片任务收到取消信号后会停下，句柄随之释放，
+        删就能成功。
+        """
         with self._queue_lock:
             for handle in self._handles.values():
                 try:
@@ -204,7 +248,4 @@ class FileAssembler:
             paths = list(self._partial_paths.values())
             self._partial_paths.clear()
         for path in paths:
-            try:
-                path.unlink()
-            except OSError:
-                pass
+            _unlink_with_retry(path)

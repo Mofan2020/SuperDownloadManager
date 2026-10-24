@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 # 方法名常量——两边都用这些字符串，别写错字
@@ -47,7 +47,7 @@ class IPCRequest:
     params: dict[str, Any] | None = None
 
     @classmethod
-    def from_json(cls, raw: str | bytes) -> "IPCRequest":
+    def from_json(cls, raw: str | bytes) -> IPCRequest:
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("request must be a JSON object")
@@ -75,11 +75,11 @@ class IPCResponse:
     error: str | None = None
 
     @classmethod
-    def success(cls, request_id: str, result: Any = None) -> "IPCResponse":
+    def success(cls, request_id: str, result: Any = None) -> IPCResponse:
         return cls(id=request_id, ok=True, result=result)
 
     @classmethod
-    def failure(cls, request_id: str, error: str) -> "IPCResponse":
+    def failure(cls, request_id: str, error: str) -> IPCResponse:
         return cls(id=request_id, ok=False, error=error)
 
     def to_json(self) -> str:

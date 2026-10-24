@@ -18,8 +18,9 @@ import json
 import os
 import socket
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .. import paths
 from ..logging_setup import CAT_IPC, get_logger
@@ -92,7 +93,7 @@ class SocketServer:
         while not self._stop.is_set():
             try:
                 client, _ = self._server.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 break
@@ -107,7 +108,7 @@ class SocketServer:
                         continue
                     try:
                         response = self.handler(line) if self.handler else ""
-                    except Exception as err:  # noqa: BLE001
+                    except Exception as err:
                         response = json.dumps({"id": "?", "ok": False, "error": str(err)})
                     stream.write((response + "\n").encode("utf-8"))
                     stream.flush()
@@ -178,7 +179,7 @@ class AsyncSocketServer:
                         if asyncio.iscoroutine(result):
                             result = await result
                         response = result
-                except Exception as err:  # noqa: BLE001
+                except Exception as err:
                     response = json.dumps({"id": "?", "ok": False, "error": str(err)})
                 writer.write((response + "\n").encode("utf-8"))
                 await writer.drain()

@@ -26,7 +26,7 @@ def notify(title: str, subtitle: str = "", body: str = "") -> bool:
             return _notify_macos(title, subtitle, body)
         if sys.platform.startswith("win"):
             return _notify_windows(title, subtitle, body)
-    except Exception as err:  # noqa: BLE001
+    except Exception as err:
         log.debug(CAT_GUI, f"系统通知发送失败: {err}")
     return False
 
@@ -90,8 +90,4 @@ def request_permission() -> bool:
     申请；第一次发通知时系统会自己问。Windows 同理。
     这里只是做一次「试探性发送」，让系统把权限对话框弹出来。
     """
-    if platform.system() == "Darwin":
-        return True
-    if platform.system() == "Windows":
-        return True
-    return False
+    return platform.system() in ("Darwin", "Windows")

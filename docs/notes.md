@@ -64,7 +64,7 @@ Python 重写版。Swift 实现保留在仓库根目录的 `Engine/` `App/` `CLI
 
 | # | 项 | 妥协 vs 影响 |
 |---|---|---|
-| 1 | **Windows 只在 CI runner 上编译过** | 打包脚本的 Windows 分支（`--add-data` 用 `;` 分隔、多目标 onefile、`--console`）按平台差异逐条核对过，但没有在 Windows 真机上跑过打包产物。真机验证留给 Windows 用户 |
+| 1 | **Windows 只在 CI runner 上编译过** | 打包脚本的 Windows 分支（`--add-data` 用 `;` 分隔、onedir 多目标、`--console`）按平台差异逐条核对过，但没有在 Windows 真机上跑过打包产物。真机验证留给 Windows 用户 |
 | 2 | **分片布局在传输开始后固定** | 传输前会按文件大小和期望片大小重规划一次。传输中不再调整 |
 | 3 | **详情页分片表最多显示 64 行** | 分片数上限 128，全渲染 DOM 太大。超出部分用一行汇总 |
 | 4 | **站点规则密码存系统钥匙串** | JSON 里不存密码。钥匙串不可用时规则退化为无认证 |
@@ -86,3 +86,91 @@ Python 重写版。Swift 实现保留在仓库根目录的 `Engine/` `App/` `CLI
 | — | 分片数超过并发上限时 `active` 列表被截断，截掉的分片永远不下载，文件缺一截 | 不截断。分片数固定，信号量控制同时开几个连接 |
 | — | 文件名没清洗，Windows 非法字符导致下载跑完、进度 100%、最后落盘时炸 | `sdm/engine/filenames.py` 统一清洗 |
 | — | 落盘用 `Path.rename`，Windows 上目标已存在时抛 `FileExistsError` | 改用 `os.replace` |
+| 2 | **CI 的发布 workflow 与 CI workflow 分开** | `release-python.yml` 负责打包发版，`ci-python.yml` 负责测试。Swift 版的 `release.yml` 已去掉 push 触发，只留手动——两个 workflow 抢同一个 tag 会互相覆盖产物 |
+
+## v2.0.0 CI 踩过的坑
+
+| # | 坑 | 现象 | 修法 |
+|---|---|---|---|
+| 1 | `requirements.txt` 只有运行时依赖 | CI 上 `pytest` 报 `No module named pytest` | workflow 里显式装 pytest |
+| 2 | 两个发布 workflow 抢同一个 tag | Swift 版和 Python 版同时跑，Python 版的产物被覆盖 | Swift 版 `release.yml` 去掉 push 触发 |
+| 3 | PyInstaller 6 的 `--add-data` 把单文件打成目录 | `install.sh` 变成 `install.sh/install.sh`，脚本没法执行 | 打包完用 Python 直接复制到 `.app/Contents/Resources/` |
+| 4 | `PlistBuddy` 的 `Add` 不带类型前缀 | `Add :CFBundleVersion 1` 报 `Unrecognized Type: 1`，键根本没加上 | 改用 `plutil -insert/-replace`，类型明确 |
+| 5 | 签名失败没人知道 | `codesign` 的 stderr 被 `DEVNULL` 吞了，返回值也没检查，坏签名直接发出去 | 每步检查返回码，失败就中止打包 |
+| 6 | onedir 目录放进 .app 会让签名失败 | `codesign` 递归 `Contents/` 下的目录树，把含 Mach-O 的目录当 nested bundle，一路递归撞到 `_internal/click-8.4.2.dist-info` 这种非 bundle 目录，报 `bundle format unrecognized, invalid, or unsuitable` | CLI/daemon 放 `Contents/Resources/` 下，签名不递归那里 |
+| 7 | Windows 上取消后分片删不掉 | `unlink` 抛 `PermissionError` 被 `except OSError: pass` 吞了，分片留在下载目录 | 先 `await` 任务真正结束、关掉文件句柄，再删；删失败重试 |
+| 8 | ruff 默认规则集随版本漂 | 0.17 默认开了 YTT/ASYNC/UP 等，同一份代码换个版本就红 | 加 `pyproject.toml` 写死规则集 |
+
+## ruff 抓出来的真 bug
+
+lint 不只是格式问题。这批里有三个是真 bug，都因为没跑到那条路径而一直藏着：
+
+| # | 位置 | 现象 | 影响 |
+|---|---|---|---|
+| 1 | `sdm/engine/resume_state.py` | `read()` 写成 `@staticmethod` 却用了 `cls` | 过期链接换新链接续传一调就 `NameError`，整条 relink 路径不可用 |
+| 2 | `sdm/gui/bridge.py` | `copy_to_clipboard()` 的 else 分支多了一次 `import subprocess` | 局部变量把模块名遮住，剪贴板复制一调就 `NameError` |
+| 3 | `sdm/engine/download_flow.py` | 分片 worker 里 `result` 赋值后没用 | 无功能影响，但说明当时写的时候没走一遍 |
+
+第 1、2 条都补了回归测试（`tests/test_regression_bugs.py`）——不是为了覆盖率，是为了这种「改回去就红」。
+
+## Windows 特有行为怎么在 macOS 上测
+
+macOS 上这些路径根本不会触发：POSIX 允许删掉正在被写的文件，Windows 不行。所以本机跑测试永远是绿的，CI 上才红。
+
+`tests/test_windows_semantics.py` 的做法是把 Windows 的失败模式模拟出来——让 `Path.unlink` 前 N 次抛 `PermissionError`（Windows 上文件被别的句柄打开时的真实行为），然后验证重试逻辑、句柄释放、清理不抛异常。这样本机改代码也能守住 Windows 那条路径。
+
+## macOS 签名：onedir 目录不能进 .app
+
+这个坑花了不少时间，值得完整记下来。
+
+### 现象
+
+把 PyInstaller onedir 产物（`sdm/`、`sdmd/`，各有 `_internal/` 子目录）放进 .app 后签名必失败：
+
+```
+codesign --force --sign - SuperDownloadManager.app
+→ bundle format unrecognized, invalid, or unsuitable
+  In subcomponent: .../Contents/Helpers/sdmd/_internal/click-8.4.2.dist-info
+```
+
+换 `Contents/MacOS/`、`Contents/Frameworks/`、`Contents/Helpers/` 都一样。CI 上 `codesign --verify --deep --strict` 直接红。
+
+### 根因
+
+codesign 签一个 bundle 时会递归 `Contents/` 下的目录树。判定规则是「目录里直接有 Mach-O 就当 nested bundle 处理」。ondir 的 `_internal/` 里正好有 `python3.11/lib-dynload/*.so`，于是 `_internal` 被当成 nested bundle，codesign 要求它是合法 bundle（得有 `Contents/Info.plist`），没有就报错。
+
+报错的子目录名会变（`click-8.4.2.dist-info`、`python3.11`、`.internal`），因为每次递归到的最深可疑点不一样。**这个变化会误导人往「删掉那个目录」的方向想**——删掉 `.dist-info` 后报错只是换了个对象。
+
+试过但不管用的路子：
+
+| 尝试 | 结果 |
+|---|---|
+| `codesign --force --deep --sign -` | 一样失败，--deep 只是让递归更彻底 |
+| 目录改名（`_internal` → `.internal`） | 隐藏目录也躲不掉 |
+| 挪到 `Contents/Frameworks/` | 一样，Frameworks 下同样被递归 |
+| 挪到 `Contents/Helpers/` | 一样 |
+| 给 `_internal` 加 `Contents/Info.plist` | 变成合法 bundle 了，但报 `unsealed contents present in the bundle root`（bundle 根下的内容必须都在 `Contents/` 里） |
+| 删掉 `.dist-info` | 只是让报错对象换人 |
+
+### 解法
+
+`Contents/Resources/` 是 codesign 当**资源**处理的位置——不递归、不签里面的代码。CLI/daemon 放那儿，签名能过，程序照常能跑。
+
+两个细节：
+
+1. **目录名要避开 `sdm` / `sdmd`**。PyInstaller 给 GUI 打的 .app 里已经有 `Contents/Resources/sdm` 软链（指向 `../Resources/sdm`）。同名覆盖会变成自指软链，`codesign --verify --deep` 报 `No such file or directory`，运行时 `Too many levels of symbolic links`。所以改成 `sdm-cli` / `sdmd-daemon`。
+2. **签名命令不带 `--deep`**。签完 .app 立刻 `codesign --verify --deep --strict` 验证。
+
+### 为什么不用 onefile
+
+onefile 是单个 Mach-O 文件，放哪儿都不会触发递归，签名天然没问题。但 onefile 每次启动要把整个包解到临时目录再重签名：daemon 建 socket 要 10.9 秒，CLI 要 5.9 秒。onedir 分别是 0.18 秒和 0.06 秒。
+
+daemon 常驻，慢一点无所谓；CLI 是用户每次手敲的，5.9 秒不能接受。所以 CLI/daemon 坚持 onedir。
+
+### 验证
+
+```bash
+codesign --verify --deep --strict SuperDownloadManager.app   # exit 0
+Contents/Resources/sdm-cli/sdm ping                          # 0.06s
+Contents/Resources/sdmd-daemon/sdmd                           # 0.18s 出 socket
+```

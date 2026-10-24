@@ -31,7 +31,7 @@ jobs:
 
       - name: Lint
         working-directory: pymain
-        run: ruff check sdm tests
+        run: ruff check sdm tests scripts
 
       - name: Test
         working-directory: pymain

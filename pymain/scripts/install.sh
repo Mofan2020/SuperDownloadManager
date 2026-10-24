@@ -13,12 +13,16 @@ if [ ! -d "${APP_PATH}" ]; then
     exit 1
 fi
 
-BIN_DIR="${APP_PATH}/Contents/MacOS"
+# CLI 和 daemon 放在 Contents/Resources/ 下面，不是 Contents/MacOS/。
+# 放 MacOS/ 下的话，codesign 会把 onedir 的 _internal 子目录当成
+# 子 bundle，签名整个 .app 直接失败。Resources/ 是 codesign 当资源
+# 处理的位置，不递归，签名能过。
+BIN_DIR="${APP_PATH}/Contents/Resources"
 
 # 1. Link the CLI into ~/.local/bin.
-# CLI 是 onedir：可执行文件在 Contents/MacOS/sdm/sdm，
+# CLI 是 onedir：可执行文件在 Contents/Resources/sdm-cli/sdm，
 # 依赖在同级的 _internal/ 里。
-CLI_BIN="${BIN_DIR}/sdm/sdm"
+CLI_BIN="${BIN_DIR}/sdm-cli/sdm"
 if [ ! -x "${CLI_BIN}" ]; then
     echo "[install.sh] ${CLI_BIN} not found — reinstall the app." >&2
     exit 1
@@ -29,7 +33,7 @@ echo "[install.sh] linked CLI: ${CLI_LINK}"
 
 # 2. Write the LaunchAgent plist.
 #    The daemon is its own binary (sdmd), not the GUI with an env var.
-DAEMON_BIN="${BIN_DIR}/sdmd/sdmd"
+DAEMON_BIN="${BIN_DIR}/sdmd-daemon/sdmd"
 mkdir -p "${HOME}/Library/LaunchAgents"
 cat > "${LAUNCH_AGENT_PLIST}" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

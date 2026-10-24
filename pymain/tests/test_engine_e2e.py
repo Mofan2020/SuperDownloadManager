@@ -19,12 +19,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sdm.engine.download_flow import DownloadFlow, FlowError, FlowFailure  # noqa: E402
-from sdm.engine.file_assembler import FileAssembler  # noqa: E402
-from sdm.engine.progress_channel import ProgressChannel  # noqa: E402
-from sdm.engine.range_planner import RangeStrategy  # noqa: E402
-from tests.conftest import run_async  # noqa: E402
-from tests.range_server import RangeServer  # noqa: E402
+from sdm.engine.download_flow import DownloadFlow, FlowError, FlowFailure
+from sdm.engine.file_assembler import FileAssembler
+from sdm.engine.progress_channel import ProgressChannel
+from sdm.engine.range_planner import RangeStrategy
+from tests.conftest import run_async
+from tests.range_server import RangeServer
 
 
 @pytest.fixture
@@ -181,7 +181,7 @@ def test_resume_continues_from_existing_partials(tmp_path, server):
             flow.cancel()
             try:
                 await asyncio.wait_for(task, timeout=3)
-            except (asyncio.CancelledError, FlowError, asyncio.TimeoutError):
+            except (TimeoutError, asyncio.CancelledError, FlowError):
                 pass
 
             partials = list(tmp_path.glob("resume.bin.sdm.partial-*"))

@@ -12,7 +12,7 @@ import socket
 from pathlib import Path
 
 from .. import paths
-from ..logging_setup import CAT_IPC, get_logger
+from ..logging_setup import get_logger
 
 log = get_logger()
 
@@ -62,7 +62,7 @@ class IPCClient:
             if not buffer:
                 raise ClientError("守护进程没有响应")
             return buffer.decode("utf-8").strip()
-        except socket.timeout as err:
+        except TimeoutError as err:
             raise ClientError("守护进程超时未响应") from err
         except OSError as err:
             raise ClientError(f"连接守护进程失败: {err}") from err
@@ -84,7 +84,7 @@ class IPCClient:
             if not buffer:
                 raise ClientError("守护进程没有响应")
             return buffer.decode("utf-8").strip()
-        except socket.timeout as err:
+        except TimeoutError as err:
             raise ClientError("守护进程超时未响应") from err
         except OSError as err:
             raise ClientError(f"连接守护进程失败: {err}") from err

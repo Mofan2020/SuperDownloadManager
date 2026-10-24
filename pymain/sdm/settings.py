@@ -11,13 +11,12 @@ from __future__ import annotations
 
 import json
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from . import paths
-from .logging_setup import CAT_STORE, get_logger
-from .logging_setup import LogLevel, LogSettings
+from .logging_setup import CAT_STORE, LogLevel, LogSettings, get_logger
 
 log = get_logger()
 
@@ -97,7 +96,7 @@ _FIELD_MAP = {v: k for k, v in _KEY_MAP.items()}
 class SettingsStore:
     """设置的单例存储。"""
 
-    _instance: "SettingsStore | None" = None
+    _instance: SettingsStore | None = None
     _instance_lock = threading.Lock()
 
     def __init__(self, path: Path | None = None) -> None:
@@ -107,7 +106,7 @@ class SettingsStore:
         self.load()
 
     @classmethod
-    def shared(cls) -> "SettingsStore":
+    def shared(cls) -> SettingsStore:
         with cls._instance_lock:
             if cls._instance is None:
                 cls._instance = cls()
@@ -146,9 +145,8 @@ class SettingsStore:
                 elif isinstance(current, str):
                     if isinstance(value, str):
                         setattr(self._settings, field_name, value)
-                elif current is None:
-                    if value is None or isinstance(value, (int, float, str)):
-                        setattr(self._settings, field_name, value)
+                elif current is None and (value is None or isinstance(value, (int, float, str))):
+                    setattr(self._settings, field_name, value)
         return self._settings
 
     def save(self) -> None:

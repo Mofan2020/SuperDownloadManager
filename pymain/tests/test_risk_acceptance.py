@@ -19,7 +19,7 @@ import pytest
 
 from sdm.engine.download_flow import DownloadFlow, FlowError
 from sdm.engine.http_downloader import HTTPDownloader
-from sdm.engine.range_planner import Chunk, RangeStrategy
+from sdm.engine.range_planner import RangeStrategy
 from sdm.engine.speed_display import SpeedInput, compute
 
 from .range_server import RangeServer
@@ -49,7 +49,7 @@ class _SlowBodyHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args) -> None:
         pass
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         total = self.total_bytes
         # 正确处理 Range：这个服务器用来验证「流式传输」，
         # 不能同时造「Content-Range 不匹配」的坑。
@@ -138,6 +138,7 @@ def test_r01_download_is_streaming_not_buffered(tmp_path: Path) -> None:
             consumer = asyncio.create_task(consume())
             await flow.run()
             await asyncio.sleep(0.2)
+            consumer.cancel()
 
             # 流式：进度分多次上报。整块缓冲只会报最后一次。
             # 512KB / 8 片 / 50ms 合并窗口 → 至少 2 次
@@ -565,7 +566,7 @@ class _BadRangeHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args) -> None:
         pass
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         total = self.total_bytes
         self.send_response(206)
         self.send_header("Content-Length", str(total))
@@ -584,11 +585,6 @@ class _BadRangeHandler(http.server.BaseHTTPRequestHandler):
 
 def test_r32_content_range_mismatch_is_rejected(tmp_path: Path) -> None:
     """R-32：206 但 Content-Range 与请求不符时，必须报错且不写盘。"""
-    from sdm.engine.http_downloader import (
-        DownloadError,
-        DownloadFailure,
-        HTTPDownloader,
-    )
 
     async def _inner() -> None:
         total = 512 * 1024

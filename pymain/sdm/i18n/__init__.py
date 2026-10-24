@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import locale
-import sys
 from pathlib import Path
 
 # 文案 JSON 与本模块同级

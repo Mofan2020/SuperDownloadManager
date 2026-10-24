@@ -11,7 +11,6 @@ Swift 版只做单流续传（一条 Range 请求把剩下的字节拉完），
 
 from __future__ import annotations
 
-import asyncio
 import os
 from pathlib import Path
 
@@ -19,7 +18,7 @@ import httpx
 
 from ..logging_setup import CAT_ENGINE, get_logger
 from .content_sniffer import ContentProbe
-from .http_downloader import DownloadError, DownloadFailure, HTTPDownloader
+from .http_downloader import HTTPDownloader
 
 log = get_logger()
 

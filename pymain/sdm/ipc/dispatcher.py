@@ -6,11 +6,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 from .. import paths
-from ..engine.categories import DownloadCategory, category_for_extension
+from ..engine.categories import category_for_extension
 from ..engine.download_engine import DownloadEngine, StartSpec
 from ..logging_setup import CAT_IPC, get_logger
 from .protocol import (
@@ -43,7 +42,7 @@ class Dispatcher:
             return IPCResponse.failure("?", f"decode: {err}").to_json()
         try:
             response = await self.dispatch(request)
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             log.error(CAT_IPC, f"请求处理失败: {err}")
             response = IPCResponse.failure(request.id, str(err))
         return response.to_json()

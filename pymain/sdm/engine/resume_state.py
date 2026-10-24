@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .content_sniffer import ContentProbe
@@ -46,7 +46,7 @@ class ResumeState:
         probe: ContentProbe,
         filename: str,
         chunks: list[Chunk],
-    ) -> "ResumeState":
+    ) -> ResumeState:
         return cls(
             url=probe.url,
             content_length=probe.content_length or 0,
@@ -55,7 +55,7 @@ class ResumeState:
             accepts_ranges=probe.accepts_ranges,
             filename=filename,
             chunks=[asdict(c) for c in chunks],
-            saved_at=datetime.now(timezone.utc).isoformat(),
+            saved_at=datetime.now(UTC).isoformat(),
         )
 
     @staticmethod
@@ -73,7 +73,7 @@ class ResumeState:
         )
         tmp.replace(dst)
 
-    @staticmethod
-    def read(sidecar: Path) -> "ResumeState":
+    @classmethod
+    def read(cls, sidecar: Path) -> ResumeState:
         data = json.loads(sidecar.read_text(encoding="utf-8"))
         return cls(**data)
