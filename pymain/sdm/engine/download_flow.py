@@ -114,6 +114,24 @@ class DownloadFlow:
             if not task.done():
                 task.cancel()
 
+    def close_partial_handles(self) -> None:
+        """关掉分片文件的句柄。
+
+        引擎层删除分片前调用。Windows 上文件被打开时删不掉
+        （PermissionError），POSIX 上删打开的文件只是延迟释放 inode。
+
+        句柄由 FileAssembler 缓存着——分片写完不立刻关，是为了
+        同一分片的后续写入不用反复 open。任务结束时没人关它们，
+        所以删除前得显式关。
+        """
+        assembler = self._assembler
+        if assembler is None:
+            return
+        try:
+            assembler.close_all()
+        except Exception:
+            pass
+
     def discard_partials(self) -> None:
         """删掉分片临时文件（引擎层取消任务时用）。
 
@@ -227,7 +245,15 @@ class DownloadFlow:
                 raise FlowError(FlowFailure.EXPIRED_LINK.value, err.detail) from err
             raise FlowError(FlowFailure.PARTIAL.value, str(err)) from err
         except asyncio.CancelledError:
-            raise FlowError(FlowFailure.CANCELLED.value, "任务被取消") from None
+            # 取消要原样往上抛，不能转成 FlowError。
+            #
+            # 转了的话，调用方（引擎）会走 except FlowError 分支，
+            # 把任务状态标成「失败」——暂停/取消就变成了失败。
+            # Swift 版就有这个毛病（暂停被报成失败），这里不能重复。
+            #
+            # CancelledError 在 Python 3.8+ 继承自 BaseException，
+            # 不转的话 asyncio 才知道这是「请求取消」而不是「出错」。
+            raise
 
         # 4. 合并 + sidecar
         try:

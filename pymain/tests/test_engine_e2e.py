@@ -24,7 +24,7 @@ from sdm.engine.file_assembler import FileAssembler
 from sdm.engine.progress_channel import ProgressChannel
 from sdm.engine.range_planner import RangeStrategy
 from tests.conftest import run_async
-from tests.range_server import RangeServer
+from tests.range_server import QuietErrorMixin, RangeServer
 
 
 @pytest.fixture
@@ -131,7 +131,7 @@ def test_missing_content_length_is_rejected(tmp_path):
             except Exception:
                 pass
 
-    class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    class Server(QuietErrorMixin, socketserver.ThreadingMixIn, socketserver.TCPServer):
         daemon_threads = True
         allow_reuse_address = True
 

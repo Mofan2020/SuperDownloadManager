@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import http.server
 import socketserver
+import sys
 import tempfile
 import threading
 import time
@@ -129,7 +130,31 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
                     first = False
 
 
-class ThreadedRangeServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+class QuietErrorMixin:
+    """服务器基类：静默处理客户端提前断开。
+
+    客户端取消下载时会直接关连接，服务器的线程读 socket 时抛
+    ConnectionResetError。socketserver 默认把这个 traceback 打到
+    stderr——在 pytest 退出那一刻打，就撞上解释器关闭，变成
+
+        Fatal Python error: _enter_buffered_busy: could not acquire
+        lock for <_io.BufferedWriter name='<stderr>'> at interpreter
+        shutdown, possibly due to daemon threads
+
+    整个测试进程 abort（exit 134），而且报的是这个而不是真正的
+    失败原因。
+
+    连接被重置是正常现象，不是错误。真的要看别的错误再放行。
+    """
+
+    def handle_error(self, request, client_address) -> None:
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+            return
+        super().handle_error(request, client_address)  # type: ignore[misc]
+
+
+class ThreadedRangeServer(QuietErrorMixin, socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     #: listen backlog。socketserver 的默认是 5——8 个分片同时建连接

@@ -22,7 +22,7 @@ from sdm.engine.http_downloader import HTTPDownloader
 from sdm.engine.range_planner import RangeStrategy
 from sdm.engine.speed_display import SpeedInput, compute
 
-from .range_server import RangeServer
+from .range_server import QuietErrorMixin, RangeServer
 
 
 def _run(coro):
@@ -83,7 +83,7 @@ class _SlowBodyHandler(http.server.BaseHTTPRequestHandler):
                     return
 
 
-class _Srv(socketserver.ThreadingMixIn, http.server.HTTPServer):
+class _Srv(QuietErrorMixin, socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     request_queue_size = 128
@@ -320,10 +320,48 @@ def test_r08_cancel_is_not_reported_as_failure(tmp_path: Path) -> None:
             task = asyncio.create_task(flow.run())
             await asyncio.sleep(0.3)
             flow.cancel()
-            with pytest.raises(FlowError) as exc:
+            # flow 层抛 CancelledError，不是 FlowError。
+            #
+            # 转成 FlowError 的话，引擎会走 except FlowError 分支，
+            # 把任务状态标成 failed——取消/暂停就变成了失败。
+            # Swift 版就有这个毛病，这里不能重复。
+            with pytest.raises(asyncio.CancelledError):
                 await task
-            assert exc.value.kind == "cancelled", (
-                f"取消被报成了 {exc.value.kind!r}"
+        finally:
+            srv.stop()
+
+    _run(_inner())
+
+
+def test_r08_engine_cancel_is_not_reported_as_failure(tmp_path: Path) -> None:
+    """R-08（引擎层）：取消后任务状态是 cancelled，不是 failed。
+
+    上一条测的是 flow 层抛什么。这条测的是引擎把状态写成什么——
+    那才是用户看到的。状态标成 failed 的话，UI 上会弹错误提示。
+    """
+    from sdm.engine.download_engine import DownloadEngine, StartSpec
+
+    async def _inner() -> None:
+        total = 8 * 1024 * 1024
+        payload = tmp_path / "p.bin"
+        _payload(payload, total)
+
+        srv = RangeServer(total_bytes=total, chunk_delay=0.05)
+        try:
+            engine = DownloadEngine()
+            ids = await engine.start([
+                StartSpec(url=srv.url, destination_directory=tmp_path,
+                          filename_override="out.bin")
+            ])
+            task_id = ids[0]
+            await asyncio.sleep(0.4)
+            await engine.cancel(task_id)
+            await asyncio.sleep(0.3)
+
+            summary = engine.get(task_id)
+            assert summary is not None
+            assert summary.state == "cancelled", (
+                f"取消后状态是 {summary.state!r}，不是 cancelled"
             )
         finally:
             srv.stop()

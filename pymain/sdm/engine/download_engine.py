@@ -330,6 +330,11 @@ class DownloadEngine:
             if err.kind == FlowFailure.EXPIRED_LINK.value:
                 summary.state = TaskState.AWAITING_NEW_LINK.value
                 summary.error_message = err.detail or "服务器拒绝了下载链接"
+            elif err.kind == FlowFailure.CANCELLED.value:
+                # 取消不是失败。走到这里说明取消被转成了 FlowError
+                # （flow 层现在直接抛 CancelledError，这里是双保险）。
+                summary.state = TaskState.CANCELLED.value
+                summary.error_message = None
             else:
                 summary.state = TaskState.FAILED.value
                 summary.error_message = err.detail or str(err)
@@ -449,11 +454,15 @@ class DownloadEngine:
         live = self.live.get(task_id)
         summary = self.tasks.get(task_id)
         running = None
+        # flow 引用要先抓住。任务结束后引擎会在 finally 里
+        # self.live.pop(task_id)，那时候再取 live.flow 就成了 None——
+        # 分片句柄没人关，Windows 上文件删不掉。
+        flow = live.flow if live is not None else None
         if live is not None:
             live.cancelled = True
             live.paused = False
-            if live.flow is not None:
-                live.flow.cancel()
+            if flow is not None:
+                flow.cancel()
             if live.task is not None and not live.task.done():
                 live.task.cancel()
                 running = live.task
@@ -469,11 +478,21 @@ class DownloadEngine:
         if running is not None:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await asyncio.wait_for(asyncio.shield(running), timeout=5.0)
+        # 先关句柄，再删文件。
+        #
+        # 顺序不能反：句柄开着的时候 Windows 删不掉。
+        if flow is not None:
+            flow.close_partial_handles()
         # 删掉分片临时文件。放在这里而不是 flow.cancel() 里，
         # 因为 pause 也要调 flow.cancel()——那一路要保留分片。
-        self._discard_partials(task_id, summary)
+        self._discard_partials(task_id, summary, flow)
 
-    def _discard_partials(self, task_id: str, summary: TaskSummary | None) -> None:
+    def _discard_partials(
+        self,
+        task_id: str,
+        summary: TaskSummary | None,
+        flow: DownloadFlow | None = None,
+    ) -> None:
         """删掉某个任务的分片临时文件。
 
         优先走 flow 的 discard_partials()——它知道分片文件在哪，
@@ -483,9 +502,11 @@ class DownloadEngine:
         flow 已经不在了（任务早就结束了）时，用 destination 反推
         分片文件名——分片名是 `<目标名>.sdm.partial-<id>`。
         """
-        live = self.live.get(task_id)
-        if live is not None and live.flow is not None:
-            live.flow.discard_partials()
+        if flow is None:
+            live = self.live.get(task_id)
+            flow = live.flow if live is not None else None
+        if flow is not None:
+            flow.discard_partials()
         if summary is None:
             return
         base = Path(summary.destination)
