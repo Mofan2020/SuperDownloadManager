@@ -44,3 +44,45 @@ asset 是 `SuperDownloadManager.app.zip`（ad-hoc 签名、解压拖 `/Applicati
 
 - [macos-native-app-development skill](../../../../../.hermes/skills/software-development/macos-native-app-development/SKILL.md) — 所有 macOS 工程的硬规矩底本
 - [`sdm-v1.0.md`](./sdm-v1.0.md) — v1.0 主线计划
+
+## v2.0.0 状态
+
+Python 重写版。Swift 实现保留在仓库根目录的 `Engine/` `App/` `CLI/` `Daemon/` `Extensions/`，作为语义对照。Python 版在 `pymain/`，包名 `sdm`。
+
+`docs/functional-inventory.md` 记录了 Swift 版的 191 个功能点与 35 项重构风险，是功能完整性的验收基准。`docs/ui-spec.md` 是 UI 规范。
+
+## v2.0 暂不做
+
+| # | 项 | 原因 |
+|---|---|---|
+| 1 | 菜单栏常驻模式 | Swift 版用 `MenuBarExtra` 做常驻入口。pywebview 没有等价 API，要在 macOS 上做需要原生辅助进程。窗口 + 剪贴板监听 + 扩展派单覆盖了主要入口 |
+| 2 | 应用内自动更新 | Swift 版用 Sparkle，Python 版没有等价物。发版走 GitHub Releases |
+| 3 | DMG 封装 | 当前分发是 zip。`ditto` 解压拖进 `/Applications` 够用 |
+| 4 | 传输中的动态 split/merge | 只在传输**前**重规划。传输中切分要重开在途工作单元并重算 `bytesDone`，数据损坏风险高。Swift 版的 `RangePlanner.rearrange()` 从来没有调用方，属于同源问题 |
+
+## v2.0 已知的妥协
+
+| # | 项 | 妥协 vs 影响 |
+|---|---|---|
+| 1 | **Windows 只在 CI runner 上编译过** | 打包脚本的 Windows 分支（`--add-data` 用 `;` 分隔、多目标 onefile、`--console`）按平台差异逐条核对过，但没有在 Windows 真机上跑过打包产物。真机验证留给 Windows 用户 |
+| 2 | **分片布局在传输开始后固定** | 传输前会按文件大小和期望片大小重规划一次。传输中不再调整 |
+| 3 | **详情页分片表最多显示 64 行** | 分片数上限 128，全渲染 DOM 太大。超出部分用一行汇总 |
+| 4 | **站点规则密码存系统钥匙串** | JSON 里不存密码。钥匙串不可用时规则退化为无认证 |
+| 5 | **扩展派单端口 7955 未做鉴权** | 只监听 loopback。跟 Swift 版一致 |
+
+## v2.0 修掉的 Swift 版缺陷
+
+按 `docs/functional-inventory.md` 的 R 编号：
+
+| R | 缺陷 | 修法 |
+|---|---|---|
+| R-32 | 服务器返回 206 但 `Content-Range` 与请求不符时，整个文件写进分片。文件大小看着差不多但内容全乱 | 收到 206 时断言 `Content-Range` 起止与请求一致，不一致立刻报错且不写盘 |
+| R-10 | 取消任务后残留 `.sdm.partial-*` 文件 | 引擎层 `cancel()` 删分片。`pause()` 保留——resume 靠它续传 |
+| R-03 | 进度聚合器接受负值上报，进度条会倒退 | `ChunkProgress.report()` 忽略负值 |
+| R-01 | 探测请求遇到 503 直接判任务失败，不重试 | 探测加重试与时间预算 |
+| R-01 | 重试用指数退避，服务器持续 503 时要等 25 秒 | 探测与分片各加时间预算，连接类错误用短退避 |
+| R-09 | 续传补完 `.part` 后不落成目标文件 | 补完用 `os.replace` 落成最终文件 |
+| — | `HistoryStore.open()` 在锁内调 `_prune_old_entries()`，后者拿同一把非重入锁。`insert()` 必死锁 | 清理挪到锁外 |
+| — | 分片数超过并发上限时 `active` 列表被截断，截掉的分片永远不下载，文件缺一截 | 不截断。分片数固定，信号量控制同时开几个连接 |
+| — | 文件名没清洗，Windows 非法字符导致下载跑完、进度 100%、最后落盘时炸 | `sdm/engine/filenames.py` 统一清洗 |
+| — | 落盘用 `Path.rename`，Windows 上目标已存在时抛 `FileExistsError` | 改用 `os.replace` |

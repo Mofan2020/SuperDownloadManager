@@ -1,0 +1,192 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Tag to release (e.g. v2.0.0)'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: Build macOS app
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r pymain/requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Run tests
+        working-directory: pymain
+        run: python -m pytest tests -q
+
+      - name: GUI self-test
+        working-directory: pymain
+        run: python -m sdm.gui.main --self-test
+
+      - name: Build app
+        working-directory: pymain
+        run: python scripts/build.py --mac
+
+      - name: Verify signature and Info.plist
+        run: |
+          APP="pymain/dist/macos/SuperDownloadManager.app"
+          codesign --verify --deep --strict "$APP"
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
+          echo "built version: $VERSION"
+          echo "$VERSION" > /tmp/built-version-macos
+
+      - name: Package
+        run: |
+          mkdir -p build/release
+          # 用 ditto 而不是 zip：ditto 保留扩展属性和代码签名记录，
+          # unzip 会丢，导致 codesign --verify 误报签名损坏。
+          ditto -c -k --sequesterRsrc --keepParent \
+            pymain/dist/macos/SuperDownloadManager.app \
+            build/release/SuperDownloadManager-macOS.zip
+          cd build/release
+          shasum -a 256 SuperDownloadManager-macOS.zip | tee SuperDownloadManager-macOS.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdm-macos
+          path: build/release/
+
+  build-windows:
+    name: Build Windows exe
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r pymain/requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Run tests
+        working-directory: pymain
+        run: python -m pytest tests -q
+
+      - name: GUI self-test
+        working-directory: pymain
+        run: python -m sdm.gui.main --self-test
+
+      - name: Build exe
+        working-directory: pymain
+        run: python scripts/build.py --windows
+
+      - name: Verify exe exists
+        shell: pwsh
+        run: |
+          $exe = "pymain/dist/windows/SuperDownloadManager.exe"
+          if (-not (Test-Path $exe)) { throw "exe 没生成：$exe" }
+          Write-Host "exe size: $((Get-Item $exe).Length) bytes"
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build/release | Out-Null
+          # GUI 单文件
+          Compress-Archive -Path pymain/dist/windows/SuperDownloadManager.exe -DestinationPath build/release/SuperDownloadManager-Windows.zip
+          # CLI 是 onedir（onefile 每次启动要解包，实测慢十几秒）
+          Compress-Archive -Path pymain/dist/windows/sdm/* -DestinationPath build/release/sdm-Windows.zip
+          $hash = (Get-FileHash build/release/SuperDownloadManager-Windows.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  SuperDownloadManager-Windows.zip" | Out-File -Encoding ascii build/release/SuperDownloadManager-Windows.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdm-windows
+          path: build/release/
+
+  publish:
+    name: Publish pre-release
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sdm-macos
+          path: build/release/
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sdm-windows
+          path: build/release/
+
+      - name: Verify macOS zip
+        run: |
+          # 校验 zip 必须用 ditto 解（不能用 unzip）——unzip 会丢扩展
+          # 属性和附加记录，让 codesign --verify 误报「资源缺失」。
+          rm -rf /tmp/sdm-check
+          /usr/bin/ditto -x -k build/release/SuperDownloadManager-macOS.zip /tmp/sdm-check
+          /usr/bin/codesign --verify --deep --strict "/tmp/sdm-check/SuperDownloadManager.app"
+
+      - name: Parse tag
+        id: ver
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify built version matches tag
+        run: |
+          BUILT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+                  "/tmp/sdm-check/SuperDownloadManager.app/Contents/Info.plist")
+          if [ "$BUILT" != "${{ steps.ver.outputs.version }}" ]; then
+            echo "版本不一致：tag=${{ steps.ver.outputs.version }} 产物=$BUILT" >&2
+            exit 1
+          fi
+          echo "version match: $BUILT"
+
+      - name: Prepare release notes
+        run: |
+          if [ ! -f release-notes.md ]; then
+            echo "## v${{ steps.ver.outputs.version }}" > release-notes.md
+          fi
+
+      - name: Create GitHub Release (pre-release)
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.ver.outputs.version }}
+          tag_name: v${{ steps.ver.outputs.version }}
+          body_path: release-notes.md
+          files: |
+            build/release/SuperDownloadManager-macOS.zip
+            build/release/SuperDownloadManager-macOS.zip.sha256
+            build/release/SuperDownloadManager-Windows.zip
+            build/release/SuperDownloadManager-Windows.zip.sha256
+            build/release/sdm-Windows.zip
+          draft: false
+          prerelease: true
+          generate_release_notes: false
+
+      - name: Notify
+        run: |
+          echo "::notice::Pre-release ${{ steps.ver.outputs.version }} published as **Pre-release**."
+          echo "::notice::Maintainer must confirm both platforms manually, then flip prerelease to false."

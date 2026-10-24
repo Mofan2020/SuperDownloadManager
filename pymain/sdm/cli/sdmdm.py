@@ -1,4 +1,4 @@
-"""sdmdm 命令行客户端。
+"""sdm 命令行客户端。
 
 对应 Swift 版 CLI/SDMDM.swift。
 
@@ -34,12 +34,12 @@ from ..ipc.protocol import (
 )
 
 USAGE = """用法:
-  sdmdm add <url> [--referer R] [--filename F] [--category C] [--threads N]
-  sdmdm list
-  sdmdm pause <id> | resume <id> | cancel <id>
-  sdmdm relink <id> <new_url>
-  sdmdm config speed <bytes/sec> | config threads <count>
-  sdmdm ping
+  sdm add <url> [--referer R] [--filename F] [--category C] [--threads N]
+  sdm list
+  sdm pause <id> | resume <id> | cancel <id>
+  sdm relink <id> <new_url>
+  sdm config speed <bytes/sec> | config threads <count>
+  sdm ping
 """
 
 
@@ -133,14 +133,14 @@ def run(args: list[str] | None = None) -> int:
     try:
         request = parse_args(args)
     except ParseError as err:
-        print(f"sdmdm: {err}", file=sys.stderr)
+        print(f"sdm: {err}", file=sys.stderr)
         print(USAGE, file=sys.stderr)
         return 64
 
     try:
         response = IPCClient().send(request)
     except ClientError as err:
-        print(f"sdmdm: {err}", file=sys.stderr)
+        print(f"sdm: {err}", file=sys.stderr)
         return 1
 
     if response.get("ok"):
@@ -153,7 +153,7 @@ def run(args: list[str] | None = None) -> int:
             print(json.dumps(result, ensure_ascii=False))
         return 0
 
-    print(f"sdmdm: {response.get('error', '未知错误')}", file=sys.stderr)
+    print(f"sdm: {response.get('error', '未知错误')}", file=sys.stderr)
     return 1
 
 

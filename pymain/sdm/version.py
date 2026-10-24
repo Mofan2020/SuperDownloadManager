@@ -9,7 +9,7 @@ BUNDLE_ID = "com.skyc8266.superdownloadmanager"
 AUTHOR = "Skyc8266"
 COPYRIGHT = "Copyright © 2026 Skyc8266"
 
-# 供旧版 sdmdm CLI 复用的 socket 路径（macOS / Linux）
+# daemon 的 socket 路径（macOS / Linux）。CLI 客户端 `sdm` 连这里。
 SOCKET_PATH_UNIX = "~/Library/Application Support/SuperDownloadManager/sdmd.sock"
 # Windows 没有 unix socket，用 TCP 回环端口
 SOCKET_PORT_WINDOWS = 7956

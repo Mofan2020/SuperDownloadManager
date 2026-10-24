@@ -29,7 +29,7 @@
   "detailSpeed": "Speed",
   "detailTaskGone": "Task no longer exists",
   "detailTaskState": "Status",
-  "emptyHint": "Click + or press ⌘N to add a URL. Drop a download in Firefox/Safari to send it to SDM. From a terminal: `sdmdm add <url>`. Drag a URL onto this window.",
+  "emptyHint": "Click + or press ⌘N to add a URL. Drop a download in Firefox/Safari to send it to SDM. From a terminal: `sdm add <url>`. Drag a URL onto this window.",
   "emptyTipLang": "Settings → Language to switch to 中文.",
   "emptyTitle": "No downloads yet",
   "expiredRefresh": "Refresh link",

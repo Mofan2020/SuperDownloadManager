@@ -1,139 +1,125 @@
 # Super Download Manager (SDM)
 
-> **A native macOS multi-threaded downloader written from scratch in Swift.** No Electron, no aria2, no third-party runtime. Just an `.app` you drag into `/Applications`.
+> A multi-threaded downloader for macOS, Windows and Linux. One Python core, one web UI, no Electron, no bundled browser runtime.
 
-IDM does it on Windows. There's no good equivalent on macOS. So I wrote one.
-
-![Platform](https://img.shields.io/badge/Platform-macOS%2026%2B-blue.svg)
-![Swift](https://img.shields.io/badge/Swift-5.9-orange.svg)
-![License](https://img.shields.io/badge/License-MIT-yellow.svg)
-![Architecture](https://img.shields.io/badge/Arch-Apple%20Silicon%20%7C%20Intel-lightgrey.svg)
+IDM does it on Windows. macOS had no good equivalent. So this is one.
 
 [中文文档](./README.zh-CN.md)
 
-## Highlights
+![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)
+![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-- **From-scratch Swift implementation.** No Electron shell, no embedded browser, no external runtime. The download engine, segment scheduler, GUI, and CLI all live in the same `.app`.
-- **32 dynamic segments by default, up to 128.** Adaptive segment count based on server behavior; no manual tuning required.
-- **Smart speed limiting with time-of-day rules.** Throttle at night, unthrottle during the day, or schedule per-task caps.
-- **Automatic file categorization.** Downloads land in `~/Downloads/Video/`, `~/Downloads/Archives/`, etc. Extension-less `.dmg` / `.zip` are detected via magic bytes.
-- **Browser takeover.** Firefox extension intercepts downloads natively. Safari extension sniffs links and hands them off (macOS does not allow Safari download interception, so SDM does what it can).
-- **`sdmdm` CLI, auto-installed to `~/.local/bin`.** Every command returns a single line of JSON — designed to be called by AI agents and shell scripts.
-- **Background daemon with auto-start.** LaunchAgent registers on first launch; survives logout, reboots silently.
-- **Resume from expired links.** When a server returns 403/410/451 mid-download, SDM pauses the task, validates ETag / Content-Length of the replacement URL, and continues from the existing segments.
+## Features
+
+- **32 segments per download by default, up to 128.** The scheduler re-plans the segment layout before transfer starts when the file size and segment size do not line up.
+- **Real streaming.** Bytes land on disk as they arrive. The progress bar moves while data is coming in, and a stalled connection is caught by an idle watchdog instead of a total-time limit.
+- **Resume from expired links.** When a server returns 403/410/451 mid-download, the task waits for a new link. The replacement URL is checked against the ETag and Content-Length before the download continues from the bytes already on disk.
+- **Per-task and global speed limits,** plus time-of-day rules that throttle at night and unthrottle during the day.
+- **Automatic file categorization.** Downloads land in `~/Downloads/Video/`, `~/Downloads/Archives/` and so on. Files without extensions are identified by magic bytes.
+- **Browser takeover.** The Firefox extension intercepts downloads natively. The Safari extension sniffs links and hands them off.
+- **`sdm` CLI.** Every command returns JSON, built to be called from shell scripts and AI agents.
+- **Background daemon with auto-start.** Survives logout and reboot.
+- **Liquid glass interface.** The window resizes freely and the layout reflows instead of clipping.
 
 ## Requirements
 
-- macOS 26.0 or later
-- Apple Silicon or Intel Mac
+- macOS 12 or later, Windows 22H2 or later, or a recent Linux
+- Python 3.11 or later when running from source
 
 ## Install
 
-Download the latest `SuperDownloadManager.dmg` from [Releases](https://github.com/Mofan2020/SuperDownloadManager/releases), double-click it, and drag `SuperDownloadManager.app` into `/Applications`.
+Download the archive for your platform from [Releases](https://github.com/Mofan2020/SuperDownloadManager/releases), then extract it.
 
-Open the app once to trigger LaunchAgent registration:
+macOS:
 
 ```sh
+ditto -x -k SuperDownloadManager-macOS.zip /Applications
 open /Applications/SuperDownloadManager.app
-# First launch automatically runs install.sh to register the daemon.
 ```
 
-Or do it manually:
+Windows: extract the zip and run `SuperDownloadManager.exe`.
+
+## Run from source
 
 ```sh
-sh /Applications/SuperDownloadManager.app/Contents/Resources/install.sh
+git clone https://github.com/Mofan2020/SuperDownloadManager.git
+cd SuperDownloadManager/pymain
+python -m pip install -r requirements.txt
+python -m sdm.gui.main
 ```
-
-Verify the daemon:
-
-```sh
-sdmdm ping
-```
-
-Should return `{"ok":true, "result":{"pong":true}}`.
 
 ## CLI
 
-```
-sdmdm add <url> [--referer R] [--filename F] [--category C] [--threads N]
-sdmdm list
-sdmdm pause <id> | resume <id> | cancel <id>
-sdmdm relink <id> <new_url>
-sdmdm config speed <bytes/sec> | config threads <count>
-sdmdm ping
+The `sdm` command talks to the background daemon. Run the installer once to
+put it on your PATH and register the daemon:
+
+```sh
+sh /Applications/SuperDownloadManager.app/Contents/Resources/install.sh
+sdm ping
 ```
 
-Every command returns one line of JSON. Designed for direct AI agent invocation.
+```
+sdm add <url> [--referer R] [--filename F] [--category C] [--threads N]
+sdm list
+sdm pause <id> | resume <id> | cancel <id>
+sdm relink <id> <new_url>
+sdm config speed <bytes/sec> | config threads <count>
+sdm ping
+```
 
-## Browser Extensions
+Every command returns one line of JSON.
+
+## Browser extensions
 
 See [`docs/extension-install.md`](docs/extension-install.md).
 
-- **Firefox** — Load `manifest.json` as a temporary add-on; full download interception.
-- **Safari** — Allow the unsigned extension manually; link sniffing + handoff only (Apple's restrictions prevent Safari download interception).
+- **Firefox** — load `manifest.json` as a temporary add-on for full download interception.
+- **Safari** — allow the unsigned extension manually. Apple does not permit download interception in Safari, so the extension sniffs links and hands them off instead.
 
-## File Categorization
-
-Downloads land in these folders after completion (paths are configurable in Settings):
+## File categorization
 
 | Category | Path |
 | --- | --- |
 | Video | `~/Downloads/Video/` |
 | Pictures | `~/Downloads/Pictures/` |
 | Audio | `~/Downloads/Audio/` |
-| Archives (zip/dmg/7z/...) | `~/Downloads/Archives/` |
-| Documents (PDF/DOCX/...) | `~/Downloads/Documents/` |
-| Executables | `~/Downloads/Software/` |
+| Archives | `~/Downloads/Archives/` |
+| Documents | `~/Downloads/Documents/` |
+| Software | `~/Downloads/Software/` |
 | Other | `~/Downloads/` |
 
-Files without extensions (`.dmg`, `.zip`) are identified by magic bytes.
-
-## Resume from Expired Links
+## Resume from expired links
 
 If the server returns 403/410/451 mid-download, SDM marks the task as "waiting for new link":
 
 1. An orange banner appears at the top of the GUI.
 2. Click "Refresh link" and paste the new URL.
-3. SDM validates ETag / Content-Length match, then resumes from the already-downloaded segments.
+3. SDM validates the ETag and Content-Length, then resumes from the segments already on disk.
 
-CLI path: `sdmdm relink <task_id> <new_url>`.
+CLI path: `sdm relink <task_id> <new_url>`.
 
-## Auto-Update
-
-The in-app "Check for Updates..." entry uses Sparkle. Updates are published to GitHub Releases and verified with edDSA signatures.
-
-## Build (Developers)
-
-Requires macOS 26+, Xcode 27, and `brew install xcodegen`.
+## Build (developers)
 
 ```sh
-xcodegen generate
-xcodebuild -project SuperDownloadManager.xcodeproj \
-           -scheme SuperDownloadManager \
-           -configuration Debug \
-           -derivedDataPath build build
-open build/Build/Products/Debug/SuperDownloadManager.app
+cd pymain
+python -m pip install -r requirements.txt pyinstaller
+python scripts/build.py          # macOS .app or Windows .exe
 ```
 
 Run tests:
 
 ```sh
-xcodebuild test -scheme SDMSelfTest -destination 'platform=macOS' -derivedDataPath build
+cd pymain
+python -m pytest tests -q
+python -m sdm.gui.main --self-test
 ```
 
-Package a Release build:
+## Repository conventions
 
-```sh
-xcodebuild -configuration Release -derivedDataPath build_release build
-bash scripts/make-dmg.sh
-```
-
-## Repository Conventions
-
-- Auto-commit + auto-push (CI builds + tag triggers release).
-- `docs/notes.md` records "what was deliberately not changed, and why."
-- Public docs stay short and direct; technical depth lives in `docs/release.md` and `docs/notes.md`.
-- When borrowing algorithms from third parties: **study the algorithm, never copy the source**; document three places.
+- Auto-commit + auto-push. A tag triggers the release workflow.
+- `docs/notes.md` records what was deliberately not changed, and why.
+- Public docs stay short and direct. Technical depth lives in `docs/release.md` and `docs/notes.md`.
 
 ## License
 

@@ -3,7 +3,7 @@
 对应 Swift 版 Daemon/main.swift。
 
 在 Unix socket（或 Windows TCP 回环端口）上提供 JSONL 协议。
-CLI 客户端 `sdmdm` 连到这里。
+CLI 客户端 `sdm` 连到这里。
 
 用法：
     python -m sdm.daemon.main

@@ -39,4 +39,4 @@ Should return `{"ok":true,"result":{"taskId":"..."}}` and a new row should appea
 
 1. Firefox: `about:debugging#/runtime/this-firefox` → **Remove**
 2. Safari: Settings → Extensions → uncheck + remove SDM
-3. CLI: `~/.local/bin/sdmdm-uninstall` (provided by `scripts/uninstall.sh`)
+3. CLI: `~/.local/bin/sdm` (the `sdmd` daemon and the `sdm` CLI ship inside the app bundle; `scripts/install.sh` links the CLI into `~/.local/bin`)

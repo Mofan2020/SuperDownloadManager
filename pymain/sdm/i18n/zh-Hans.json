@@ -29,7 +29,7 @@
   "detailSpeed": "速度",
   "detailTaskGone": "任务已不存在",
   "detailTaskState": "状态",
-  "emptyHint": "点击 + 或按 ⌘N 添加 URL。把 Firefox/Safari 的下载发到 SDM。终端命令：`sdmdm add <url>`。直接把 URL 拖进窗口。",
+  "emptyHint": "点击 + 或按 ⌘N 添加 URL。把 Firefox/Safari 的下载发到 SDM。终端命令：`sdm add <url>`。直接把 URL 拖进窗口。",
   "emptyTipLang": "设置 → 语言 切换到 English。",
   "emptyTitle": "还没有下载",
   "expiredRefresh": "刷新链接",
