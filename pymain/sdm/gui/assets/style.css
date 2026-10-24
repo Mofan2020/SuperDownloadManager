@@ -722,3 +722,8 @@ table.data td.num { font-variant-numeric: tabular-nums; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* 分片静默超过 15 秒——颜色变红，提示这个分片卡住了 */
+.cell-stale {
+  color: var(--danger, #d42d2d);
+}

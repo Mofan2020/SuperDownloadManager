@@ -61,6 +61,12 @@ class HistoryStore:
         self._conn: sqlite3.Connection | None = None
 
     def open(self) -> None:
+        """打开数据库（幂等）。
+
+        注意：`_prune_old_entries()` 必须在**锁外**调用——它自己
+        要拿同一把锁。`threading.Lock` 不可重入，锁内再拿就是
+        死锁。之前这里是在锁内调的，`insert()` 一进来就卡死。
+        """
         with self._lock:
             if self._conn is not None:
                 return
@@ -68,7 +74,7 @@ class HistoryStore:
             self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
             self._create_schema()
-            self._prune_old_entries()
+        self._prune_old_entries()
 
     def close(self) -> None:
         with self._lock:

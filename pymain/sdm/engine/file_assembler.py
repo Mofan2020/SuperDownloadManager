@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 import threading
 from pathlib import Path
 from typing import BinaryIO
@@ -34,6 +35,8 @@ class FileAssembler:
         self._partial_paths: dict[int, Path] = {}
         self._chunk_starts: dict[int, int] = {}
         self._chunk_written: dict[int, int] = {}
+        #: 每个分片最后一次写入的时刻
+        self._chunk_updated: dict[int, float] = {}
         self._queue_lock = threading.Lock()
 
     # -- 分片文件命名 ------------------------------------------------
@@ -85,7 +88,15 @@ class FileAssembler:
         n = len(data)
         with self._queue_lock:
             self._chunk_written[chunk_id] = self._chunk_written.get(chunk_id, 0) + n
+            # 每个分片自己的最后写入时刻。详情页的「耗时」列用它——
+            # 所有分片显示同一个值是没意义的。
+            self._chunk_updated[chunk_id] = time.monotonic()
         return n
+
+    def chunk_updated_at(self, chunk_id: int) -> float | None:
+        """这个分片最后一次写入的时刻（monotonic 秒）。"""
+        with self._queue_lock:
+            return self._chunk_updated.get(chunk_id)
 
     def bytes_written(self, chunk_id: int) -> int:
         """这个分片已经落盘多少字节。
@@ -109,6 +120,7 @@ class FileAssembler:
             handle = self._handles.pop(chunk_id, None)
             self._chunk_locks.pop(chunk_id, None)
             self._partial_paths.pop(chunk_id, None)
+            self._chunk_updated.pop(chunk_id, None)
         if handle is not None:
             handle.close()
 

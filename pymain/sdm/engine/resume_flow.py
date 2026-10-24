@@ -12,6 +12,7 @@ Swift 版只做单流续传（一条 Range 请求把剩下的字节拉完），
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import httpx
@@ -75,7 +76,16 @@ class ResumeFlow:
                 async for block in response.aiter_bytes(chunk_size=64 * 1024):
                     fh.write(block)
                     written += len(block)
-            log.notice(CAT_ENGINE, f"续传完成 {self.destination.name} 追加 {written} 字节")
-            return bytes_done + written
+            # 补完了，把 .part 落成最终文件。
+            # 用 os.replace 而不是 rename——Windows 上目标已存在时
+            # Path.rename 会抛 FileExistsError。
+            total_written = bytes_done + written
+            os.replace(self.part_path, self.destination)
+            log.notice(
+                CAT_ENGINE,
+                f"续传完成 {self.destination.name} 追加 {written} 字节 "
+                f"（累计 {total_written}）",
+            )
+            return total_written
         finally:
             await response.aclose()

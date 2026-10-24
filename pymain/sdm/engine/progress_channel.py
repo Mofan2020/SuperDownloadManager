@@ -99,7 +99,13 @@ class ChunkProgress:
         self._aggregate = 0
 
     def report(self, per_chunk_bytes: int) -> None:
-        """上报某个分片本次写入了多少字节（相对该分片自己的区间）。"""
+        """上报某个分片本次写入了多少字节（相对该分片自己的区间）。
+
+        负值直接忽略。进度值是给用户看的累计量，一旦倒退，
+        进度条就会来回跳——这正是要避免的行为。
+        """
+        if per_chunk_bytes < 0:
+            return
         with self._lock:
             self._aggregate += per_chunk_bytes
             total = self._aggregate

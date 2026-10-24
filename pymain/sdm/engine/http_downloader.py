@@ -317,6 +317,30 @@ class HTTPDownloader:
 
         raise last_error or DownloadError(DownloadFailure.UNKNOWN, f"chunk {chunk.id} 重试耗尽")
 
+    @staticmethod
+    def _content_range_matches(header: str, want_start: int, want_end: int) -> bool:
+        """校验 Content-Range 是不是我们要的区间。
+
+        格式：`bytes {start}-{end}/{total}`。
+        缺头、格式不对、区间不符都算不匹配。
+        """
+        if not header:
+            return False
+        value = header.strip()
+        if not value.lower().startswith("bytes "):
+            return False
+        spec = value[6:].strip()
+        span = spec.split("/", 1)[0].strip()
+        if "-" not in span:
+            return False
+        start_str, _, end_str = span.partition("-")
+        try:
+            got_start = int(start_str)
+            got_end = int(end_str)
+        except ValueError:
+            return False
+        return got_start == want_start and got_end == want_end
+
     async def _stream_chunk(
         self,
         url: str,
@@ -369,6 +393,20 @@ class HTTPDownloader:
                 # 服务器无视了 Range。续传请求拿到的是整个文件，
                 # 直接写进去会污染分片。
                 raise DownloadError(DownloadFailure.NOT_PARTIAL_CONTENT, "server ignored Range")
+            if status == 206:
+                # 服务器声称支持 Range，但返回的区间跟我们要的对不上。
+                # 典型场景：CDN 边缘节点缓存了别的 Range 响应，
+                # 或者代理把整个文件塞回来了。
+                # 这种情况下把数据写进分片，文件就是错的——
+                # 而且错得很隐蔽：大小看着差不多，内容全乱。
+                # 所以必须当场拒绝，一个字节都不写。
+                content_range = response.headers.get("content-range", "")
+                if not self._content_range_matches(content_range, start, chunk.end - 1):
+                    raise DownloadError(
+                        DownloadFailure.NOT_PARTIAL_CONTENT,
+                        f"Content-Range 不匹配：请求 bytes={start}-{chunk.end - 1}，"
+                        f"收到 {content_range or '(缺失)'}",
+                    )
 
             log.notice(
                 CAT_CHUNK,

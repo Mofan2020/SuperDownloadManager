@@ -438,7 +438,15 @@ class DownloadEngine:
         new_live.task = asyncio.create_task(self._run_task(task_id, new_live))
 
     async def cancel(self, task_id: str) -> None:
-        """取消任务。分片临时文件保留，resume 时还能接着下。"""
+        """取消任务。
+
+        分片临时文件会被删掉——取消的意思是「这个任务不要了」，
+        留着 `.sdm.partial-N` 只会让下载目录里堆垃圾，而且下次
+        同名任务会扫到它们。
+
+        暂停（pause）不一样：暂停要保留分片，resume 时接着下。
+        两者的区别就是这里删不删分片。
+        """
         live = self.live.get(task_id)
         summary = self.tasks.get(task_id)
         if live is not None:
@@ -452,6 +460,27 @@ class DownloadEngine:
             if summary.state != TaskState.COMPLETED.value:
                 summary.state = TaskState.CANCELLED.value
             summary.speed_bytes_per_sec = 0.0
+        # 删掉分片临时文件。放在这里而不是 flow.cancel() 里，
+        # 因为 pause 也要调 flow.cancel()——那一路要保留分片。
+        self._discard_partials(task_id, summary)
+
+    def _discard_partials(self, task_id: str, summary: TaskSummary | None) -> None:
+        """删掉某个任务的分片临时文件。
+
+        任务已经不在 live 里（取消过了）时，用 destination 反推
+        分片文件名——分片名是 `<目标名>.sdm.partial-<id>`。
+        """
+        if summary is None:
+            return
+        base = Path(summary.destination)
+        try:
+            for path in base.parent.glob(base.name + ".sdm.partial-*"):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
 
     async def remove(self, task_id: str) -> None:
         """从队列移除。磁盘上的文件不动。"""

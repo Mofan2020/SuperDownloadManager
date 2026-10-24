@@ -65,6 +65,15 @@ function fmtRate(bytesPerSec) {
   return i === 0 ? `${Math.round(v)} ${units[i]}` : `${v.toFixed(1)} ${units[i]}`;
 }
 
+// 分片静默时长：比任务级的 ETA 细。
+// 任务级用整秒够了（ETA 差 1 秒无所谓），但分片可能 0.1 秒就下完，
+// 取整会显示成 "0s"——一列全是 0s 等于没信息。
+function fmtChunkElapsed(seconds) {
+  if (seconds == null || seconds < 0 || !isFinite(seconds)) return "—";
+  if (seconds < 10) return `${seconds.toFixed(1)}s`;
+  return fmtDuration(seconds);
+}
+
 function fmtDuration(seconds) {
   if (!seconds || seconds < 0 || !isFinite(seconds)) return "—";
   if (seconds < 60) return `${Math.round(seconds)}s`;
@@ -604,6 +613,7 @@ function renderDetail() {
         el("th", { text: t("taskDetailChunkHeader") }),
         el("th", { text: t("taskDetailChunkBytes") }),
         el("th", { text: t("taskDetailChunkStatus") }),
+        el("th", { text: t("taskDetailChunkElapsed") }),
       ])]),
     ]);
     const tbody = el("tbody");
@@ -616,6 +626,8 @@ function renderDetail() {
           el("span", { class: "chunk-dot chunk-" + st }),
           el("span", { text: t("taskDetailChunk" + st.charAt(0).toUpperCase() + st.slice(1)) }),
         ]),
+        el("td", { class: "mono cell-muted" + (c.idle_seconds > 15 ? " cell-stale" : ""),
+                   text: c.idle_seconds != null ? fmtChunkElapsed(c.idle_seconds) : "—" }),
       ]));
     });
     if (task.chunks.length > CHUNK_VIEW_LIMIT) {

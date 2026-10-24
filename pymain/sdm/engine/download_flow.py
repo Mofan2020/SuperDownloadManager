@@ -89,6 +89,9 @@ class DownloadFlow:
         self.headers = headers or {}
         self._cancelled = False
         self._chunk_tasks: set[asyncio.Task] = set()
+        self._assembler: FileAssembler | None = None
+        #: 每个分片开始传输的时刻，用于算该分片自己的耗时
+        self._chunk_started_at: dict[int, float] = {}
         #: 规划好的分片布局。详情面板要展示真实的分片状态，
         #: Swift 版这里是「合成的」（假的），这里是真的。
         self.planned_chunks: list[Chunk] = []
@@ -101,11 +104,33 @@ class DownloadFlow:
         置标志 + 取消所有在途的分片任务。标志给「还没起跑」的分片用，
         取消给「已经在传」的分片用——两者都需要，光设标志的话
         已经在传的分片会把整个文件下完（实测踩过）。
+
+        分片临时文件**不删**——暂停（pause）也走这条路，
+        暂停要保留分片以便 resume 接着下。真正删除分片是
+        引擎层 `cancel()` 的职责。
         """
         self._cancelled = True
         for task in list(self._chunk_tasks):
             if not task.done():
                 task.cancel()
+
+    def _cleanup_partials(self) -> None:
+        """删掉所有分片临时文件。
+
+        取消或失败时调用。留着它们的后果是：用户取消后下载目录里
+        躺着一堆 `.sdm.partial-N`，看起来像下载到一半的垃圾，
+        而且下次同名任务会扫到它们。
+
+        链接失效（403/410/451）**不**清理——那种情况下分片数据
+        要留着，用户换新链接后能接着下。
+        """
+        assembler = self._assembler
+        if assembler is None:
+            return
+        try:
+            assembler.cleanup_partials()
+        except Exception:  # noqa: BLE001
+            pass
 
     async def run(self) -> FlowOutcome:
         started = time.monotonic()
@@ -172,6 +197,7 @@ class DownloadFlow:
         active = [c for c in chunks if c.bytes_done < c.size]
 
         assembler = FileAssembler(self.destination)
+        self._assembler = assembler
         for chunk in active:
             assembler.open_chunk(chunk.id, chunk.start)
 
@@ -186,6 +212,7 @@ class DownloadFlow:
             raise
         except DownloadError as err:
             if err.is_expired_link:
+                # 链接失效：分片文件要留着，用户换新链接后能接着下。
                 raise FlowError(FlowFailure.EXPIRED_LINK.value, err.detail) from err
             raise FlowError(FlowFailure.PARTIAL.value, str(err)) from err
         except asyncio.CancelledError:
@@ -283,6 +310,7 @@ class DownloadFlow:
             async with semaphore:
                 if self._cancelled:
                     raise asyncio.CancelledError()
+                self._chunk_started_at[chunk.id] = time.monotonic()
                 headers = dict(self.headers)
                 result = await self.downloader.download_chunk(
                     url=url,
@@ -315,23 +343,42 @@ class DownloadFlow:
             self.progress_channel.flush()
 
     def _notify_chunk_progress(self) -> None:
-        """把当前分片状态推给上层（详情面板用）。"""
+        """把当前分片状态推给上层（详情面板用）。
+
+        每个分片带自己的「距上次写入秒数」。所有分片显示同一个值
+        是没意义的——快的分片和慢的分片差别很大，而这个数字能
+        告诉用户「哪个分片卡住了」。
+        """
         if self.on_chunk_progress is None:
             return
-        states = [
-            {
+        now = time.monotonic()
+        states = []
+        for c in self.planned_chunks:
+            states.append({
                 "id": c.id,
                 "start": c.start,
                 "end": c.end,
                 "size": c.size,
                 "bytes_done": c.bytes_done,
-            }
-            for c in self.planned_chunks
-        ]
+                "idle_seconds": self._chunk_idle_seconds(c.id, now),
+            })
         try:
             self.on_chunk_progress(states)
         except Exception:  # noqa: BLE001
             pass
+
+    def _chunk_idle_seconds(self, chunk_id: int, now: float) -> float | None:
+        """某个分片距上次写入过了多少秒。
+
+        还没开始写的分片返回 None——「0 秒」会被误读成「刚写过」。
+        """
+        assembler = self._assembler
+        if assembler is None:
+            return None
+        updated = assembler.chunk_updated_at(chunk_id)
+        if updated is None:
+            return None
+        return max(0.0, now - updated)
 
     def _partial_path(self, chunk_id: int) -> Path:
         return self.destination.with_name(self.destination.name + f".sdm.partial-{chunk_id}")
