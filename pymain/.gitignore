@@ -1,0 +1,14 @@
+# PyInstaller 产物
+build/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# 打包时生成的临时入口脚本
+build_entry_*.py
+run_*.py
