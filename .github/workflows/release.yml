@@ -1,9 +1,10 @@
-name: Release
+name: Release (Swift 版，已停用)
 
+# Swift 版保留在仓库里作语义对照，但 v2.0.0 之后不再发布。
+# Python 版的发布走 release-python.yml。
+# 这里的 push 触发条件去掉，只留手动触发——留着会让两个 workflow
+# 抢同一个 tag，产物互相覆盖。
 on:
-  push:
-    tags:
-      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       version:
