@@ -22,6 +22,24 @@ Package.resolved
 *.sdm          # Resume state sidecar (dev convenience)
 downloads/     # dev downloads dir
 *.partial
-artifacts/     # local zip-staging directory; CI builds it fresh
-artifacts/
 default.profraw
+
+# 本地 zip 暂存目录，CI 每次重新构建
+artifacts/
+
+# Python (pymain)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller 产物
+dist/
+pymain/build/
+
+# 浏览器视觉验证用的临时预览页（脚本生成，不入库）
+pymain/sdm/gui/assets/_preview.html
+pymain/sdm/gui/assets/_abtest.html
