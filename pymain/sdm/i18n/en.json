@@ -119,6 +119,7 @@
   "settingsLogsMaxBytesLabel": "Rotate when file exceeds (KB)",
   "settingsLogsMaxLinesLabel": "Cap total lines (after cleanup)",
   "settingsLogsOpenConsoleButton": "Open in Console.app",
+  "settingsLogsOpenConsoleFailed": "Couldn't open Console.app",
   "settingsLogsPersistenceHint": "Writes to ~/Library/Logs/SuperDownloadManager/sdm.log alongside Console.app.",
   "settingsLogsPersistenceLabel": "Save log to disk",
   "settingsLogsPreviewButton": "Preview log…",

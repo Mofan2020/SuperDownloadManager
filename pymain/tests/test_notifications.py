@@ -187,6 +187,24 @@ def _reset_click_handler():
     notifications.set_click_handler(None)
 
 
+@pytest.fixture(autouse=True)
+def _pretend_macos(monkeypatch):
+    """把平台当成 macOS。
+
+    **这个文件测的全是 macOS 的通知路径。** 生产代码在
+    `notify()` 里按平台分派：darwin 走 UN/osascript，win 走
+    PowerShell toast，Linux 什么都不做直接返回 False。
+
+    所以在 Linux runner 上跑这个文件，生产代码连 UN 分支都进不去
+    ——fake 造得再全也没用（`fake_un.added` 一直是空的）。
+
+    这里把 `sys.platform` 改成 "darwin"，构造出「假装在 macOS 上」
+    的环境。配合假 objc / Foundation 模块，整个 UN 路径就能在
+    任何平台上测。
+    """
+    monkeypatch.setattr(notifications.sys, "platform", "darwin")
+
+
 # -- F126 / F127 通知内容与 identifier ----------------------------
 
 
@@ -257,6 +275,30 @@ def test_request_permission_uses_swift_options(fake_un):
 def test_request_permission_without_bundle_returns_true(monkeypatch):
     """没有 bundle identity 时没法调 UN 的申请接口，但不算失败。"""
     monkeypatch.setattr(notifications, "_bundle_identifier", lambda: None)
+    assert notifications.request_permission() is True
+
+
+def test_request_permission_on_non_macos_returns_false(monkeypatch):
+    """非 macOS 上申请不了 UN 权限，返回 False。
+
+    **这条要覆盖 autouse fixture 设的 "darwin"。** 文件里的
+    fixture 把平台统一当成 macOS，好让 UN 路径在任何平台上都能测；
+    但 `request_permission` 里那个 `sys.platform != "darwin"` 的
+    分支就被盖住了——不单独测的话，删掉这个判断测试照样绿。
+
+    Linux 上没有 UN 框架，申请不了；Windows 上走自己的路径。
+    """
+    monkeypatch.setattr(notifications.sys, "platform", "linux")
+    monkeypatch.setattr(notifications.platform, "system", lambda: "Linux")
+
+    assert notifications.request_permission() is False
+
+
+def test_request_permission_on_windows_returns_true(monkeypatch):
+    """Windows 上返回 True——它走自己的通知通道，不需要 UN 授权。"""
+    monkeypatch.setattr(notifications.sys, "platform", "win32")
+    monkeypatch.setattr(notifications.platform, "system", lambda: "Windows")
+
     assert notifications.request_permission() is True
 
 

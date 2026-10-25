@@ -31,7 +31,6 @@ from sdm.engine.http_downloader import HTTPDownloader
 from sdm.engine.speed_display import SpeedInput, compute
 from sdm.history_store import HistoryEntry, HistoryStore
 from sdm.logging_setup import LogSettings, SDMLogger
-from sdm.system_integration import open_log_in_console
 from tests.conftest import run_async
 from tests.range_server import RangeServer
 
@@ -522,96 +521,3 @@ def test_cleanup_disabled_under_pytest(tmp_path) -> None:
 
 
 # ====================================================================
-# F123 在 Console.app 中打开
-# ====================================================================
-
-
-def test_open_log_in_console_uses_open_command(tmp_path, monkeypatch) -> None:
-    """macOS 上执行 `open -a Console <path>`。
-
-    用 mock 拦下 subprocess.run，断言命令和路径都对。
-    """
-    from sdm import system_integration
-
-    target = tmp_path / "sdm.log"
-    target.write_text("hello\n", encoding="utf-8")
-
-    calls: list[list[str]] = []
-
-    def _fake_run(args, **kwargs):
-        calls.append(list(args))
-        return None
-
-    monkeypatch.setattr(system_integration.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(system_integration.subprocess, "run", _fake_run)
-
-    assert open_log_in_console(target) is True
-    assert len(calls) == 1
-    assert calls[0] == ["open", "-a", "Console", str(target)]
-
-
-def test_open_log_in_console_returns_false_on_other_platforms(tmp_path, monkeypatch) -> None:
-    """非 macOS 返回 False，且不执行任何命令。"""
-    from sdm import system_integration
-
-    target = tmp_path / "sdm.log"
-    target.write_text("hello\n", encoding="utf-8")
-
-    calls: list[list[str]] = []
-
-    def _fake_run(args, **kwargs):
-        calls.append(list(args))
-        return None
-
-    monkeypatch.setattr(system_integration.platform, "system", lambda: "Windows")
-    monkeypatch.setattr(system_integration.subprocess, "run", _fake_run)
-
-    assert open_log_in_console(target) is False
-    assert calls == [], "非 macOS 不该执行 open 命令"
-
-
-def test_open_log_in_console_returns_false_for_missing_file(tmp_path, monkeypatch) -> None:
-    """文件不存在时返回 False，不弹 Console。"""
-    from sdm import system_integration
-
-    calls: list[list[str]] = []
-
-    def _fake_run(args, **kwargs):
-        calls.append(list(args))
-        return None
-
-    monkeypatch.setattr(system_integration.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(system_integration.subprocess, "run", _fake_run)
-
-    assert open_log_in_console(tmp_path / "nope.log") is False
-    assert calls == []
-
-
-def test_open_log_in_console_uses_bundle_id_for_subsystem(tmp_path, monkeypatch) -> None:
-    """子系统 ID 来自 version.BUNDLE_ID，不硬编码。"""
-    from sdm import system_integration
-    from sdm.version import BUNDLE_ID
-
-    target = tmp_path / "sdm.log"
-    target.write_text("hello\n", encoding="utf-8")
-
-    logged: list[str] = []
-
-    class _FakeLogger:
-        def debug(self, category, message):
-            logged.append(message)
-
-        def info(self, category, message):
-            logged.append(message)
-
-        def warning(self, category, message):
-            logged.append(message)
-
-    monkeypatch.setattr(system_integration.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(system_integration.subprocess, "run", lambda args, **kw: None)
-    monkeypatch.setattr(system_integration, "log", _FakeLogger())
-
-    assert open_log_in_console(target) is True
-    assert any(BUNDLE_ID in msg for msg in logged), (
-        f"日志里没带上子系统 ID {BUNDLE_ID}：{logged}"
-    )

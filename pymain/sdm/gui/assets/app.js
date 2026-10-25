@@ -1166,6 +1166,10 @@ function renderLogsSection() {
     el("button", { class: "btn", onclick: openLogPreview }, [icon("file"), el("span", { text: t("settingsLogsPreviewButton") })]),
     el("button", {
       class: "btn",
+      onclick: async () => { const r = await api()?.open_log_in_console(); if (!r?.ok) toast(t("settingsLogsOpenConsoleFailed")); },
+    }, [icon("external"), el("span", { text: t("settingsLogsOpenConsoleButton") })]),
+    el("button", {
+      class: "btn",
       onclick: async () => { const r = await api()?.get_log_file_path(); if (r?.path) api()?.reveal_in_finder(r.path); },
     }, [icon("folder"), el("span", { text: t("settingsLogsRevealInFinder") })]),
   ]));

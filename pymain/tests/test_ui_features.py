@@ -11,6 +11,7 @@ Swift 参照：
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -23,6 +24,7 @@ if str(ROOT) not in sys.path:
 from sdm import clipboard
 from sdm.gui import bridge as bridge_mod
 from sdm.gui import macos_status
+from sdm.system_integration import open_log_in_console
 
 # -- i18n 一致性 ---------------------------------------------------
 
@@ -467,47 +469,6 @@ def test_sync_open_at_login_disables_when_setting_off(monkeypatch):
 # -- F123 在 Console.app 中打开 ------------------------------------
 
 
-def test_open_log_in_console_uses_open_command(monkeypatch, tmp_path):
-    """命令是 open -a Console <路径>。"""
-    log_file = tmp_path / "sdm.log"
-    log_file.write_text("x")
-
-    calls: list[list[str]] = []
-
-    class _Result:
-        returncode = 0
-
-    monkeypatch.setattr(
-        "sdm.system_integration.subprocess.run",
-        lambda cmd, **kwargs: calls.append(cmd) or _Result(),
-    )
-    monkeypatch.setattr("sdm.system_integration.platform.system", lambda: "Darwin")
-
-    from sdm.system_integration import open_log_in_console
-
-    assert open_log_in_console(log_file) is True
-    assert calls[0][:3] == ["open", "-a", "Console"]
-    assert str(log_file) in calls[0]
-
-
-def test_open_log_in_console_missing_file(monkeypatch, tmp_path):
-    """文件不存在返回 False。"""
-    monkeypatch.setattr("sdm.system_integration.platform.system", lambda: "Darwin")
-
-    from sdm.system_integration import open_log_in_console
-
-    assert open_log_in_console(tmp_path / "nope.log") is False
-
-
-def test_open_log_in_console_non_macos(monkeypatch, tmp_path):
-    """非 macOS 返回 False。"""
-    log_file = tmp_path / "sdm.log"
-    log_file.write_text("x")
-    monkeypatch.setattr("sdm.system_integration.platform.system", lambda: "Windows")
-
-    from sdm.system_integration import open_log_in_console
-
-    assert open_log_in_console(log_file) is False
 
 
 def test_resolve_category_accepts_extension():
@@ -575,3 +536,137 @@ def test_startup_notifies_terminal_tasks_like_swift(monkeypatch):
 
     titles = {t for t, _, _ in sent}
     assert titles == {"下载完成", "下载失败"}
+def test_open_log_in_console_uses_open_command(tmp_path, monkeypatch) -> None:
+    """macOS 上执行 `open -a Console <path>`。
+
+    用 mock 拦下 subprocess.run，断言命令和路径都对。
+    """
+    from sdm import system_integration
+
+    target = tmp_path / "sdm.log"
+    target.write_text("hello\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def _fake_run(args, **kwargs):
+        calls.append(list(args))
+        return None
+
+    monkeypatch.setattr(system_integration.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(system_integration.subprocess, "run", _fake_run)
+
+    assert open_log_in_console(target) is True
+    assert len(calls) == 1
+    assert calls[0] == ["open", "-a", "Console", str(target)]
+
+
+def test_open_log_in_console_returns_false_on_other_platforms(tmp_path, monkeypatch) -> None:
+    """非 macOS 返回 False，且不执行任何命令。"""
+    from sdm import system_integration
+
+    target = tmp_path / "sdm.log"
+    target.write_text("hello\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def _fake_run(args, **kwargs):
+        calls.append(list(args))
+        return None
+
+    monkeypatch.setattr(system_integration.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(system_integration.subprocess, "run", _fake_run)
+
+    assert open_log_in_console(target) is False
+    assert calls == [], "非 macOS 不该执行 open 命令"
+
+
+def test_open_log_in_console_returns_false_for_missing_file(tmp_path, monkeypatch) -> None:
+    """文件不存在时返回 False，不弹 Console。"""
+    from sdm import system_integration
+
+    calls: list[list[str]] = []
+
+    def _fake_run(args, **kwargs):
+        calls.append(list(args))
+        return None
+
+    monkeypatch.setattr(system_integration.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(system_integration.subprocess, "run", _fake_run)
+
+    assert open_log_in_console(tmp_path / "nope.log") is False
+    assert calls == []
+
+
+def test_open_log_in_console_uses_bundle_id_for_subsystem(tmp_path, monkeypatch) -> None:
+    """子系统 ID 来自 version.BUNDLE_ID，不硬编码。"""
+    from sdm import system_integration
+    from sdm.version import BUNDLE_ID
+
+    target = tmp_path / "sdm.log"
+    target.write_text("hello\n", encoding="utf-8")
+
+    logged: list[str] = []
+
+    class _FakeLogger:
+        def debug(self, category, message):
+            logged.append(message)
+
+        def info(self, category, message):
+            logged.append(message)
+
+        def warning(self, category, message):
+            logged.append(message)
+
+    monkeypatch.setattr(system_integration.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(system_integration.subprocess, "run", lambda args, **kw: None)
+    monkeypatch.setattr(system_integration, "log", _FakeLogger())
+
+    assert open_log_in_console(target) is True
+    assert any(BUNDLE_ID in msg for msg in logged), (
+        f"日志里没带上子系统 ID {BUNDLE_ID}：{logged}"
+    )
+
+
+def test_console_button_wired_in_frontend():
+    """日志设置里要有「在 Console.app 中打开」按钮。
+
+    **后端函数在、前端不接 = 功能不存在。** Swift 版
+    `App/MainWindow/SettingsView.swift:374-384` 有这个按钮，
+    i18n 里也早有 `settingsLogsOpenConsoleButton` 文案——但没人
+    调用它，用户在设置里看不到入口。
+    """
+    app_js = (ROOT / "sdm" / "gui" / "assets" / "app.js").read_text(encoding="utf-8")
+
+    assert "open_log_in_console" in app_js, "前端没调 open_log_in_console"
+    assert "settingsLogsOpenConsoleButton" in app_js, "按钮没绑 i18n 文案"
+
+
+def test_console_button_reports_failure():
+    """打不开 Console.app 时要提示用户，不是静默失败。"""
+    app_js = (ROOT / "sdm" / "gui" / "assets" / "app.js").read_text(encoding="utf-8")
+
+    assert "settingsLogsOpenConsoleFailed" in app_js, "失败时没提示"
+
+
+def test_console_button_uses_existing_icon():
+    """按钮的图标必须是 index.html 里真有的 symbol。
+
+    icon() 是 `<use href="#i-名字">`——symbol 不存在的话图标位置
+    是空的，不报错。
+    """
+    app_js = (ROOT / "sdm" / "gui" / "assets" / "app.js").read_text(encoding="utf-8")
+    index_html = (ROOT / "sdm" / "gui" / "assets" / "index.html").read_text(encoding="utf-8")
+
+    m = re.search(r'open_log_in_console.*?icon\("(\w+)"\)', app_js, re.S)
+    assert m, "找不到 Console 按钮的图标调用"
+    name = m.group(1)
+    assert f'id="i-{name}"' in index_html, f"index.html 里没有 i-{name} 这个 symbol"
+
+
+def test_console_failure_text_exists_in_both_languages():
+    """失败提示中英文都要有。"""
+    base = ROOT / "sdm" / "i18n"
+    for name in ("zh-Hans.json", "en.json"):
+        d = json.loads((base / name).read_text(encoding="utf-8"))
+        assert "settingsLogsOpenConsoleFailed" in d, f"{name} 缺 settingsLogsOpenConsoleFailed"
+
