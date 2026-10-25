@@ -32,13 +32,19 @@ def test_sort_js_suite_passes():
         [node, str(MJS)],
         capture_output=True,
         text=True,
+        # Windows 控制台默认 GBK，解码 UTF-8 输出会 UnicodeDecodeError。
+        # 显式指定编码，别让平台默认值决定。
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
         cwd=str(HERE.parent),
     )
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
     assert result.returncode == 0, (
         "JS 排序测试失败：\n"
-        f"--- stdout ---\n{result.stdout}\n"
-        f"--- stderr ---\n{result.stderr}"
+        f"--- stdout ---\n{stdout}\n"
+        f"--- stderr ---\n{stderr}"
     )
     # 顺带确认用例数，别让套件空跑也绿。
-    assert "个用例通过" in result.stdout, result.stdout
+    assert "个用例通过" in stdout, stdout

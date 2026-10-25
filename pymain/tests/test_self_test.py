@@ -31,6 +31,9 @@ def _run_self_test() -> subprocess.CompletedProcess:
         cwd=str(ROOT),
         capture_output=True,
         text=True,
+        # Windows 控制台默认 GBK，解码 UTF-8 输出会 UnicodeDecodeError。
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
     )
 
@@ -38,7 +41,9 @@ def _run_self_test() -> subprocess.CompletedProcess:
 def test_self_test_passes():
     """自检全过。"""
     result = _run_self_test()
-    assert result.returncode == 0, f"自检失败：\n{result.stdout}\n{result.stderr}"
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    assert result.returncode == 0, f"自检失败：\n{stdout}\n{stderr}"
 
 
 def test_self_test_covers_new_modules():
@@ -50,7 +55,7 @@ def test_self_test_covers_new_modules():
     少一项 = 少一层保护，所以这里把名字钉死。
     """
     result = _run_self_test()
-    output = result.stdout
+    output = result.stdout or ""
 
     for name in (
         "通知通道",

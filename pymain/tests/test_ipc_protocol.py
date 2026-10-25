@@ -124,14 +124,32 @@ def test_request_payload_ends_with_newline(monkeypatch, tmp_path):
 
 
 def test_missing_socket_gives_readable_error(monkeypatch, tmp_path):
-    """socket 不存在时给出可读的错误，路径原样带出来。"""
+    """连不上守护进程时给出可读的错误。
+
+    **两平台的错误信息不一样，断言也不一样：**
+
+    - Unix：socket 文件不存在，报「守护进程不可达（<路径> 不存在）」，
+      路径原样带出来
+    - Windows：走 TCP 回环，socket 文件那一套不存在，错误是
+      「连接守护进程失败: [WinError 10061] ...」
+
+    两边都得说人话，都得提到守护进程。
+    """
     missing = tmp_path / "nope.sock"
     monkeypatch.setattr(sdm_paths, "socket_path", lambda: str(missing))
 
     cli = ipc_client.IPCClient()
     with pytest.raises(ipc_client.ClientError) as exc:
         cli.send({"id": "r1", "method": "ping"})
-    assert str(missing) in str(exc.value)
+
+    message = str(exc.value)
+    assert "守护进程" in message, f"错误信息没说清楚：{message}"
+
+    if sys.platform == "win32":
+        # Windows 上没有 unix socket，路径不会出现在错误里。
+        assert "连接守护进程失败" in message, message
+    else:
+        assert str(missing) in message, message
 
 
 # -- F166 daemon 守卫 ----------------------------------------------

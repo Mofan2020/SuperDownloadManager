@@ -12,6 +12,8 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -24,6 +26,7 @@ def test_backlog_constant_matches_swift():
     assert ipc_server.BACKLOG == 16
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows 走 TCP 回环，没有 unix socket")
 def test_sync_server_uses_backlog_constant(monkeypatch, tmp_path):
     """同步 SocketServer 的 listen 用的是常量，不是写死的数字。"""
     recorded: list[int] = []
@@ -72,6 +75,7 @@ def test_sync_server_uses_backlog_constant(monkeypatch, tmp_path):
     assert recorded == [ipc_server.BACKLOG]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows 没有 asyncio.start_unix_server")
 def test_async_server_uses_backlog_constant(monkeypatch, tmp_path):
     """异步 AsyncSocketServer 的 listen 也用 BACKLOG。
 
