@@ -154,8 +154,16 @@ class DownloadEngine:
         self._task_limiters: dict[str, SpeedLimiter] = {}
         self._lock = asyncio.Lock()
         # 每个任务的分片状态：{task_id: [分片dict, ...]}
-        # 只在任务进行中维护，任务结束就清掉——不留在内存里占地方。
+        #
+        # 任务还在跑的时候实时更新；任务结束后保留最终状态——详情
+        # 面板要能查已完成任务的分片明细（Swift 版用合成数据展示，
+        # 这里是真实数据）。但不能无限留：每个任务几十到上百个
+        # dict，攒多了占内存。超过上限就丢最老的。
         self._chunk_states: dict[str, list[dict]] = {}
+        self._chunk_state_order: list[str] = []
+
+    #: 保留多少个已结束任务的分片明细
+    CHUNK_STATE_RETENTION = 20
 
     # -- 配置 --------------------------------------------------------
 
@@ -305,6 +313,8 @@ class DownloadEngine:
         # 记录分片布局，供详情面板展示。
         # Swift 版的详情页分片是「合成的」（假的），这里是真的。
         self._chunk_states[task_id] = self._build_chunk_states(live)
+        if task_id not in self._chunk_state_order:
+            self._chunk_state_order.append(task_id)
         # 分片进度变化时同步到引擎
         live.flow.on_chunk_progress = lambda states: self.update_chunk_states(task_id, states)
 
@@ -349,8 +359,9 @@ class DownloadEngine:
         finally:
             progress_task.cancel()
             self.live.pop(task_id, None)
-            # 任务结束：分片明细不再需要，及时释放
-            self._chunk_states.pop(task_id, None)
+            # 任务结束：分片明细留一份最终状态，详情面板还能查。
+            # 超过保留上限就丢最老的。
+            self._retire_chunk_states(task_id)
 
     def _build_chunk_states(self, live: LiveTask) -> list[dict]:
         """构造分片状态列表。
@@ -379,6 +390,25 @@ class DownloadEngine:
     def update_chunk_states(self, task_id: str, states: list[dict]) -> None:
         """下载过程中更新分片进度。"""
         self._chunk_states[task_id] = states
+        if task_id not in self._chunk_state_order:
+            self._chunk_state_order.append(task_id)
+        # 摘要里的分片计数也要跟着走。列表页那行「已完成分片/总片数」
+        # 读的是摘要字段，不读 _chunk_states——不同步的话永远是 0/0。
+        summary = self.tasks.get(task_id)
+        if summary is not None:
+            summary.chunk_count = len(states)
+            summary.completed_chunks = sum(
+                1 for s in states if s.get("bytes_done", 0) >= s.get("size", 0)
+            )
+
+    def _retire_chunk_states(self, task_id: str) -> None:
+        """任务结束：分片明细保留有限时间，超上限丢最老的。"""
+        if task_id in self._chunk_state_order:
+            self._chunk_state_order.remove(task_id)
+        self._chunk_state_order.append(task_id)
+        while len(self._chunk_state_order) > self.CHUNK_STATE_RETENTION:
+            oldest = self._chunk_state_order.pop(0)
+            self._chunk_states.pop(oldest, None)
 
     async def _consume_progress(self, task_id: str, channel: ProgressChannel) -> None:
         """把进度流写进任务快照。"""
@@ -522,6 +552,9 @@ class DownloadEngine:
         self.tasks.pop(task_id, None)
         self.live.pop(task_id, None)
         self._task_limiters.pop(task_id, None)
+        self._chunk_states.pop(task_id, None)
+        if task_id in self._chunk_state_order:
+            self._chunk_state_order.remove(task_id)
 
     async def clear_completed(self) -> None:
         for summary in list(self.tasks.values()):

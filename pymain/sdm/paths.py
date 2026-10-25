@@ -50,10 +50,26 @@ def history_db_path() -> Path:
 
 
 def socket_path() -> str:
-    """守护进程 IPC socket 路径。"""
+    """守护进程 IPC socket 路径。
+
+    unix socket 的路径有长度上限：macOS 104 字节，Linux 108。超了
+    socket 根本建不出来，daemon 启动时报 "AF_UNIX path too long"。
+
+    正常的 macOS 路径是
+    `/Users/<用户名>/Library/Application Support/SuperDownloadManager/sdmd.sock`，
+    七十几字节没事。但用户名长、或者 HOME 指向深层目录时就超了。
+
+    超了就退回 `/tmp/sdm-<uid>.sock`——短，且带 uid 不会跟别的用户
+    撞。socket 本身权限是 0600，只有本人能连。
+
+    daemon 和 CLI 都走这个函数，算出来的路径必然一致。
+    """
     if is_windows():
         return "npipe://sdm-sdmd"
-    return str(config_dir() / "sdmd.sock")
+    path = str(config_dir() / "sdmd.sock")
+    if len(path.encode("utf-8")) >= 100:
+        return f"/tmp/sdm-{os.getuid()}.sock"
+    return path
 
 
 def settings_path() -> Path:

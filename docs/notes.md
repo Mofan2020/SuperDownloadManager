@@ -51,6 +51,62 @@ Python 重写版。Swift 实现保留在仓库根目录的 `Engine/` `App/` `CLI
 
 `docs/functional-inventory.md` 记录了 Swift 版的 191 个功能点与 35 项重构风险，是功能完整性的验收基准。`docs/ui-spec.md` 是 UI 规范。
 
+## v2.0.5 分片计数一直是 0/0
+
+详情面板那行「已完成分片 / 总片数」读的是 `TaskSummary.chunk_count` 和
+`completed_chunks`。这两个字段有定义、有默认值、有序列化，但**从来没有
+任何一处给它们赋值**——`update_chunk_states` 只写 `self._chunk_states`，
+那是给详情面板单独取明细用的另一份数据。
+
+所以列表和详情面板显示的永远是 `0/0`，跟实际分片数无关。
+
+改法：`update_chunk_states` 里同步写摘要的两个字段。判定「分片完成」
+用 `bytes_done >= size`（`Chunk.complete` 是同一个判据）。
+
+顺带修了两个相关的：
+
+- **`_notify_chunk_progress()` 的调用顺序**。worker 里原本先通知进度、
+  再把 `c.bytes_done` 顶到 `chunk.end`。顺序反了的话最后完成的那个
+  分片在面板里永远显示「未完成」。改成先更新 `bytes_done` 再通知。
+- **任务结束后 `_chunk_states` 被 pop 掉**。Swift 版的详情面板对已完成
+  任务也展示分片（虽然是合成的假数据）。现在保留最终状态，同时按
+  `CHUNK_STATE_RETENTION = 20` 限制保留的任务数——每个任务几十到上百个
+  dict，无上限会占内存。`remove()` 时仍然彻底清掉。
+
+## unix socket 的路径长度上限
+
+macOS 的 unix socket 路径上限 104 字节，Linux 108。超了 socket 根本建
+不出来，daemon 启动直接报 `AF_UNIX path too long`。
+
+正常的 macOS 路径是
+`~/Library/Application Support/SuperDownloadManager/sdmd.sock`，七十
+几字节没事。但用户名长、或者 HOME 指向深层目录时就超了。
+
+`paths.socket_path()` 现在检查字节数，超过 100 就退回
+`/tmp/sdm-<uid>.sock`——短，且带 uid 不会跟别的用户撞，socket 权限
+0600 只有本人能连。daemon 和 CLI 都走这个函数，算出来必然一致。
+
+## 图标进了 CI 的校验项
+
+PyInstaller 找不到 `--icon` 时会静默用它自带的
+`bootloader/images/icon-windowed.icns`，不报错也不警告。打包脚本传错
+路径、写错文件名、或者 tag 上还没有图标文件，产物照样出得来，只是
+图标是默认的。
+
+所以校验不能靠「打包命令里有没有 `--icon`」，得查产物：
+
+- macOS：`Info.plist` 的 `CFBundleIconFile` 要等于 `AppIcon.icns`，
+  `Contents/Resources/` 下要有这个文件，且内容不能跟 PyInstaller 的
+  默认图标字节相同。zip 解出来的那份也要再查一遍——打包过程可能把
+  Resources 里的文件弄丢，只查 dist 目录不够。
+- Windows：exe 的 `.rsrc` 段必须存在且不能太小（ICO 打不进资源段时
+  段几乎不存在）。
+
+另外 `pymain/tests/test_app_icon.py` 在本地也查同一套：icns 头是
+`icns`、长度字段自洽、含多个尺寸块；ico 的 reserved/type/count 正确、
+含 256x256；`build.py` 拼出来的 GUI 参数里有 `--icon` 且路径存在，
+CLI 参数里没有。
+
 ## v2.0.3 应用图标
 
 打包时没传 `--icon`，PyInstaller 就用它自己那个默认图标。用户看到的

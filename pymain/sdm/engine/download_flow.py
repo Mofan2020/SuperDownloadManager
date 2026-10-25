@@ -357,12 +357,14 @@ class DownloadFlow:
                     headers=headers,
                     limiter=self.limiter,
                 )
-                self._notify_chunk_progress()
                 # 分片完成：把 planner 里的 bytes_done 顶到末尾。
                 for c in active:
                     if c.id == chunk.id:
                         c.bytes_done = chunk.end
                         break
+                # 通知放在 bytes_done 更新之后——顺序反了的话，最后
+                # 完成的那个分片在详情面板里永远显示「未完成」。
+                self._notify_chunk_progress()
 
         tasks = [asyncio.create_task(worker(chunk)) for chunk in active]
         self._chunk_tasks = set(tasks)

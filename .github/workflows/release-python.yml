@@ -52,6 +52,37 @@ jobs:
           echo "built version: $VERSION"
           echo "$VERSION" > /tmp/built-version-macos
 
+      - name: Verify app icon
+        run: |
+          # 校验图标真的打进 bundle 了。
+          #
+          # v2.0.2 发出去的时候就是默认图标——PyInstaller 找不到
+          # --icon 就静默用它自带的 icon-windowed.icns，不报错。
+          # 用户装上看到一把扳手，才发现。
+          #
+          # 所以这里显式检查两件事：
+          # 1. Info.plist 的 CFBundleIconFile 指对了
+          # 2. 那个文件真的在 Resources 里，而且不是 PyInstaller 的默认
+          APP="pymain/dist/macos/SuperDownloadManager.app"
+          ICON_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" "$APP/Contents/Info.plist")
+          echo "CFBundleIconFile = $ICON_NAME"
+          if [ "$ICON_NAME" != "AppIcon.icns" ]; then
+            echo "::error::应用图标不对：CFBundleIconFile=$ICON_NAME，期望 AppIcon.icns"
+            exit 1
+          fi
+          ICON_PATH="$APP/Contents/Resources/$ICON_NAME"
+          if [ ! -f "$ICON_PATH" ]; then
+            echo "::error::图标文件不存在：$ICON_PATH"
+            exit 1
+          fi
+          # PyInstaller 的默认图标是这个文件。撞上了就说明 --icon 没生效。
+          PYI_DEFAULT="/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/site-packages/PyInstaller/bootloader/images/icon-windowed.icns"
+          if [ -f "$PYI_DEFAULT" ] && cmp -s "$ICON_PATH" "$PYI_DEFAULT"; then
+            echo "::error::用的是 PyInstaller 默认图标，--icon 没生效"
+            exit 1
+          fi
+          echo "应用图标校验通过：$ICON_PATH"
+
       - name: Package
         run: |
           mkdir -p build/release
@@ -82,6 +113,18 @@ jobs:
             "/tmp/sdm-check/SuperDownloadManager.app/Contents/Info.plist" \
             > build/release/built-version.txt
           echo "built version: $(cat build/release/built-version.txt)"
+
+      - name: Verify macOS zip icon
+        run: |
+          # zip 里的那份也要查——打包过程中可能把 Resources 里的文件
+          # 弄丢，只查 dist 目录不够。
+          APP="/tmp/sdm-check/SuperDownloadManager.app"
+          ICON_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" "$APP/Contents/Info.plist")
+          if [ ! -f "$APP/Contents/Resources/$ICON_NAME" ]; then
+            echo "::error::zip 里的应用缺图标：Contents/Resources/$ICON_NAME"
+            exit 1
+          fi
+          echo "zip 内图标校验通过：$ICON_NAME"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -124,6 +167,47 @@ jobs:
           $exe = "pymain/dist/windows/SuperDownloadManager.exe"
           if (-not (Test-Path $exe)) { throw "exe 没生成：$exe" }
           Write-Host "exe size: $((Get-Item $exe).Length) bytes"
+
+      - name: Verify exe icon
+        shell: pwsh
+        run: |
+          # Windows 的图标是从 .ico 打进 exe 资源段的。
+          # 没传 --icon 时 PyInstaller 静默用默认图标，不报错——
+          # 跟 macOS 那边一样的坑，所以这里显式查。
+          #
+          # 查法：读 exe 的资源段，找 RT_GROUP_ICON (14) / RT_ICON (3)。
+          $ico = "pymain/resources/AppIcon.ico"
+          if (-not (Test-Path $ico)) { throw "图标源文件不存在：$ico" }
+          Add-Type -AssemblyName System.Drawing
+          $icon = [System.Drawing.Icon]::new((Resolve-Path $ico))
+          if ($icon.Width -le 0) { throw "ICO 解析失败：$ico" }
+          Write-Host "ICO 源文件可解析：$($icon.Width)x$($icon.Height)"
+          $icon.Dispose()
+
+          # exe 本身的资源段：用一个最小 PE 解析器找 icon 目录。
+          $bytes = [System.IO.File]::ReadAllBytes("pymain/dist/windows/SuperDownloadManager.exe")
+          $peOff = [BitConverter]::ToInt32($bytes, 0x3C)
+          $numSections = [BitConverter]::ToUInt16($bytes, $peOff + 6)
+          $optSize = [BitConverter]::ToUInt16($bytes, $peOff + 20)
+          $secStart = $peOff + 24 + $optSize
+          $resourceRva = 0
+          $resourceSize = 0
+          for ($i = 0; $i -lt $numSections; $i++) {
+            $off = $secStart + $i * 40
+            $name = [System.Text.Encoding]::ASCII.GetString($bytes, $off, 8).TrimEnd([char]0)
+            if ($name -eq ".rsrc") {
+              $resourceRva = [BitConverter]::ToUInt32($bytes, $off + 12)
+              $resourceSize = [BitConverter]::ToUInt32($bytes, $off + 16)
+              break
+            }
+          }
+          if ($resourceRva -eq 0) {
+            throw "exe 里没有 .rsrc 段——图标肯定没打进去"
+          }
+          Write-Host "exe 资源段大小：$resourceSize 字节"
+          if ($resourceSize -lt 1024) {
+            throw "资源段太小（$resourceSize 字节），图标很可能没打进去"
+          }
 
       - name: Check install scripts parse
         shell: pwsh
