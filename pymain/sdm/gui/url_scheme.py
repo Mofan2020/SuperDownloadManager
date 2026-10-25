@@ -177,6 +177,29 @@ def _extract_url(event: Any) -> str:
         return ""
 
 
+def make_dispatcher(on_url: Callable[[str], None]) -> Callable[[str], None]:
+    """造一个「原始 URL → 目标地址」的回调。
+
+    **为什么必须在这里解析**：Apple Event 里送过来的是完整的
+    `superdownloadmanager://add?url=http://example.com/a.zip`，
+    不是里面的目标地址。不剥掉这一层就直接入队，引擎会把
+    `superdownloadmanager://...` 当成要下载的地址——
+    快捷指令那条路（规格 §4.2 的路径 A）就整个是死的。
+
+    单独拆成模块级函数是为了能直接测它——`install()` 那条路要
+    真 PyObjC，Linux runner 上根本跑不到。
+    """
+
+    def _dispatch(raw: str) -> None:
+        target = parse_scheme_url(raw)
+        if not target:
+            log.debug(CAT_GUI, f"URL scheme 串解析不出目标地址，丢弃: {raw[:120]}")
+            return
+        on_url(target)
+
+    return _dispatch
+
+
 def install(on_url: Callable[[str], None]) -> bool:
     """注册 URL scheme handler。
 
@@ -193,7 +216,7 @@ def install(on_url: Callable[[str], None]) -> bool:
         return False
 
     try:
-        handler = _URLSchemeHandler(on_url)
+        handler = _URLSchemeHandler(make_dispatcher(on_url))
     except ImportError as err:
         log.debug(CAT_GUI, f"URL scheme 不可用: {err}")
         return False

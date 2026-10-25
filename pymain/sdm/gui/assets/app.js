@@ -24,9 +24,25 @@ const State = {
   showToolbarLabels: true,
   booted: false,
   // 下载列表的排序。sortKey 为 null 时用默认排序（下载中优先）。
-  // 可选：filename / size / speed / state。
+  // 可选：filename / size / progress / speed / eta / state / category。
   sortKey: null,
   sortAsc: true,
+  // 主题：system / light / dark（规格 §2.5）。
+  theme: "system",
+  // 用户在列选择器里关掉的列（列 id）。存进 settings.hidden_columns。
+  hiddenColumns: [],
+  // 列表容器的宽度——窄屏该收哪些列靠它判断。
+  listWidth: 1200,
+  // 当前列组合的指纹。变了就得重建所有行（列的数量/顺序变了）。
+  columnSignature: "",
+  // 全局速度（推送通道给的）。received = false 表示还没收到过推送。
+  globalSpeed: { bytes_per_sec: 0, limit_bytes_per_sec: 0, active_count: 0, received: false },
+  // 每个任务最近 60 秒的速度采样——详情面板的速度曲线用它。
+  speedSamples: {},
+  // 后端给的速度历史（有 get_speed_history 时优先用它）。
+  speedHistory: {},
+  // 每个任务的错误详情（get_task_error 的结果）。
+  taskErrors: {},
 };
 
 const api = () => window.pywebview?.api;
@@ -38,6 +54,21 @@ function t(key, fallback) {
   if (s !== undefined && s !== null) return s;
   if (fallback !== undefined) return fallback;
   return key;
+}
+
+// 带占位符的文案。
+//
+// **占位符是 Swift 风格的 \(0)**——文案表（契约里的键）一直这么写，
+// 前端原来没有替换过，所以这类文案在前端是显示不出来的。
+// 这里按位置替换：tf("addSheetProbeSize", fmtSize(size))。
+function tf(key, ...args) {
+  const s = State.strings[key];
+  if (s === undefined || s === null) return key;
+  return s.replace(/\\\(\d+\)/g, (m) => {
+    const idx = Number(m.slice(2, -1));
+    const value = args[idx];
+    return value === undefined || value === null ? m : String(value);
+  });
 }
 
 function applyStaticI18n(root) {
@@ -154,15 +185,76 @@ const STATE_META = {
   awaiting_new_link:{ key: "stateAwaitingLink",     cls: "badge-awaiting_new_link",icon: "refresh" },
 };
 
+// 分类的显示元数据。
+//
+// **分类名走 i18n**（key 字段）——原来直接把英文枚举值首字母大写
+// 显示（"Video" / "Music"），中文界面下夹着英文很难看，而且
+// 换语言时那几行不变。
 const CATEGORY_META = {
-  video:     { icon: "video",    color: "#DB2777" },
-  music:     { icon: "music",    color: "#9333EA" },
-  pictures:  { icon: "image",    color: "#0D9488" },
-  archives:  { icon: "archive",  color: "#EA580C" },
-  documents: { icon: "file",     color: "#2563EB" },
-  software:  { icon: "package",  color: "#4F46E5" },
-  other:     { icon: "help",     color: "#64748B" },
+  video:     { icon: "video",    color: "#DB2777", key: "categoryVideo" },
+  music:     { icon: "music",    color: "#9333EA", key: "categoryMusic" },
+  pictures:  { icon: "image",    color: "#0D9488", key: "categoryPictures" },
+  archives:  { icon: "archive",  color: "#EA580C", key: "categoryArchives" },
+  documents: { icon: "file",     color: "#2563EB", key: "categoryDocuments" },
+  software:  { icon: "package",  color: "#4F46E5", key: "categorySoftware" },
+  other:     { icon: "help",     color: "#64748B", key: "categoryOther" },
 };
+
+// 分类的本地化名。
+function categoryLabel(cat) {
+  const meta = CATEGORY_META[cat];
+  return meta ? t(meta.key) : (cat || "");
+}
+
+// ============ 任务列表的列 ============
+//
+// **列的显隐是用户可控的**（规格 §2.1）：列选择器里勾掉的列不渲染，
+// 选择存进 settings.hidden_columns，下次启动还在。
+//
+// 窄屏自动收起的列写在 responsiveHiddenColumns() 里——它跟
+// style.css 的容器查询阈值是一套的，改一边要改另一边。
+const COLUMN_DEFS = [
+  { id: "name",     labelKey: "listColumnName",     widthVar: "--w-name",     sortKey: "filename" },
+  { id: "category", labelKey: "listColumnCategory", widthVar: "--w-category", sortKey: "category" },
+  { id: "state",    labelKey: "listColumnState",    widthVar: "--w-state",    sortKey: "state" },
+  { id: "progress", labelKey: "listColumnProgress", widthVar: "--w-progress", sortKey: "progress" },
+  { id: "size",     labelKey: "listColumnSize",     widthVar: "--w-size",     sortKey: "size" },
+  { id: "speed",    labelKey: "listColumnSpeed",    widthVar: "--w-speed",    sortKey: "speed" },
+  { id: "eta",      labelKey: "listColumnEta",      widthVar: "--w-eta",      sortKey: "eta" },
+  { id: "actions",  labelKey: null,                 widthVar: "--w-actions" },
+];
+
+// 窄屏自动收起的列。跟 style.css 的 @container 阈值一致。
+function responsiveHiddenColumns(width) {
+  const hidden = new Set();
+  if (width <= 1179) hidden.add("eta");
+  if (width <= 1039) hidden.add("size");
+  if (width <= 879) { hidden.add("speed"); hidden.add("size"); hidden.add("eta"); }
+  if (width <= 639) {
+    hidden.add("progress"); hidden.add("size");
+    hidden.add("speed"); hidden.add("eta"); hidden.add("category");
+  }
+  return hidden;
+}
+
+// 当前应该渲染哪些列。
+function visibleColumns() {
+  const responsive = responsiveHiddenColumns(State.listWidth);
+  const userHidden = State.hiddenColumns || [];
+  return COLUMN_DEFS.filter((c) => !responsive.has(c.id) && !userHidden.includes(c.id));
+}
+
+// 列模板（grid-template-columns）。宽度用 CSS 变量表达，
+// 窄屏时容器查询改那些变量，表头和行一起变，不会错位。
+function columnTemplate(columns) {
+  return columns.map((c) => `var(${c.widthVar})`).join(" ");
+}
+
+// 列组合变了没。变了就得重建所有行——列的数量/顺序变了，
+// 光更新文本不够。
+function columnSignature(columns) {
+  return columns.map((c) => c.id).join("|");
+}
 
 // ============ 侧边栏 ============
 
@@ -201,19 +293,22 @@ function renderSidebar() {
     nav.appendChild(btn);
   });
 
-  // 分类
+  // 分类。
+  //
+  // **计数是 0 的分类也要显示**（规格 §2.1 把分类列成固定条目）。
+  // 原来「0 个就藏起来」看着清爽，但用户想找「我的视频在哪」时，
+  // 列表里空着一条分类不见了，反而得猜是不是分类功能坏了。
   nav.appendChild(el("div", { class: "nav-group-label", text: t("sidebarCategories") }));
   Object.keys(CATEGORY_META).forEach((cat) => {
     const n = State.tasks.filter((x) => x.category === cat).length;
-    if (n === 0) return;
     const meta = CATEGORY_META[cat];
     const btn = el("button", {
       class: "nav-item" + (State.categoryFilter === cat ? " active" : ""),
-      title: cat,
+      title: categoryLabel(cat),
       onclick: () => { setView("downloads"); State.filter = "all"; State.categoryFilter = cat; render(); },
     }, [
       icon(meta.icon),
-      el("span", { class: "nav-text", text: cat.charAt(0).toUpperCase() + cat.slice(1) }),
+      el("span", { class: "nav-text", text: categoryLabel(cat) }),
       el("span", { class: "nav-count", text: String(n) }),
     ]);
     nav.appendChild(btn);
@@ -240,12 +335,31 @@ function renderToolbar() {
   const actions = document.getElementById("toolbarActions");
   clear(title); clear(actions);
 
+  // 设置和主题是全局的——哪个视图都放得下，也省得用户为了改个
+  // 设置先翻到侧栏底部找按钮（那个按钮原来藏在侧栏脚注里）。
+  const settingsBtn = el("button", {
+    class: "btn", title: t("settingsWindowTitle"),
+    onclick: () => setView("settings"),
+  }, [icon("settings"), el("span", { class: "btn-label", text: t("settingsWindowTitle") })]);
+
+  // 主题：system → light → dark → system。
+  const themeBtn = el("button", {
+    class: "btn", title: t("themeToggle"),
+    onclick: async () => {
+      const next = nextTheme(State.theme);
+      applyTheme(next);
+      await saveSettings({ theme: next });
+      render();
+    },
+  }, [icon("theme"), el("span", { class: "btn-label", text: themeLabel(State.theme) })]);
+
   if (State.view === "downloads") {
     title.appendChild(el("span", { class: "toolbar-title", text: t("mainDownloads") }));
+
     actions.appendChild(el("button", {
-      class: "btn btn-primary", title: t("toolbarAddURL"),
+      class: "btn btn-primary", title: t("toolbarNewTask"),
       onclick: openAddDialog,
-    }, [icon("plus"), el("span", { class: "btn-label", text: t("toolbarAddURL") })]));
+    }, [icon("plus"), el("span", { class: "btn-label", text: t("toolbarNewTask") })]));
 
     actions.appendChild(el("button", {
       class: "btn", title: t("toolbarPauseAll"),
@@ -260,18 +374,101 @@ function renderToolbar() {
     actions.appendChild(el("button", {
       class: "btn", title: t("toolbarClearCompleted"),
       onclick: async () => { await api()?.clear_completed(); toast(t("toolbarClearCompleted")); },
-    }, [icon("trash"), el("span", { class: "btn-label", text: t("toolbarClearCompleted") })]));
+    }, [icon("check"), el("span", { class: "btn-label", text: t("toolbarClearCompleted") })]));
+
+    // 删除：删掉当前选中的任务。没选中就禁用——
+    // 让用户点一个不知道会删什么的按钮更糟。
+    const selected = State.tasks.find((x) => x.id === State.selectedTaskId);
+    actions.appendChild(el("button", {
+      class: "btn", title: t("toolbarDeleteSelected"),
+      disabled: !selected,
+      onclick: async () => {
+        if (!selected) return;
+        await api()?.remove_task(selected.id, false);
+        State.selectedTaskId = null;
+        toast(t("toolbarDeleteSelected"));
+        await refreshTasks();
+      },
+    }, [icon("trash"), el("span", { class: "btn-label", text: t("toolbarDeleteSelected") })]));
+
+    // 剪贴板监控开关。开着的时候按钮高亮，用户一眼能看出
+    // 「链接还是会被自动接管的」。
+    const capture = State.settings.capture_clipboard !== false;
+    actions.appendChild(el("button", {
+      class: "btn" + (capture ? " btn-active" : ""),
+      title: t("toolbarClipboardMonitor"),
+      onclick: async () => {
+        const next = !capture;
+        await saveSettings({ capture_clipboard: next });
+        render();
+      },
+    }, [icon("clipboard"), el("span", { class: "btn-label", text: t("toolbarClipboardMonitor") })]));
+
+    actions.appendChild(settingsBtn);
+    actions.appendChild(themeBtn);
   } else if (State.view === "history") {
     title.appendChild(el("span", { class: "toolbar-title", text: t("sidebarHistory") }));
     actions.appendChild(el("button", {
       class: "btn btn-danger", title: t("historyClearAll"),
       onclick: async () => { await api()?.clear_history(); toast(t("historyClearAll")); },
     }, [icon("trash"), el("span", { class: "btn-label", text: t("historyClearAll") })]));
+    actions.appendChild(settingsBtn);
+    actions.appendChild(themeBtn);
   } else if (State.view === "schedule") {
     title.appendChild(el("span", { class: "toolbar-title", text: t("scheduleTitle") }));
+    actions.appendChild(settingsBtn);
+    actions.appendChild(themeBtn);
   } else if (State.view === "settings") {
     title.appendChild(el("span", { class: "toolbar-title", text: t("settingsWindowTitle") }));
+    actions.appendChild(themeBtn);
   }
+}
+
+// ============ 状态栏 ============
+
+// 全局速度 / 活跃任务数 / 限速状态（规格 §2.1）。
+//
+// **推送没来的时候用任务列表自己算**——不然推送通道不可用时
+// 状态栏永远显示 0，看着像坏了。
+function globalSpeed() {
+  const pushed = State.globalSpeed;
+  if (pushed && pushed.received) return pushed;
+  let speed = 0;
+  let active = 0;
+  for (const task of State.tasks) {
+    if (task.state === "downloading") {
+      speed += Number(task.speed_bytes_per_sec) || 0;
+      active += 1;
+    } else if (task.state === "queued") {
+      active += 1;
+    }
+  }
+  return {
+    bytes_per_sec: speed,
+    limit_bytes_per_sec: Number(State.settings.bandwidth_bytes_per_sec) || 0,
+    active_count: active,
+  };
+}
+
+function renderStatusBar() {
+  const speedEl = document.getElementById("statusSpeed");
+  const activeEl = document.getElementById("statusActive");
+  const limitEl = document.getElementById("statusLimit");
+  if (!speedEl || !activeEl || !limitEl) return;
+
+  const g = globalSpeed();
+  clear(speedEl);
+  speedEl.appendChild(el("span", { text: t("statusBarSpeed") + " " }));
+  speedEl.appendChild(el("b", { text: fmtRate(g.bytes_per_sec) }));
+  clear(activeEl);
+  activeEl.appendChild(el("span", { text: t("statusBarActive") + " " }));
+  activeEl.appendChild(el("b", { text: String(g.active_count || 0) }));
+
+  const limit = Number(g.limit_bytes_per_sec || 0);
+  limitEl.textContent = limit > 0
+    ? `${t("statusBarLimit")} ${fmtRate(limit)}`
+    : t("statusBarNoLimit");
+  limitEl.className = "status-item" + (limit > 0 ? " status-limit-on" : "");
 }
 
 // ============ 下载列表 ============
@@ -300,16 +497,26 @@ function filteredTasks() {
 // 按指定键排序。
 //
 // Swift 对照：App/MainWindow/DownloadListView.swift:254-256 的
-// KeyPathComparator。排序键四个：filename / totalBytesOrZero /
-// speedBytesPerSec / state。
+// KeyPathComparator。Python 版多排几列（规格 §2.1）：名称 / 大小 /
+// 进度 / 速度 / 剩余时间 / 状态 / 分类。
 //
 // **未知大小永远排最后**（不管升序还是降序）。Swift 的
 // `totalBytesOrZero` 用 0 代表「不知道」，但 0 在升序时排最前，
 // 跟注释写的 "so columns sort unknown to the end" 不符——这里按
 // 注释的意图实现：未知大小的沉到底。
+//
+// 这个函数被 Node 侧的测试单独抠出来跑（tests/test_sort_js.mjs），
+// 所以**不能引用函数外面的东西**——表都写在函数里。
 function sortTasks(list, key, asc) {
   const dir = asc ? 1 : -1;
   const stateOrder = { downloading: 0, queued: 1, paused: 2, awaiting_new_link: 3, failed: 4, completed: 5, cancelled: 6 };
+  const categoryOrder = { documents: 0, music: 1, video: 2, archives: 3, software: 4, other: 5, pictures: 6 };
+  const nameOf = (t) => (t.filename || t.url || "");
+  // 剩余时间。算不出来（不知道大小 / 没速度 / 已完成）的沉底——
+  // 跟「未知大小沉底」一个道理，不然一列 "—" 混在中间没法看。
+  const etaOf = (t) => (t.total_bytes && t.speed_bytes_per_sec > 0 && t.state !== "completed")
+    ? (t.total_bytes - t.bytes_done) / t.speed_bytes_per_sec : null;
+  const progressOf = (t) => (t.total_bytes > 0 ? (t.bytes_done || 0) / t.total_bytes : 0);
   return list.slice().sort((a, b) => {
     if (key === "size") {
       const av = a.total_bytes;
@@ -330,9 +537,27 @@ function sortTasks(list, key, asc) {
       const bv = stateOrder[b.state] ?? 9;
       return (av - bv) * dir;
     }
+    if (key === "category") {
+      const av = categoryOrder[a.category] ?? 9;
+      const bv = categoryOrder[b.category] ?? 9;
+      // 同一分类里按名字排——不然同一类的任务顺序会乱跳。
+      if (av === bv) return nameOf(a).localeCompare(nameOf(b));
+      return (av - bv) * dir;
+    }
+    if (key === "progress") {
+      return (progressOf(a) - progressOf(b)) * dir;
+    }
+    if (key === "eta") {
+      const av = etaOf(a);
+      const bv = etaOf(b);
+      if (av === null && bv === null) return 0;
+      if (av === null) return 1;
+      if (bv === null) return -1;
+      return (av - bv) * dir;
+    }
     // filename
-    const av = (a.filename || a.url || "");
-    const bv = (b.filename || b.url || "");
+    const av = nameOf(a);
+    const bv = nameOf(b);
     return av.localeCompare(bv) * dir;
   });
 }
@@ -351,17 +576,78 @@ function toggleSort(key) {
 // 重绘排序表头。
 //
 // 表头不是一次性的——排序状态会变（用户点了别的列、或者又点了
-// 同一个列换升降序），所以每次渲染列表都重画一遍。
+// 同一个列换升降序），列的显隐也会变，所以每次渲染列表都重画一遍。
 function updateSortHeader(container) {
   if (!container) return;
   clear(container);
-  container.appendChild(sortHeaderCell("filename", t("listColumnName"), false));
-  container.appendChild(sortHeaderCell("state", t("listColumnState"), false));
-  container.appendChild(el("div"));  // 进度列，没有排序键
-  container.appendChild(sortHeaderCell("size", t("listColumnSize"), true));
-  container.appendChild(sortHeaderCell("speed", t("listColumnSpeed"), true));
-  container.appendChild(el("div"));  // ETA 列
-  container.appendChild(el("div"));  // 操作列
+  visibleColumns().forEach((col) => {
+    if (col.id === "actions") { container.appendChild(el("div")); return; }
+    // 大小 / 速度 / 剩余时间右对齐，跟行里的数字列对齐。
+    const right = col.id === "size" || col.id === "speed" || col.id === "eta";
+    container.appendChild(sortHeaderCell(col.sortKey, t(col.labelKey), right));
+  });
+}
+
+// 列选择器：勾掉的列不渲染。
+//
+// 选择存进 settings.hidden_columns——用户下次打开还想这么看。
+function renderColumnPicker(host) {
+  let panel = document.getElementById("colPicker");
+  if (!panel) {
+    panel = el("div", { class: "col-picker", id: "colPicker" });
+    host.appendChild(panel);
+  }
+  // 只在勾选状态变了才重画内容——推送每 0.7 秒来一次，
+  // 每次都重建复选框会打断用户正在点的那一个。
+  const signature = (State.hiddenColumns || []).slice().sort().join("|");
+  if (panel.dataset.signature === signature) return panel;
+  panel.dataset.signature = signature;
+  clear(panel);
+  COLUMN_DEFS.filter((c) => c.labelKey).forEach((col) => {
+    const checked = !(State.hiddenColumns || []).includes(col.id);
+    const box = el("input", { type: "checkbox", checked });
+    box.addEventListener("change", () => {
+      const hidden = new Set(State.hiddenColumns || []);
+      if (box.checked) hidden.delete(col.id);
+      else hidden.add(col.id);
+      State.hiddenColumns = Array.from(hidden);
+      saveSettings({ hidden_columns: State.hiddenColumns });
+      render();
+    });
+    panel.appendChild(el("label", { class: "col-picker-item" }, [
+      box, el("span", { text: t(col.labelKey) }),
+    ]));
+  });
+  return panel;
+}
+
+// 切主题：system → light → dark → system。
+//
+// 主题存进 settings.theme。**"system" 时把 data-theme 属性删掉**——
+// 让 prefers-color-scheme 说话，比写死一个值更对：系统半夜切成
+// 深色，应用跟着变。
+const THEME_CYCLE = ["system", "light", "dark"];
+
+function applyTheme(theme) {
+  const value = theme || "system";
+  State.theme = value;
+  if (value === "system") {
+    delete document.documentElement.dataset.theme;
+  } else {
+    document.documentElement.dataset.theme = value;
+  }
+}
+
+function nextTheme(theme) {
+  const idx = THEME_CYCLE.indexOf(theme || "system");
+  return THEME_CYCLE[(idx + 1) % THEME_CYCLE.length];
+}
+
+function themeLabel(theme) {
+  const value = theme || "system";
+  if (value === "light") return t("themeLight");
+  if (value === "dark") return t("themeDark");
+  return t("themeSystem");
 }
 
 // 一个可点击的表头单元格。
@@ -395,6 +681,13 @@ function buildRow(task) {
     el("div", { class: "trunc", style: "min-width:0;flex:1" }, [title, sub, chip]),
   ]);
 
+  // 分类列。分类名走 i18n（categoryLabel），不显示英文枚举值。
+  const catLabel = el("span", { text: categoryLabel(task.category) });
+  const categoryCell = el("div", { class: "cell-category" }, [
+    el("span", { style: `color:${catMeta.color};display:flex;flex:none` }, [icon(catMeta.icon)]),
+    catLabel,
+  ]);
+
   const badgeIcon = icon("clock");
   const badgeText = el("span", { text: "" });
   const badge = el("span", { class: "badge" }, [badgeIcon, badgeText]);
@@ -417,13 +710,25 @@ function buildRow(task) {
   const btnC = el("button", { class: "btn" }, [icon("more")]);
   const actions = el("div", { class: "row-actions" }, [btnA, btnB, btnC]);
 
-  const row = el("div", { class: "row" }, [
-    nameBox, badge, progress, sizeCell, speedCell, etaCell, actions,
-  ]);
+  // 列的显隐是用户定的——按当前可见的列拼格子。
+  // 列集合变了整行都要重建（列的顺序/数量变了），所以这里每次
+  // 都按当前可见列表重新拼。
+  const cells = {
+    name: nameBox,
+    category: categoryCell,
+    state: badge,
+    progress: progress,
+    size: sizeCell,
+    speed: speedCell,
+    eta: etaCell,
+    actions: actions,
+  };
+  const row = el("div", { class: "row" }, visibleColumns().map((c) => cells[c.id]));
 
   const refs = {
     node: row, title, sub, chip, badge, badgeIcon, badgeText,
     fill, pctText, sizeCell, speedCell, etaCell,
+    categoryCell, catLabel,
     btnA, btnB, btnC, catIcon,
     state: null, taskId: task.id,
   };
@@ -457,6 +762,13 @@ function updateRow(refs, task) {
   if (refs.catIcon.style.color !== catMeta.color) {
     refs.catIcon.style.color = catMeta.color;
     refs.catIcon.firstChild.replaceWith(icon(catMeta.icon));
+  }
+  // 分类列。分类名是 i18n 的——换语言后这一格也得跟着变。
+  const label = categoryLabel(task.category);
+  if (refs.catLabel.textContent !== label) {
+    refs.catLabel.textContent = label;
+    refs.categoryCell.firstChild.firstChild.replaceWith(icon(catMeta.icon));
+    refs.categoryCell.firstChild.style.color = catMeta.color;
   }
 
   refs.title.textContent = task.filename || task.url;
@@ -530,6 +842,16 @@ const _rowCache = new Map();   // task_id -> {node, refs}
 function renderDownloads() {
   const view = document.getElementById("viewDownloads");
   const tasks = filteredTasks();
+  const columns = visibleColumns();
+
+  // 列组合变了（用户改了列的显隐，或者窗口窄了）——所有行都得
+  // 重建：格子的数量和顺序都变了，光改文本对不上。
+  const signature = columnSignature(columns);
+  if (signature !== State.columnSignature) {
+    State.columnSignature = signature;
+    for (const entry of _rowCache.values()) entry.node.remove();
+    _rowCache.clear();
+  }
 
   // 空状态
   let wrap = view.querySelector(".list-wrap");
@@ -552,10 +874,28 @@ function renderDownloads() {
   if (!wrap) {
     clear(view);
     wrap = el("div", { class: "list-wrap" });
-    wrap.appendChild(el("div", { class: "sort-header" }));
+    const head = el("div", { class: "list-head" }, [el("div", { class: "sort-header" })]);
+    const pickerBtn = el("button", {
+      class: "col-picker-btn", title: t("columnPickerTitle"),
+      onclick: (e) => {
+        e.stopPropagation();
+        const panel = document.getElementById("colPicker");
+        if (panel) panel.hidden = !panel.hidden;
+      },
+    }, [icon("columns", "icon-sm")]);
+    head.appendChild(pickerBtn);
+    wrap.appendChild(head);
     wrap.appendChild(el("div", { class: "list" }));
     view.appendChild(wrap);
+    // 容器宽度变了要重算「窄屏收哪些列」。
+    observeListWidth(wrap);
   }
+
+  renderColumnPicker(wrap);
+
+  // 列模板：表头和行必须用同一个，否则对不齐。
+  wrap.style.setProperty("--row-cols", columnTemplate(columns));
+
   // 表头每次重绘——排序状态（哪一列、升降序）会变。
   updateSortHeader(wrap.querySelector(".sort-header"));
   const list = wrap.querySelector(".list");
@@ -586,6 +926,36 @@ function renderDownloads() {
       _rowCache.delete(id);
     }
   }
+}
+
+// 盯着列表容器的宽度。窄了要收列，宽了要把列放回来。
+//
+// 用 ResizeObserver 而不是 window.resize——详情面板打开时主区会
+// 变窄，但窗口尺寸没变，只有容器尺寸变了。
+let _listObserver = null;
+
+function observeListWidth(wrap) {
+  if (typeof ResizeObserver === "undefined") return;
+  if (!_listObserver) {
+    _listObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const width = entry.contentRect.width;
+        if (Math.abs(width - State.listWidth) < 1) continue;
+        State.listWidth = width;
+        if (State.view === "downloads") renderDownloads();
+      }
+    });
+  }
+  // 列表被清空再填上时会换一个 wrap 节点——要重新盯着新的那个，
+  // 不然窄屏收列的逻辑就失联了。
+  _listObserver.disconnect();
+  _listObserver.observe(wrap);
+  // 初始宽度取**内容盒**的宽度——容器查询（@container listarea）
+  // 量的是内容盒，两边得用同一个口径，不然临界点会差一截。
+  const pad = getComputedStyle(wrap);
+  State.listWidth = wrap.clientWidth
+    - (parseFloat(pad.paddingLeft) || 0)
+    - (parseFloat(pad.paddingRight) || 0);
 }
 
 // ============ 过期链接横幅 ============
@@ -625,12 +995,113 @@ function renderBanner() {
   ]));
   if (waiting.length > 1) {
     slot.appendChild(el("div", { class: "banner", style: "background:var(--neutral-soft);color:var(--text-secondary);border-color:transparent" }, [
-      el("span", { class: "banner-text", text: `另有 ${waiting.length - 1} 个任务等待新链接` }),
+      el("span", { class: "banner-text", text: tf("expiredMoreWaiting", waiting.length - 1) }),
     ]));
   }
 }
 
 // ============ 详情抽屉 ============
+
+// 分块进度可视化：一条横杠，一段一个分片，按完成度上色。
+function renderChunkSegments(chunks) {
+  const wrap = el("div", { class: "chunk-segments" });
+  chunks.forEach((c) => {
+    const size = Number(c.size || 0);
+    const done = Number(c.bytes_done || 0);
+    let cls = "chunk-seg";
+    if (size > 0 && done >= size) cls += " done";
+    else if (done > 0) cls += " partial";
+    wrap.appendChild(el("span", { class: cls }));
+  });
+  return wrap;
+}
+
+// 速度曲线：最近 60 秒。
+//
+// **优先用后端给的 get_speed_history**；后端没实现时用前端自己
+// 攒的采样（推送/轮询每来一次记一个点）。两条路的数据形状一样：
+// [{t: 时间戳, v: 字节/秒}]。
+function speedSeries(task) {
+  const history = State.speedHistory[task.id];
+  if (history && history.length) {
+    return history.map((p) => ({ t: Number(p.t) || 0, v: Number(p.v ?? p.bytes_per_sec ?? p.speed_bytes_per_sec) || 0 }));
+  }
+  const samples = State.speedSamples[task.id] || [];
+  // 任务停了之后采样点不会再被清理——读的时候顺手砍掉 60 秒前的。
+  const cutoff = Date.now() - 60000;
+  return samples.filter((p) => p.t >= cutoff);
+}
+
+// 记一个速度采样点。环形缓冲——只留最近 60 秒。
+function recordSpeedSample(task) {
+  if (!task || !task.id) return;
+  const now = Date.now();
+  let arr = State.speedSamples[task.id];
+  if (!arr) { arr = []; State.speedSamples[task.id] = arr; }
+  arr.push({ t: now, v: Number(task.speed_bytes_per_sec) || 0 });
+  const cutoff = now - 60000;
+  while (arr.length && arr[0].t < cutoff) arr.shift();
+}
+
+// 画速度曲线。内联 SVG，不用 canvas——数据点就几十个。
+function renderSpeedCurve(task) {
+  const points = speedSeries(task);
+  const W = 300;
+  const H = 72;
+  if (points.length < 2) {
+    return el("div", { class: "speed-chart-empty", text: t("detailSpeedCurveEmpty") });
+  }
+
+  const max = Math.max(1, ...points.map((p) => p.v));
+  const t0 = points[0].t;
+  const t1 = points[points.length - 1].t;
+  const span = Math.max(1, t1 - t0);
+  const xs = points.map((p) => ((p.t - t0) / span) * (W - 2) + 1);
+  const ys = points.map((p) => H - 3 - (p.v / max) * (H - 8));
+
+  const poly = points.map((_, i) => `${xs[i].toFixed(1)},${ys[i].toFixed(1)}`).join(" ");
+  const area = `1,${H - 1} ${poly} ${xs[xs.length - 1].toFixed(1)},${H - 1}`;
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "speed-chart");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+
+  const add = (tag, attrs) => {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+    svg.appendChild(node);
+    return node;
+  };
+
+  add("line", { class: "grid-line", x1: 0, y1: H - 1, x2: W, y2: H - 1 });
+  add("polygon", { class: "area", points: area });
+  add("polyline", { class: "curve", points: poly });
+
+  const peak = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  peak.setAttribute("class", "axis-text");
+  peak.setAttribute("x", "3");
+  peak.setAttribute("y", "10");
+  peak.textContent = fmtRate(max);
+  svg.appendChild(peak);
+
+  return svg;
+}
+
+// 日志摘要。
+//
+// **引擎还没提供按任务的日志接口**——契约里也没有那个方法。
+// 这里用 get_task_error 的结果拼一行：有错显示错误，没有就显示
+// 「暂无错误」。别去调一个不存在的后端接口。
+function taskErrorSummary(task) {
+  const err = State.taskErrors[task.id];
+  if (err && err.message) {
+    const category = err.category ? `[${err.category}] ` : "";
+    return category + err.message;
+  }
+  if (task.error_message) return task.error_message;
+  return t("detailNoError");
+}
 
 function selectTask(taskId) {
   State.selectedTaskId = State.selectedTaskId === taskId ? null : taskId;
@@ -638,15 +1109,36 @@ function selectTask(taskId) {
   State.expandedChunks = null;
   render();
   // 分片明细单独取——列表接口不带它（省内存 + 省序列化）
-  if (State.selectedTaskId) loadTaskChunks(State.selectedTaskId);
+  if (State.selectedTaskId) loadTaskDetail(State.selectedTaskId);
 }
 
-async function loadTaskChunks(taskId) {
-  const chunks = await api()?.get_task_chunks(taskId);
-  if (!chunks || !chunks.length) return;
+// 取单个任务的详情：分片、错误、速度历史。
+//
+// 用契约里的 get_task_detail 一次拿全——分三次往返的话，详情面板
+// 会一块一块地填出来，看着像卡了。后端还没实现这个接口时退回
+// 旧的 get_task_chunks，至少分片表还在。
+async function loadTaskDetail(taskId) {
+  const backend = api();
+  let detail = null;
+  if (backend && typeof backend.get_task_detail === "function") {
+    try {
+      detail = await backend.get_task_detail(taskId);
+    } catch (err) {
+      detail = null;
+    }
+  }
   const task = State.tasks.find((x) => x.id === taskId);
   if (!task) return;
-  task.chunks = chunks;
+  if (detail) {
+    if (detail.chunks && detail.chunks.length) task.chunks = detail.chunks;
+    if (detail.error !== undefined) State.taskErrors[taskId] = detail.error || null;
+    if (detail.speed_history && detail.speed_history.length) {
+      State.speedHistory[taskId] = detail.speed_history;
+    }
+  } else if (backend && typeof backend.get_task_chunks === "function") {
+    const chunks = await backend.get_task_chunks(taskId);
+    if (chunks && chunks.length) task.chunks = chunks;
+  }
   if (State.selectedTaskId === taskId) renderDetail();
 }
 
@@ -688,7 +1180,12 @@ function renderDetail() {
   addMeta(t("detailTaskState"), t(meta.key));
   addMeta(t("detailDestination"), task.destination || "—", true);
   addMeta(t("detailSize"), fmtSize(task.total_bytes));
+  // 已下载 / 已上传。引擎给 bytes_done / uploaded_bytes。
+  addMeta(t("detailDownloaded"), fmtSize(task.bytes_done));
+  addMeta(t("detailUploaded"), fmtSize(task.uploaded_bytes));
   addMeta(t("detailSpeed"), fmtRate(task.speed_bytes_per_sec));
+  // 连接数：当前活跃的连接数（引擎的 active_connections）。
+  addMeta(t("detailConnections"), String(task.active_connections || 0));
   addMeta(t("detailETA"), task.total_bytes && task.speed_bytes_per_sec > 0
     ? fmtDuration((task.total_bytes - task.bytes_done) / task.speed_bytes_per_sec) : "—");
   if (task.speed_limit_bytes_per_sec > 0) {
@@ -697,7 +1194,19 @@ function renderDetail() {
   if (task.error_message) {
     addMeta(t("detailError"), task.error_message);
   }
+  // 日志摘要。引擎还没提供按任务的日志接口，这里用
+  // get_task_error 的结果拼一行——有错就显示错误，没有就显示
+  // 「暂无错误」。
+  const errSummary = taskErrorSummary(task);
+  addMeta(t("detailLogSummary"), errSummary);
   body.appendChild(metaList);
+
+  // 速度曲线（最近 60 秒）
+  body.appendChild(el("div", { class: "section-title" }, [
+    icon("gauge", "icon-sm"),
+    el("span", { text: t("detailSpeedCurve") }),
+  ]));
+  body.appendChild(renderSpeedCurve(task));
 
   // 分片
   if (task.chunks && task.chunks.length) {
@@ -711,6 +1220,16 @@ function renderDetail() {
       icon("layers", "icon-sm"),
       el("span", { text: `${t("detailShowChunks")} (${task.completed_chunks}/${task.chunk_count})` }),
     ]));
+    // 分块进度可视化：一段一个分片。
+    //
+    // **超过 256 段就不画了**——几百个 1px 的小段既看不清，
+    // 每次重绘还要重建几百个节点，纯浪费。给一行汇总就够了。
+    const CHUNK_SEGMENT_LIMIT = 256;
+    if (task.chunks.length <= CHUNK_SEGMENT_LIMIT) {
+      body.appendChild(renderChunkSegments(task.chunks));
+    } else {
+      body.appendChild(el("div", { class: "chunk-summary", text: tf("detailChunkSummary", task.chunks.length) }));
+    }
     const table = el("table", { class: "chunk-table" }, [
       el("thead", {}, [el("tr", {}, [
         el("th", { text: t("taskDetailChunkHeader") }),
@@ -842,7 +1361,7 @@ function renderSchedule() {
     err.textContent = "";
     const ts = new Date(timeInput.value).getTime() / 1000;
     const res = await api()?.add_schedule(urlInput.value, ts, noteInput.value);
-    if (!res?.ok) { err.textContent = res?.error || "失败"; return; }
+    if (!res?.ok) { err.textContent = res?.error || t("commonFailed"); return; }
     urlInput.value = ""; noteInput.value = "";
     await refreshSchedules();
     render();
@@ -925,6 +1444,10 @@ function renderSettings() {
       toggleRow(t("settingsToggleHideDockWhenWindowClosed"), "", "hide_dock_when_window_closed", null, s.hide_dock_when_window_closed),
       toggleRow(t("settingsToggleShowToolbarLabels"), "", "toolbar_show_labels", null, s.toolbar_show_labels),
       toggleRow(t("settingsToggleIgnoreSSL"), t("settingsIgnoreSSLHint"), "network_ignore_ssl", null, s.network_ignore_ssl),
+      // 主题。工具栏上也有一个快捷按钮，两边改的是同一个设置。
+      toggleRow(t("settingsTheme"), t("settingsThemeHint"), "theme",
+        [["system", t("themeSystem")], ["light", t("themeLight")], ["dark", t("themeDark")]],
+        s.theme || "system"),
     ]),
   ]);
   wrap.appendChild(general);
@@ -932,7 +1455,7 @@ function renderSettings() {
   // 默认
   const threadsInput = el("input", { class: "input", type: "number", min: "1", max: "128", value: String(s.threads_default) });
   threadsInput.addEventListener("change", () => {
-    api()?.update_settings({ threads_default: parseInt(threadsInput.value, 10) || 32 });
+    saveSettings({ threads_default: parseInt(threadsInput.value, 10) || 32 });
   });
   // 带宽限制：输入框按 KB/s 显示，写回时换算成 bytes/s。
   //
@@ -943,7 +1466,7 @@ function renderSettings() {
   const bandwidthInput = el("input", { class: "input", type: "number", min: "0", value: String(bandwidthKB) });
   bandwidthInput.addEventListener("change", () => {
     const kb = parseInt(bandwidthInput.value, 10) || 0;
-    api()?.update_settings({ bandwidth_bytes_per_sec: kb * 1024 });
+    saveSettings({ bandwidth_bytes_per_sec: kb * 1024 });
   });
 
   wrap.appendChild(el("div", { class: "setting-section" }, [
@@ -955,7 +1478,7 @@ function renderSettings() {
           el("input", {
             class: "slider", type: "range", min: "1", max: "128", value: String(s.threads_default),
             oninput: (e) => { threadsInput.value = e.target.value; },
-            onchange: (e) => api()?.update_settings({ threads_default: parseInt(e.target.value, 10) }),
+            onchange: (e) => saveSettings({ threads_default: parseInt(e.target.value, 10) }),
           }),
           threadsInput,
         ]),
@@ -968,6 +1491,58 @@ function renderSettings() {
         ]),
         el("div", { class: "field-hint", text: t("settingsBandwidthHint") }),
       ]),
+      // 同时活跃的任务数（契约 §2.4）。超出的任务排在队列里。
+      el("div", { class: "field", style: "margin-top:14px" }, [
+        el("label", { class: "field-label", text: t("settingsMaxConcurrent") }),
+        el("div", { class: "field-row" }, [
+          el("input", {
+            class: "input", type: "number", min: "1", max: "20",
+            value: String(s.max_concurrent_tasks || 5),
+            onchange: (e) => saveSettings({ max_concurrent_tasks: parseInt(e.target.value, 10) || 5 }),
+          }),
+        ]),
+        el("div", { class: "field-hint", text: t("settingsMaxConcurrentHint") }),
+      ]),
+      // 初始连接数 / 分片上限（契约 §2.5 的动态分段）
+      el("div", { class: "field", style: "margin-top:14px" }, [
+        el("label", { class: "field-label", text: t("settingsInitialConnections") }),
+        el("div", { class: "field-row" }, [
+          el("input", {
+            class: "input", type: "number", min: "1", max: "32",
+            value: String(s.initial_connections || 2),
+            onchange: (e) => saveSettings({ initial_connections: parseInt(e.target.value, 10) || 2 }),
+          }),
+          el("input", {
+            class: "input", type: "number", min: "1", max: "128",
+            value: String(s.max_chunk_count || 32),
+            onchange: (e) => saveSettings({ max_chunk_count: parseInt(e.target.value, 10) || 32 }),
+          }),
+        ]),
+        el("div", { class: "field-hint", text: t("settingsChunkLimitsHint") }),
+      ]),
+    ]),
+  ]));
+
+  // 网络：全局代理（契约 §6 的 proxy_url / proxy_scheme）
+  const proxyInput = el("input", {
+    class: "input", type: "text", value: s.proxy_url || "",
+    placeholder: "http://127.0.0.1:7890",
+  });
+  proxyInput.addEventListener("change", () => saveSettings({ proxy_url: proxyInput.value.trim() }));
+  const proxyScheme = el("select", {
+    class: "select",
+    onchange: (e) => saveSettings({ proxy_scheme: e.target.value }),
+  }, ["http", "https", "socks4", "socks5"].map((v) =>
+    el("option", { value: v, text: v, selected: (s.proxy_scheme || "http") === v })));
+
+  wrap.appendChild(el("div", { class: "setting-section" }, [
+    el("div", { class: "setting-section-title", text: t("settingsSectionNetwork") }),
+    el("div", { class: "card" }, [
+      el("div", { class: "field" }, [
+        el("label", { class: "field-label", text: t("settingsGlobalProxy") }),
+        el("div", { class: "field-row" }, [proxyInput, proxyScheme]),
+        el("div", { class: "field-hint", text: t("settingsGlobalProxyHint") }),
+      ]),
     ]),
   ]));
 
@@ -978,7 +1553,7 @@ function renderSettings() {
       el("div", { class: "setting-toggle-text" }, [
         el("div", { class: "setting-toggle-label cat-label" }, [
           icon(meta.icon, "icon-sm"),
-          el("span", { text: key.charAt(0).toUpperCase() + key.slice(1) }),
+          el("span", { text: categoryLabel(key) }),
         ]),
       ]),
     ]));
@@ -1001,7 +1576,7 @@ function renderSettings() {
         el("label", { class: "field-label", text: t("settingsUpdateChannel") }),
         el("select", {
           class: "select",
-          onchange: (e) => api()?.update_settings({ update_channel: e.target.value }),
+          onchange: (e) => saveSettings({ update_channel: e.target.value }),
         }, [
           el("option", { value: "stable", text: t("settingsUpdateStable"), selected: s.update_channel === "stable" }),
           el("option", { value: "pre", text: t("settingsUpdatePrerelease"), selected: s.update_channel === "pre" }),
@@ -1036,6 +1611,9 @@ function toggleRow(label, hint, key, options, value) {
   ]);
 
   if (options) {
+    // 选项可以是字符串，也可以是 [值, 显示文字] 的二元组。
+    // 二元组是给「值和显示文字对不上」的场合用的——比如主题的值
+    // 是 system / light / dark，显示的却是「跟随系统 / 浅色 / 深色」。
     const sel = el("select", {
       class: "select", style: "width:auto;min-width:120px",
       onchange: async (e) => {
@@ -1043,11 +1621,22 @@ function toggleRow(label, hint, key, options, value) {
           const res = await api()?.set_language(e.target.value);
           if (res?.translations) { State.strings = res.translations; State.locale = e.target.value; applyStaticI18n(); }
         } else {
-          api()?.update_settings({ [key]: e.target.value });
+          // 主题要立刻生效——等一次往返用户会以为没点上。
+          if (key === "theme") applyTheme(e.target.value);
+          await saveSettings({ [key]: e.target.value });
         }
         render();
       },
-    }, options.map((o) => el("option", { value: o, text: o === "system" ? t("settingsLanguageSystem") : (o === "zh-Hans" ? "简体中文" : "English"), selected: o === value })));
+    }, options.map((o) => {
+      const val = Array.isArray(o) ? o[0] : o;
+      let text;
+      if (Array.isArray(o)) text = o[1];
+      else if (o === "system") text = t("settingsLanguageSystem");
+      else if (o === "zh-Hans") text = t("settingsLanguageZh");
+      else if (o === "en") text = "English";
+      else text = o;
+      return el("option", { value: val, text, selected: val === value });
+    }));
     row.appendChild(sel);
   } else {
     const input = el("input", { type: "checkbox", checked: !!value });
@@ -1055,7 +1644,7 @@ function toggleRow(label, hint, key, options, value) {
       if (key === "__openAtLogin") {
         await api()?.set_open_at_login(input.checked);
       } else {
-        await api()?.update_settings({ [key]: input.checked });
+        await saveSettings({ [key]: input.checked });
         if (key === "toolbar_show_labels") {
           State.showToolbarLabels = input.checked;
           document.body.classList.toggle("hide-toolbar-labels", !input.checked);
@@ -1080,7 +1669,7 @@ function renderSiteRulesSection() {
   const add = async () => {
     err.textContent = "";
     const res = await api()?.add_site_rule(host.value, referer.value, ua.value, cookie.value, user.value, pass.value);
-    if (!res?.ok) { err.textContent = res?.error || "失败"; return; }
+    if (!res?.ok) { err.textContent = res?.error || t("commonFailed"); return; }
     host.value = referer.value = ua.value = cookie.value = user.value = pass.value = "";
     State.siteRules = res.rules || [];
     render();
@@ -1139,7 +1728,7 @@ function renderLogsSection() {
 
   const levelSel = el("select", {
     class: "select",
-    onchange: (e) => api()?.update_settings({ logs_level: parseInt(e.target.value, 10) }),
+    onchange: (e) => saveSettings({ logs_level: parseInt(e.target.value, 10) }),
   }, [
     ["DEBUG", 0], ["INFO", 1], ["NOTICE", 2], ["WARNING", 3], ["ERROR", 4],
   ].map(([name, val]) => el("option", { value: String(val), text: name, selected: s.logs_level === val })));
@@ -1152,7 +1741,7 @@ function renderLogsSection() {
 
   const numField = (label, key, value, min) => {
     const input = el("input", { class: "input", type: "number", min: String(min), value: String(value) });
-    input.addEventListener("change", () => api()?.update_settings({ [key]: parseInt(input.value, 10) || min }));
+    input.addEventListener("change", () => saveSettings({ [key]: parseInt(input.value, 10) || min }));
     return el("div", { class: "field", style: "margin-top:12px" }, [
       el("label", { class: "field-label", text: label }),
       input,
@@ -1208,36 +1797,340 @@ function closeModal() {
   document.getElementById("modalRoot").hidden = true;
 }
 
-function openAddDialog() {
-  const url = el("input", { class: "input", placeholder: "https://example.com/file.zip" });
-  const name = el("input", { class: "input", placeholder: t("addSheetFilenameHint") });
-  const err = el("div", { class: "modal-error" });
+// ============ 新建任务对话框（规格 §2.2） ============
+//
+// 结构在 index.html 里（静态），这里只管行为。
+//
+// **解析失败不是终态**——URL 探测失败时对话框不关，错误显示在
+// URL 字段下面，用户改完 URL 可以点「重新解析」再来一次。
+// 原来那种「填错就关窗」的做法，用户得重新填一遍所有字段。
 
-  const submit = async () => {
-    err.textContent = "";
-    const res = await api()?.add_url(url.value, name.value || null);
-    if (!res?.ok) { err.textContent = res?.error || t("addSheetErrorBadURL"); return; }
-    closeModal();
-    toast(t("toolbarAddURL"));
-    await refreshTasks();
+const AddDialog = {
+  probing: false,
+  // 每次探测发一个号。旧探测的结果晚回来时号对不上，直接丢掉——
+  // 否则用户改了 URL 之后会被上一个 URL 的结果覆盖。
+  token: 0,
+  // 用户手动改过保存目录就别再自动覆盖了。
+  useCustomDir: false,
+};
+
+function openAddDialog() {
+  const root = document.getElementById("addTaskRoot");
+  if (!root) return;
+  resetAddDialog();
+  root.hidden = false;
+  const url = document.getElementById("addUrl");
+  if (url) setTimeout(() => url.focus(), 30);
+}
+
+function closeAddDialog() {
+  const root = document.getElementById("addTaskRoot");
+  if (root) root.hidden = true;
+  AddDialog.token++;
+}
+
+function resetAddDialog() {
+  AddDialog.probing = false;
+  AddDialog.token++;
+  AddDialog.useCustomDir = false;
+
+  const url = document.getElementById("addUrl");
+  if (url) url.value = "";
+  const name = document.getElementById("addFilename");
+  if (name) name.value = "";
+  const proxy = document.getElementById("addProxy");
+  if (proxy) proxy.value = "";
+  const dir = document.getElementById("addSaveDir");
+  if (dir) dir.value = "";
+  const chunkMode = document.getElementById("addChunkMode");
+  if (chunkMode) chunkMode.value = "auto";
+  const chunkCount = document.getElementById("addChunkCount");
+  if (chunkCount) { chunkCount.value = "8"; chunkCount.disabled = true; }
+  const startWhen = document.getElementById("addStartWhen");
+  if (startWhen) startWhen.value = "now";
+  const at = document.getElementById("addScheduleAt");
+  if (at) { at.value = ""; at.disabled = true; }
+
+  const err = document.getElementById("addError");
+  if (err) { err.textContent = ""; err.hidden = true; }
+  const probeErr = document.getElementById("addProbeError");
+  if (probeErr) { probeErr.textContent = ""; probeErr.hidden = true; }
+
+  fillCategorySelect();
+  syncChunkMode();
+  setProbeState(null, "");
+  syncDefaultDir();
+}
+
+// 分类下拉。分类名走 i18n。
+function fillCategorySelect() {
+  const sel = document.getElementById("addCategory");
+  if (!sel) return;
+  clear(sel);
+  Object.keys(CATEGORY_META).forEach((cat) => {
+    sel.appendChild(el("option", { value: cat, text: categoryLabel(cat) }));
+  });
+}
+
+// 保存目录跟着分类走——除非用户自己改过。
+async function syncDefaultDir() {
+  if (AddDialog.useCustomDir) return;
+  const sel = document.getElementById("addCategory");
+  const dir = document.getElementById("addSaveDir");
+  if (!sel || !dir) return;
+  const res = await api()?.get_default_dir(sel.value);
+  dir.value = res?.path || "";
+}
+
+// 探测状态：parsing / ok / error。
+function setProbeState(kind, message) {
+  const state = document.getElementById("addProbeState");
+  if (!state) return;
+  state.className = "probe-state" + (kind ? " " + kind : "");
+  clear(state);
+  if (kind === "parsing") state.appendChild(el("span", { class: "spin" }));
+  if (message) state.appendChild(el("span", { text: message }));
+  state.hidden = !kind;
+}
+
+function setProbeSize(text) {
+  const size = document.getElementById("addProbeSize");
+  if (size) size.textContent = text || "";
+}
+
+// 探测 URL。成功就补文件名和大小；失败显示行内错误，**不关窗**。
+async function probeAddUrl() {
+  const urlEl = document.getElementById("addUrl");
+  const errorEl = document.getElementById("addProbeError");
+  const reprobe = document.getElementById("addReprobe");
+  if (!urlEl) return;
+
+  const url = firstUrlLine(urlEl.value);
+  if (!url) return;
+  if (reprobe) reprobe.hidden = false;
+
+  const backend = api();
+  if (!backend || typeof backend.probe_url !== "function") {
+    setProbeState("error", t("addSheetProbeUnavailable"));
+    if (errorEl) { errorEl.textContent = t("addSheetProbeUnavailable"); errorEl.hidden = false; }
+    return;
+  }
+
+  const token = ++AddDialog.token;
+  AddDialog.probing = true;
+  setProbeState("parsing", t("addSheetParsing"));
+  setProbeSize("");
+  if (errorEl) { errorEl.textContent = ""; errorEl.hidden = true; }
+
+  let res = null;
+  try {
+    // 探测时带上用户填的 Referer——有些站点不带 Referer 直接探会被拒。
+    const referer = addHeaderValue("Referer");
+    res = referer ? await backend.probe_url(url, referer) : await backend.probe_url(url);
+  } catch (err) {
+    res = { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+  // 探测期间用户又改了 URL —— 这次的结果作废。
+  if (token !== AddDialog.token) return;
+  AddDialog.probing = false;
+
+  if (res && res.ok) {
+    setProbeState("ok", t("addSheetProbeOk"));
+    setProbeSize(res.size ? tf("addSheetProbeSize", fmtSize(res.size)) : "");
+    if (res.filename) {
+      const name = document.getElementById("addFilename");
+      // 用户自己填了文件名就别覆盖。
+      if (name && !name.value.trim()) name.value = res.filename;
+    }
+    return;
+  }
+
+  // 失败——留在原地，让用户改。
+  const message = (res && res.error) || t("addSheetProbeFailed");
+  setProbeState("error", t("addSheetProbeFailed"));
+  if (errorEl) { errorEl.textContent = message; errorEl.hidden = false; }
+  if (reprobe) reprobe.hidden = false;
+}
+
+// 找一行请求头的值（按名字，大小写不敏感）。
+function addHeaderValue(name) {
+  const wanted = String(name || "").toLowerCase();
+  let found = "";
+  document.querySelectorAll("#addHeaders .header-row").forEach((row) => {
+    if (found) return;
+    const key = (row.querySelector(".header-key")?.value || "").trim();
+    if (key.toLowerCase() === wanted) {
+      found = (row.querySelector(".header-value")?.value || "").trim();
+    }
+  });
+  return found;
+}
+
+// URL 框里可能有好几行（批量粘贴）。一行一个地址。
+function urlLines(text) {
+  return String(text || "")
+    .split(/[\r\n]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+function firstUrlLine(text) {
+  const lines = urlLines(text);
+  return lines.length ? lines[0] : "";
+}
+
+// 收集对话框里的选项，交给 create_task。
+function collectAddOptions() {
+  const value = (id) => (document.getElementById(id)?.value || "").trim();
+
+  const headers = {};
+  document.querySelectorAll("#addHeaders .header-row").forEach((row) => {
+    const key = (row.querySelector(".header-key")?.value || "").trim();
+    const val = (row.querySelector(".header-value")?.value || "").trim();
+    if (key && val) headers[key] = val;
+  });
+
+  const chunkMode = value("addChunkMode");
+  const chunkRaw = value("addChunkCount");
+  let chunkCount = null;
+  if (chunkMode === "manual") {
+    const n = parseInt(chunkRaw, 10);
+    if (n > 0) chunkCount = n;
+  }
+
+  const startWhen = value("addStartWhen") || "now";
+  const options = {
+    filename: value("addFilename") || null,
+    save_dir: value("addSaveDir") || null,
+    category: value("addCategory") || null,
+    proxy: value("addProxy") || null,
+    headers,
+    chunk_count: chunkCount,
+    start_when: startWhen,
   };
 
-  openModal("addSheetTitle", [
-    el("div", { class: "form" }, [
-      el("div", { class: "field" }, [
-        el("label", { class: "field-label", text: t("addSheetURLField") }),
-        url,
-      ]),
-      el("div", { class: "field" }, [
-        el("label", { class: "field-label", text: t("addSheetFilenameField") }),
-        name,
-        el("div", { class: "field-hint", text: t("addSheetFilenameHint") }),
-      ]),
-      err,
+  if (startWhen === "scheduled") {
+    const at = value("addScheduleAt");
+    if (at) {
+      const ts = new Date(at).getTime();
+      if (!isNaN(ts)) options.start_at = ts / 1000;
+    }
+  }
+  return options;
+}
+
+async function submitAddDialog() {
+  const err = document.getElementById("addError");
+  const urlEl = document.getElementById("addUrl");
+  const urls = urlLines(urlEl ? urlEl.value : "");
+  if (!urls.length) {
+    if (err) { err.textContent = t("addSheetErrorBadURL"); err.hidden = false; }
+    return;
+  }
+  const options = collectAddOptions();
+  if (options.start_when === "scheduled" && !options.start_at) {
+    if (err) { err.textContent = t("addSheetErrorNoTime"); err.hidden = false; }
+    return;
+  }
+
+  let done = 0;
+  let failed = 0;
+  let lastError = "";
+  for (const url of urls) {
+    const res = await api()?.create_task(url, options);
+    if (res && res.ok) done++;
+    else { failed++; lastError = (res && res.error) || t("addSheetErrorBadURL"); }
+  }
+
+  if (failed) {
+    // 一条都没成功就别关窗——用户得看见哪儿错了。
+    if (!done) {
+      if (err) { err.textContent = lastError; err.hidden = false; }
+      return;
+    }
+    toast(`${done} ${t("addSheetCreated")}, ${failed} ${t("addSheetFailed")}`, "err");
+  } else {
+    toast(t("addSheetCreated"));
+  }
+  closeAddDialog();
+  await refreshTasks();
+}
+
+// 分块数的「自动 / 手动」切换。
+function syncChunkMode() {
+  const mode = document.getElementById("addChunkMode")?.value;
+  const count = document.getElementById("addChunkCount");
+  if (count) count.disabled = mode !== "manual";
+}
+
+// 接上对话框里的所有交互。页面加载时调一次。
+function wireAddDialog() {
+  const root = document.getElementById("addTaskRoot");
+  if (!root) return;
+
+  document.getElementById("addTaskClose")?.addEventListener("click", closeAddDialog);
+  document.getElementById("addTaskCancel")?.addEventListener("click", closeAddDialog);
+  document.getElementById("addTaskBackdrop")?.addEventListener("click", closeAddDialog);
+  document.getElementById("addTaskSubmit")?.addEventListener("click", submitAddDialog);
+
+  const urlEl = document.getElementById("addUrl");
+  if (urlEl) {
+    // 粘贴了就探测——用户刚贴进来的地址最可能是想下的那个。
+    urlEl.addEventListener("paste", () => setTimeout(() => probeAddUrl(), 0));
+    urlEl.addEventListener("blur", () => probeAddUrl());
+  }
+
+  document.getElementById("addReprobe")?.addEventListener("click", probeAddUrl);
+  document.getElementById("addChunkMode")?.addEventListener("change", syncChunkMode);
+
+  document.getElementById("addCategory")?.addEventListener("change", syncDefaultDir);
+
+  const dir = document.getElementById("addSaveDir");
+  dir?.addEventListener("input", () => { AddDialog.useCustomDir = true; });
+
+  document.getElementById("addChooseDir")?.addEventListener("click", async () => {
+    const res = await api()?.choose_directory();
+    if (res?.path) {
+      dir.value = res.path;
+      AddDialog.useCustomDir = true;
+    }
+  });
+
+  document.getElementById("addStartWhen")?.addEventListener("change", (e) => {
+    const at = document.getElementById("addScheduleAt");
+    if (at) at.disabled = e.target.value !== "scheduled";
+  });
+
+  // 请求头：加一行 / 删一行。
+  document.getElementById("addHeaderAdd")?.addEventListener("click", () => {
+    const host = document.getElementById("addHeaders");
+    if (host) host.appendChild(makeHeaderRow());
+  });
+  root.addEventListener("click", (e) => {
+    const btn = e.target.closest?.(".header-remove");
+    if (!btn) return;
+    const rows = document.querySelectorAll("#addHeaders .header-row");
+    // 至少留一行——全删了就没地方填了。
+    if (rows.length <= 1) {
+      const row = rows[0];
+      if (row) {
+        row.querySelector(".header-key").value = "";
+        row.querySelector(".header-value").value = "";
+      }
+      return;
+    }
+    btn.closest(".header-row")?.remove();
+  });
+}
+
+// 一个请求头行（键 + 值 + 删除按钮）。
+function makeHeaderRow() {
+  return el("div", { class: "header-row", "data-header-row": "1" }, [
+    el("input", { class: "input header-key", type: "text", placeholder: "User-Agent" }),
+    el("input", { class: "input header-value", type: "text", placeholder: t("addSheetHeaderValue") }),
+    el("button", { class: "btn btn-ghost btn-icon header-remove", type: "button" }, [
+      icon("x"),
     ]),
-  ], [
-    el("button", { class: "btn", onclick: closeModal }, [el("span", { text: t("addSheetCancel") })]),
-    el("button", { class: "btn btn-primary", onclick: submit }, [el("span", { text: t("addSheetAdd") })]),
   ]);
 }
 
@@ -1258,8 +2151,8 @@ async function openLogPreview() {
     }
     const table = el("table", { class: "data log-table" }, [
       el("thead", {}, [el("tr", {}, [
-        el("th", { text: "Time" }), el("th", { text: "Level" }),
-        el("th", { text: "Category" }), el("th", { text: "Message" }),
+        el("th", { text: t("settingsLogsPreviewTime") }), el("th", { text: t("settingsLogsPreviewLevel") }),
+        el("th", { text: t("settingsLogsPreviewCategory") }), el("th", { text: t("settingsLogsPreviewMessage") }),
       ])]),
     ]);
     const tbody = el("tbody");
@@ -1307,7 +2200,7 @@ function openSpeedLimitDialog(task) {
       el("div", { class: "field" }, [
         el("label", { class: "field-label", text: t("settingsKbps") }),
         input,
-        el("div", { class: "field-hint", text: "0 = 使用全局限制" }),
+        el("div", { class: "field-hint", text: t("rowLimitSpeedHint") }),
       ]),
     ]),
   ], [
@@ -1322,7 +2215,7 @@ function openRelinkDialog(task) {
   const submit = async () => {
     err.textContent = "";
     const res = await api()?.relink_task(task.id, input.value);
-    if (!res) { err.textContent = "失败"; return; }
+    if (!res) { err.textContent = t("commonFailed"); return; }
     if (res.decision === "unsafeReject") {
       err.textContent = res.reason || t("expiredRefresh");
       return;
@@ -1381,7 +2274,7 @@ function openContextMenu(event, task) {
         await api()?.copy_to_clipboard(res.sha256);
         toast(res.sha256.slice(0, 16) + "…", "ok");
       } else {
-        toast(res?.error || "失败", "err");
+        toast(res?.error || t("commonFailed"), "err");
       }
     });
   }
@@ -1409,9 +2302,17 @@ function closeContextMenu() {
 document.addEventListener("click", (e) => {
   const menu = document.getElementById("ctxmenu");
   if (!menu.hidden && !menu.contains(e.target)) closeContextMenu();
+  // 点别处收起列选择器。
+  const picker = document.getElementById("colPicker");
+  const pickerBtn = document.querySelector(".col-picker-btn");
+  if (picker && !picker.hidden
+      && !picker.contains(e.target)
+      && !(pickerBtn && pickerBtn.contains(e.target))) {
+    picker.hidden = true;
+  }
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { closeContextMenu(); closeModal(); }
+  if (e.key === "Escape") { closeContextMenu(); closeModal(); closeAddDialog(); }
 });
 
 // ============ 视图切换 ============
@@ -1437,6 +2338,7 @@ function render() {
   renderSidebar();
   renderToolbar();
   renderBanner();
+  renderStatusBar();
   if (State.view === "downloads") renderDownloads();
   else if (State.view === "history") renderHistory();
   else if (State.view === "schedule") renderSchedule();
@@ -1446,9 +2348,26 @@ function render() {
 
 // ============ 数据刷新 ============
 
+// 存设置（契约 §3.1 的 save_settings）。
+//
+// **只改传进去的键**——前端知道自己改了哪几个，不用把整份设置
+// 发回去。后端改完会把新的设置推过来（settings_updated），
+// 这里先本地更新一份，界面不用等往返。
+async function saveSettings(changes) {
+  const res = await api()?.save_settings(changes);
+  if (res && res.settings) State.settings = res.settings;
+  else if (changes) Object.assign(State.settings, changes);
+  return res;
+}
+
 async function refreshTasks() {
   const tasks = await api()?.get_tasks();
-  if (tasks) { State.tasks = tasks; render(); }
+  if (!tasks) return;
+  State.tasks = tasks;
+  // 轮询是推送不可用时的兜底——顺手把速度采样记上，
+  // 详情面板的曲线就不会因为没推送而空着。
+  tasks.forEach((task) => recordSpeedSample(task));
+  render();
 }
 
 async function refreshHistory() {
@@ -1463,6 +2382,87 @@ async function refreshSchedules() {
 
 // ============ 后端推送 ============
 
+// Python → JS 的**唯一**入口（契约 §3.2）。
+//
+// 后端只认这一个函数，kind 决定走哪条路：
+//   task_updated / task_removed / global_speed_updated / notice / settings_updated
+//
+// **推送不可用时界面照样能用**——轮询（1.5s）还在，任务列表不会
+// 停更。这个函数是「更快」，不是「唯一通道」。
+window.sdmEvent = function sdmEvent(kind, payload) {
+  try {
+    handleSdmEvent(kind, payload || {});
+  } catch (err) {
+    // 推送处理炸了不能拖垮整个页面——记一下就算了。
+    console.error("sdmEvent handler failed", kind, err);
+  }
+};
+
+function handleSdmEvent(kind, payload) {
+  if (kind === "task_updated") {
+    applyTaskUpdate(payload);
+    return;
+  }
+  if (kind === "task_removed") {
+    const id = payload.id;
+    if (!id) return;
+    State.tasks = State.tasks.filter((x) => x.id !== id);
+    if (State.selectedTaskId === id) State.selectedTaskId = null;
+    // 采样和错误信息跟着任务一起走——留着就是纯占内存。
+    delete State.speedSamples[id];
+    delete State.speedHistory[id];
+    delete State.taskErrors[id];
+    render();
+    return;
+  }
+  if (kind === "global_speed_updated") {
+    State.globalSpeed = {
+      bytes_per_sec: Number(payload.bytes_per_sec) || 0,
+      limit_bytes_per_sec: Number(payload.limit_bytes_per_sec) || 0,
+      active_count: Number(payload.active_count) || 0,
+      received: true,
+    };
+    renderStatusBar();
+    return;
+  }
+  if (kind === "notice") {
+    const level = payload.level === "error" ? "err" : (payload.level === "warn" ? "info" : "ok");
+    toast(payload.message || "", level);
+    return;
+  }
+  if (kind === "settings_updated") {
+    State.settings = payload || State.settings;
+    applyTheme(State.settings.theme || "system");
+    State.hiddenColumns = Array.isArray(State.settings.hidden_columns) ? State.settings.hidden_columns : [];
+    render();
+  }
+}
+
+// 应用一条任务更新。
+//
+// **只更新那一行**，不重画整个列表——推送每 0.7 秒来一次，
+// 每次都重建侧栏和工具栏纯属浪费。侧栏的计数会变，所以单独刷
+// 一下侧栏。
+function applyTaskUpdate(task) {
+  if (!task || !task.id) return;
+  const idx = State.tasks.findIndex((x) => x.id === task.id);
+  if (idx >= 0) State.tasks[idx] = { ...State.tasks[idx], ...task };
+  else State.tasks.push(task);
+
+  recordSpeedSample(State.tasks[idx >= 0 ? idx : State.tasks.length - 1]);
+
+  const entry = _rowCache.get(task.id);
+  if (entry) {
+    updateRow(entry, State.tasks[idx >= 0 ? idx : State.tasks.length - 1]);
+  } else {
+    renderDownloads();
+  }
+  // 详情面板开着的话也要跟着更新——速度曲线靠它。
+  if (State.selectedTaskId === task.id) renderDetail();
+  renderSidebar();
+  renderStatusBar();
+}
+
 function onBootstrap(state) {
   State.locale = state.language || "system";
   State.strings = state.translations || {};
@@ -1471,7 +2471,13 @@ function onBootstrap(state) {
   State.appInfo = state.app;
   State.showToolbarLabels = State.settings.toolbar_show_labels !== false;
   document.body.classList.toggle("hide-toolbar-labels", !State.showToolbarLabels);
+  // 主题和列的显隐从设置里读。
+  applyTheme(State.settings.theme || "system");
+  State.hiddenColumns = Array.isArray(State.settings.hidden_columns) ? State.settings.hidden_columns : [];
   applyStaticI18n();
+  wireAddDialog();
+  // 侧栏脚注里的「设置」按钮原来没接事件——点了没反应。
+  document.getElementById("btnSettings")?.addEventListener("click", () => setView("settings"));
   State.booted = true;
   render();
   refreshHistory();
@@ -1487,7 +2493,7 @@ function onClipboardCandidate(candidate) {
 
 function openClipboardDialog(candidate) {
   const catSel = el("select", { class: "select" },
-    Object.keys(CATEGORY_META).map((c) => el("option", { value: c, text: c, selected: c === candidate.category })));
+    Object.keys(CATEGORY_META).map((c) => el("option", { value: c, text: categoryLabel(c), selected: c === candidate.category })));
   const dirInput = el("input", { class: "input", value: "" });
   const threadInput = el("input", { class: "input", type: "number", min: "1", max: "128", value: String(candidate.default_threads || 32) });
 
@@ -1534,7 +2540,7 @@ function openClipboardDialog(candidate) {
     }
     // kill switch 勾上了才改设置
     if (disableToggle.checked && State.settings.capture_clipboard !== false) {
-      await api()?.update_settings({ capture_clipboard: false });
+      await saveSettings({ capture_clipboard: false });
       State.settings.capture_clipboard = false;
     }
     closeModal();
@@ -1591,15 +2597,15 @@ function onCliInstall(result) {
   const cli = result.cli || {};
   if (!cli.ok) {
     if (cli.reason === "conflict") {
-      toast(t("cliInstallConflict", "PATH 里已有别的 sdm，没动它：") + " " + (cli.path || ""), "info");
+      toast(t("cliInstallConflict") + " " + (cli.path || ""), "info");
     } else if (cli.reason && cli.reason !== "not_bundle") {
-      toast(t("cliInstallFailed", "命令行安装失败：") + " " + cli.reason, "err");
+      toast(t("cliInstallFailed") + " " + cli.reason, "err");
     }
     return;
   }
   // 已经在 PATH 里就不用打扰用户了——这是正常状态，不是新闻。
   if (cli.in_path === false) {
-    toast(t("cliInstallNoPath", "命令行已装好，但该目录不在 PATH 中：") + " " + (cli.path || ""), "info");
+    toast(t("cliInstallNoPath") + " " + (cli.path || ""), "info");
   }
 }
 
@@ -1628,12 +2634,13 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   boot();
-  // 定时刷新任务状态
-  // 轮询：只在下载视图、且窗口可见时进行。
-  // 窗口最小化/隐藏时还按 700ms 拉数据是纯浪费。
+  // 定时刷新任务状态。
+  //
+  // **推送是主通道，轮询只是兜底**（契约 §3.2）——所以间隔从
+  // 700ms 放到 1500ms。窗口最小化/隐藏时不轮询——那纯是浪费。
   setInterval(() => {
     if (State.view !== "downloads") return;
     if (document.hidden) return;
     refreshTasks();
-  }, 700);
+  }, 1500);
 });

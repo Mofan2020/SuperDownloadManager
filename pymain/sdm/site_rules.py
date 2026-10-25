@@ -14,6 +14,7 @@ import threading
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import ClassVar
 
 from . import paths
 from .logging_setup import CAT_STORE, get_logger
@@ -155,7 +156,13 @@ class Keychain:
             from ctypes import wintypes
 
             class DATA_BLOB(ctypes.Structure):
-                _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+                # ClassVar 是给 ruff 看的：`_fields_` 是个可变列表，
+                # 不标注的话它会当成「所有实例共享的类属性」。
+                # ctypes 只认名字不认注解，运行时没有任何影响。
+                _fields_: ClassVar = [
+                    ("cbData", wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_char)),
+                ]
 
             windll = ctypes.windll
             crypt32 = windll.crypt32
@@ -191,7 +198,13 @@ class Keychain:
             from ctypes import wintypes
 
             class DATA_BLOB(ctypes.Structure):
-                _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+                # ClassVar 是给 ruff 看的：`_fields_` 是个可变列表，
+                # 不标注的话它会当成「所有实例共享的类属性」。
+                # ctypes 只认名字不认注解，运行时没有任何影响。
+                _fields_: ClassVar = [
+                    ("cbData", wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_char)),
+                ]
 
             store = Path(paths.config_dir()) / "site_rules.keyring"
             if not store.exists():

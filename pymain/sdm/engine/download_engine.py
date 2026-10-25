@@ -18,15 +18,20 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import enum
+import os
+import shutil
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..history_store import HistoryEntry, HistoryStore
 from ..logging_setup import CAT_ENGINE, CAT_QUEUE, CAT_STORE, get_logger
 from .categories import category_from_url
+from .content_sniffer import ProbeError
 from .download_flow import DownloadFlow, FlowError, FlowFailure
+from .errors import ErrorCategory, TaskError
 from .file_assembler import _unlink_with_retry
 from .filenames import sanitize_filename
 from .http_downloader import DownloadError, HTTPDownloader
@@ -94,6 +99,27 @@ class TaskSummary:
     #: 显示速度的 EMA 缓存（Swift 版在 GUI 的 store 里，这里放引擎）。
     #: 终态/暂停时清零——Swift v1.0.7 的 bug 就是进度满了速度还在显示。
     speed_ema: float = 0.0
+    # -- 规格 §5 / §2.3 的字段 -------------------------------------
+    #: 失败的结构化分类（规格 §5.1 的 12 个类别之一）。
+    error_category: str | None = None
+    #: 这个失败能不能自动重试。
+    error_retryable: bool = False
+    #: 当前同时在传的分片数（= 连接数）。
+    active_connections: int = 0
+    #: 已上传字节。本项目只做下载，这个永远是 0——
+    #: 但字段留着，详情面板的「已下载 / 已上传」两行才对称。
+    uploaded_bytes: int = 0
+    #: 校验算法与校验值（规格 §1.7）。
+    checksum_algorithm: str | None = None
+    checksum_value: str | None = None
+    #: 服务器支不支持分块。False = 退化成单流下载了。
+    server_supports_ranges: bool = True
+    #: 队列里的位置。0 = 下一个就跑。
+    queued_position: int = 0
+    #: 完成后行为（规格 §1.7）：none / open_file / open_folder / run_script / sleep。
+    on_complete: str = "none"
+    #: 任务级代理覆盖（规格 §1.6）。None = 走全局代理。
+    proxy: str | None = None
 
     def to_dict(self, with_chunks: bool = False) -> dict:
         """转成 JSON 可序列化的字典。
@@ -119,6 +145,16 @@ class TaskSummary:
             "finished_at": self.finished_at,
             "chunk_count": self.chunk_count,
             "completed_chunks": self.completed_chunks,
+            "error_category": self.error_category,
+            "error_retryable": self.error_retryable,
+            "active_connections": self.active_connections,
+            "uploaded_bytes": self.uploaded_bytes,
+            "checksum_algorithm": self.checksum_algorithm,
+            "checksum_value": self.checksum_value,
+            "server_supports_ranges": self.server_supports_ranges,
+            "queued_position": self.queued_position,
+            "on_complete": self.on_complete,
+            "proxy": self.proxy,
         }
         if with_chunks:
             payload["chunks"] = self.chunks
@@ -134,6 +170,21 @@ class StartSpec:
     filename_override: str | None = None
     max_threads_override: int | None = None
     referer: str | None = None
+    #: 任务级自定义请求头（规格 §1.6）。浏览器接管时自动继承
+    #: 页面请求头是**期望行为**，不是可选项——扩展会把 Cookie /
+    #: UA 一并发过来。
+    headers: dict[str, str] = field(default_factory=dict)
+    #: 任务级代理覆盖（规格 §1.6）。None = 用全局代理。
+    proxy: str | None = None
+    #: 分块数。None = 自动（动态分段自己长）。
+    chunk_count_override: int | None = None
+    #: 开始时机：`now` / `queue` / `scheduled`。
+    start_when: str = "now"
+    #: 校验算法：md5 / sha1 / sha256 / None。
+    checksum_algorithm: str | None = None
+    #: 完成后行为（规格 §1.7）。
+    on_complete: str = "none"
+    on_complete_script: str = ""
 
 
 class LiveTask:
@@ -148,6 +199,102 @@ class LiveTask:
         self.cancelled = False
 
 
+#: 名字冲突的处理策略（规格 §5.3）。
+NAME_CONFLICT_KEEP_BOTH = "keep_both"
+NAME_CONFLICT_OVERWRITE = "overwrite"
+NAME_CONFLICT_ASK = "ask"
+
+
+def _resolve_keep_both(path: Path) -> Path:
+    """找一个不重名的文件名：`a.zip` → `a (1).zip` → `a (2).zip`。
+
+    **默认策略。** 用户下了一个已经存在的文件名时，最安全的做法是
+    两个都留着——把用户的旧文件悄悄删掉或者覆盖掉，是不可逆的损失。
+    """
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    parent = path.parent
+    for index in range(1, 1000):
+        candidate = parent / f"{stem} ({index}){suffix}"
+        if not candidate.exists():
+            return candidate
+    return parent / f"{stem} ({int(time.time())}){suffix}"
+
+
+def _trash_or_rename(path: Path) -> bool:
+    """把文件丢进回收站。失败就改名让路。
+
+    回收站优先用 `send2trash`——它跨平台。没装就退回「改名」：
+    把旧文件改成 `<名字>.sdm-replaced-<时间戳>`，用户还能找回来。
+    直接删除是最后手段，不做。
+    """
+    try:
+        from send2trash import send2trash  # type: ignore[import-not-found]
+
+        send2trash(str(path))
+        return True
+    except Exception:
+        pass
+    try:
+        backup = path.with_name(f"{path.name}.sdm-replaced-{int(time.time())}")
+        path.rename(backup)
+        return True
+    except OSError:
+        return False
+
+
+def _open_path(path: Path) -> None:
+    """用系统默认程序打开文件。"""
+    import subprocess
+    import sys
+
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])
+    elif sys.platform.startswith("win"):
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    else:
+        subprocess.Popen(["xdg-open", str(path)])
+
+
+def _reveal_path(path: Path) -> None:
+    """在文件管理器里显示文件（打开所在文件夹）。"""
+    import subprocess
+    import sys
+
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", str(path)])
+    elif sys.platform.startswith("win"):
+        subprocess.Popen(["explorer", "/select,", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(path.parent)])
+
+
+def _run_script(script: Path) -> None:
+    """跑一个脚本。"""
+    import subprocess
+    import sys
+
+    if sys.platform.startswith("win"):
+        subprocess.Popen([str(script)], shell=False)
+    else:
+        subprocess.Popen(["/bin/sh", str(script)])
+
+
+def _sleep_machine() -> None:
+    """让机器休眠。
+
+    **只在 macOS 上真的执行。** 其他平台没有「睡眠」这个概念，
+    硬凑的话要么没反应，要么直接把用户会话踢下线。
+    """
+    import subprocess
+    import sys
+
+    if sys.platform == "darwin":
+        subprocess.Popen(["pmset", "sleepnow"])
+
+
 class DownloadEngine:
     """引擎主对象。"""
 
@@ -158,6 +305,7 @@ class DownloadEngine:
         default_download_dir: Path | None = None,
         downloader: HTTPDownloader | None = None,
         history_store: HistoryStore | None = None,
+        max_concurrent_tasks: int = 5,
     ) -> None:
         self.strategy = strategy or RangeStrategy()
         self.parallelism_cap = parallelism_cap
@@ -172,6 +320,20 @@ class DownloadEngine:
         self.live: dict[str, LiveTask] = {}
         self._task_limiters: dict[str, SpeedLimiter] = {}
         self._lock = asyncio.Lock()
+        #: **同时活跃的任务数上限**（规格 §1.8）。
+        #: 超出的任务停在 `queued`，有槽位时自动开跑。
+        self.max_concurrent_tasks = max(1, max_concurrent_tasks)
+        #: 等待队列。FIFO，`move_task` 可以置顶 / 置底。
+        self._queue: list[str] = []
+        #: 名字冲突策略（规格 §5.3）。
+        self.name_conflict_policy = NAME_CONFLICT_KEEP_BOTH
+        #: 每个任务的后续可改选项（校验算法 / 完成后行为 / 代理）。
+        self._task_options: dict[str, dict] = {}
+        #: 每个任务最后的结构化错误，供 UI 的「复制错误详情」用。
+        self._task_errors: dict[str, dict] = {}
+        #: 每个任务最初的启动参数。恢复时要用——浏览器接管带过来的
+        #: Cookie / UA 丢了，续传的请求就发不对了。
+        self._specs: dict[str, StartSpec] = {}
         # 每个任务的分片状态：{task_id: [分片dict, ...]}
         #
         # 任务还在跑的时候实时更新；任务结束后保留最终状态——详情
@@ -185,6 +347,12 @@ class DownloadEngine:
         # 构造 HistoryStore 不碰磁盘（路径解析 + 惰性连接），
         # 真正建库发生在第一次 insert()。
         self.history_store = history_store or HistoryStore()
+        #: 每个任务最近 60 秒的速度采样（规格 §2.3 的速度曲线）。
+        #:
+        #: 为什么放引擎而不是 GUI：daemon 模式没有 GUI，但 API 消费者
+        #: （CLI / IPC）同样要能拿到曲线；GUI 那个自己攒的环形缓冲
+        #: 只是后端不可用时的兜底。
+        self._speed_history: dict[str, deque[tuple[float, float]]] = {}
 
     #: 保留多少个已结束任务的分片明细
     CHUNK_STATE_RETENTION = 20
@@ -218,8 +386,139 @@ class DownloadEngine:
         self.strategy.default_chunks = clamped
         self.parallelism_cap = clamped
 
-    def set_ignore_ssl(self, value: bool) -> None:
+    async def set_ignore_ssl(self, value: bool) -> None:
         self.downloader.set_ignore_ssl(value)
+
+    async def set_global_proxy(self, proxy: str | None) -> None:
+        """全局代理（规格 §1.6）。空 / None = 直连。
+
+        **格式**：`http://host:port` / `https://…` / `socks5://…` /
+        `socks4://…`，可以带用户名密码
+        （`socks5://user:pass@host:port`）。
+        """
+        self.downloader.set_proxy(proxy)
+
+    async def set_task_proxy(self, task_id: str, proxy: str | None) -> None:
+        """任务级代理覆盖。"""
+        options = self._task_options.setdefault(task_id, {})
+        options["proxy"] = proxy or None
+        summary = self.tasks.get(task_id)
+        if summary is not None:
+            summary.proxy = proxy or None
+
+    async def probe_url(self, url: str, referer: str | None = None) -> dict:
+        """探测 URL，给新建任务对话框用（规格 §2.2 的自动解析）。
+
+        **探测失败不是终态。** 返回 `ok=False` 和错误信息，调用方
+        让用户改完重试——不能因为一次探测失败就把对话框关了。
+        """
+        headers: dict[str, str] = {}
+        if referer:
+            headers["Referer"] = referer
+        try:
+            probe = await self.downloader.probe(url, extra_headers=headers or None)
+        except ProbeError as err:
+            return {
+                "ok": False,
+                "filename": None,
+                "size": None,
+                "final_url": None,
+                "accepts_ranges": False,
+                "error": err.message,
+                "error_category": str(ErrorCategory.AUTH) if err.is_expired_link else str(ErrorCategory.NETWORK),
+            }
+        except Exception as err:
+            return {
+                "ok": False,
+                "filename": None,
+                "size": None,
+                "final_url": None,
+                "accepts_ranges": False,
+                "error": str(err),
+                "error_category": str(ErrorCategory.NETWORK),
+            }
+        return {
+            "ok": True,
+            "filename": probe.suggested_filename,
+            "size": probe.content_length,
+            "final_url": probe.url,
+            "accepts_ranges": bool(probe.range_supported),
+            "error": None,
+            "error_category": None,
+        }
+
+    async def set_task_checksum(self, task_id: str, algorithm: str | None) -> None:
+        """设置任务的校验算法（规格 §1.7）。"""
+        value = (algorithm or "").strip().lower() or None
+        if value not in (None, "md5", "sha1", "sha256"):
+            return
+        summary = self.tasks.get(task_id)
+        if summary is not None:
+            summary.checksum_algorithm = value
+            # 换算法就清掉旧值——旧值是另一个算法的结果，留着会误导。
+            summary.checksum_value = None
+        options = self._task_options.setdefault(task_id, {})
+        options["checksum_algorithm"] = value
+
+    async def set_task_on_complete(self, task_id: str, action: str, script: str = "") -> None:
+        """设置任务的完成后行为（规格 §1.7）。"""
+        valid = ("none", "open_file", "open_folder", "run_script", "sleep")
+        value = action if action in valid else "none"
+        summary = self.tasks.get(task_id)
+        if summary is not None:
+            summary.on_complete = value
+        options = self._task_options.setdefault(task_id, {})
+        options["on_complete"] = value
+        if script:
+            options["on_complete_script"] = script
+
+    async def set_task_options(self, task_id: str, options: dict) -> None:
+        """一次性改任务的若干可选项。"""
+        if not isinstance(options, dict):
+            return
+        if "checksum" in options or "checksum_algorithm" in options:
+            await self.set_task_checksum(
+                task_id,
+                options.get("checksum", options.get("checksum_algorithm")),
+            )
+        if "on_complete" in options:
+            await self.set_task_on_complete(
+                task_id,
+                str(options.get("on_complete") or "none"),
+                str(options.get("on_complete_script") or ""),
+            )
+        if "proxy" in options:
+            await self.set_task_proxy(task_id, options.get("proxy"))
+        if "chunk_count" in options:
+            try:
+                count = int(options.get("chunk_count"))
+            except (TypeError, ValueError):
+                count = 0
+            if count > 0:
+                self._task_options.setdefault(task_id, {})["chunk_count"] = count
+
+    def get_task_error(self, task_id: str) -> dict | None:
+        """取任务最后的结构化错误（规格 §5.1）。
+
+        UI 的「复制错误详情」按钮用它——用户报障时能把分类、状态码、
+        技术细节一起发出来。
+        """
+        return self._task_errors.get(task_id)
+
+    async def retry_task(self, task_id: str) -> None:
+        """手动重试：从持久化的进度恢复，不是从头再来（规格 §5.2）。
+
+        会话文件还在就按它的布局续传；会话文件没了（用户清理过
+        目录）就重新开始。
+        """
+        summary = self.tasks.get(task_id)
+        if summary is None:
+            return
+        self._task_errors.pop(task_id, None)
+        summary.error_message = None
+        summary.error_category = None
+        summary.error_retryable = False
+        await self.resume(task_id)
 
     async def set_speed_limit(self, bytes_per_sec: float) -> None:
         """全局带宽限制。真正推给限速器——Swift v1.0.x 存了值但没生效。"""
@@ -261,7 +560,11 @@ class DownloadEngine:
         return "download.bin"
 
     async def start(self, specs: list[StartSpec]) -> list[str]:
-        """启动一个或多个下载，返回任务 id 列表。"""
+        """启动一个或多个下载，返回任务 id 列表。
+
+        任务先进队列（规格 §1.8）。同时活跃的任务数有上限，
+        超出的停在 `queued`，有槽位时自动开跑。
+        """
         ids: list[str] = []
         for spec in specs:
             task_id = str(uuid.uuid4())
@@ -279,14 +582,93 @@ class DownloadEngine:
                 category=category_from_url(spec.url).value,
                 filename=filename,
                 started_at=time.time(),
+                checksum_algorithm=spec.checksum_algorithm,
+                on_complete=spec.on_complete or "none",
             )
             self.tasks[task_id] = summary
 
             live = LiveTask(task_id, spec)
             self.live[task_id] = live
-            live.task = asyncio.create_task(self._run_task(task_id, live))
+            self._specs[task_id] = spec
+            if spec.on_complete:
+                self._task_options[task_id] = {
+                    "on_complete": spec.on_complete,
+                    "on_complete_script": spec.on_complete_script,
+                }
             ids.append(task_id)
+
+            # **队列是 FIFO**（规格 §1.8）。新任务一律排到队尾——
+            # 「立即开始」不等于「插队」，插队会让用户前面排着的
+            # 任务莫名其妙被推后。
+            #
+            # `scheduled` 的任务**不进队列**：它等计划任务触发，
+            # 在那之前一直停在 queued 状态。放进队列的话它会占着
+            # 队首，把后面的全堵住。
+            if (spec.start_when or "now").lower() != "scheduled":
+                self._queue.append(task_id)
+
+        self._schedule()
         return ids
+
+    # -- 队列 --------------------------------------------------------
+
+    def _active_count(self) -> int:
+        """当前正在跑的任务数。"""
+        return sum(
+            1 for live in self.live.values() if live.task is not None and not live.task.done()
+        )
+
+    def _schedule(self) -> None:
+        """把队列里的任务开跑，直到活跃数达上限。
+
+        **必须在事件循环里调用**——它要 `create_task`。
+        """
+        while self._queue and self._active_count() < self.max_concurrent_tasks:
+            task_id = self._queue.pop(0)
+            live = self.live.get(task_id)
+            summary = self.tasks.get(task_id)
+            if live is None or summary is None:
+                continue
+            if live.task is not None and not live.task.done():
+                continue
+            summary.state = TaskState.DOWNLOADING.value
+            live.task = asyncio.create_task(self._run_task(task_id, live))
+        self._refresh_queue_positions()
+
+    def _refresh_queue_positions(self) -> None:
+        """更新每个排队任务的位置（0 = 下一个就跑）。"""
+        for index, task_id in enumerate(self._queue):
+            summary = self.tasks.get(task_id)
+            if summary is not None:
+                summary.queued_position = index
+
+    def queue_order(self) -> list[str]:
+        """当前队列顺序（任务 id，从队首到队尾）。
+
+        给 UI 显示队列用的——「置顶 / 置底」之后用户得能看到结果。
+        """
+        return list(self._queue)
+
+    async def move_task(self, task_id: str, position: str) -> None:
+        """把任务置顶 / 置底（规格 §1.8「支持手动置顶/置底」）。
+
+        只对**排队中**的任务有意义——已经在跑的任务动不了。
+        """
+        if task_id not in self._queue:
+            return
+        self._queue.remove(task_id)
+        if position == "top":
+            self._queue.insert(0, task_id)
+        elif position == "bottom":
+            self._queue.append(task_id)
+        else:
+            self._queue.append(task_id)
+        self._refresh_queue_positions()
+
+    def set_max_concurrent_tasks(self, value: int) -> None:
+        """改同时活跃的任务数上限。"""
+        self.max_concurrent_tasks = max(1, int(value))
+        self._schedule()
 
     async def _run_task(self, task_id: str, live: LiveTask) -> None:
         """任务的执行体。"""
@@ -296,6 +678,13 @@ class DownloadEngine:
             return
         summary.state = TaskState.DOWNLOADING.value
 
+        # 任务级的请求头（规格 §1.6）。浏览器接管带过来的 Cookie /
+        # UA 在这里生效——拿不到登录态就下不动。
+        headers: dict[str, str] = {}
+        if spec.referer:
+            headers["Referer"] = spec.referer
+        headers.update(spec.headers or {})
+
         # 探测一次拿真实文件名和总长度。
         # 用共享的 downloader——Swift v1.1.8 在这里另建了一个
         # HTTPDownloader()，那个实例没有 SSL 绕过开关，
@@ -303,8 +692,8 @@ class DownloadEngine:
         try:
             probe = await self.downloader.probe(
                 spec.url,
-                # 任务级的头（Referer 等）——探测阶段有些站点就 403。
-                extra_headers={"Referer": spec.referer} if spec.referer else None,
+                # 任务级的头——探测阶段有些站点就 403。
+                extra_headers=headers or None,
             )
         except Exception:
             # 探测失败不直接判死——下面的正式流程会再探一次，
@@ -326,6 +715,27 @@ class DownloadEngine:
 
         destination = Path(summary.destination)
 
+        # 磁盘空间预检（规格 §5.3）。空间不够就别开始了——
+        # 下到 99% 再失败，用户已经等了几十分钟。
+        disk_error = self._check_disk_space(destination.parent, summary.total_bytes)
+        if disk_error is not None:
+            summary.state = TaskState.FAILED.value
+            summary.error_message = disk_error.message
+            summary.error_category = str(disk_error.category)
+            summary.error_retryable = disk_error.retryable
+            summary.finished_at = time.time()
+            self._task_errors[task_id] = disk_error.to_dict()
+            log.error(CAT_ENGINE, f"任务失败 {summary.filename}: {disk_error.detail}")
+            self._record_history(summary)
+            self._finish_task(task_id)
+            return
+
+        # 名字冲突（规格 §5.3）。默认「保留两者」——把用户已有的
+        # 文件悄悄覆盖掉是不可逆的损失。
+        destination = self._resolve_name_conflict(destination)
+        summary.destination = str(destination)
+        summary.filename = destination.name
+
         channel = ProgressChannel()
         channel.bind_loop(asyncio.get_running_loop())
         live.flow = DownloadFlow(
@@ -336,7 +746,7 @@ class DownloadEngine:
             limiter=self._task_limiters.get(task_id) or self.limiter,
             downloader=self.downloader,
             progress_channel=channel,
-            # 任务级的 Referer。
+            # 任务级的头（Referer / Cookie / UA …）。
             #
             # `add` 方法可以带 referer 参数（浏览器扩展派单时会把
             # 页面地址带过来），这个头必须真的发出去——很多站点要
@@ -345,7 +755,10 @@ class DownloadEngine:
             # 站点规则的 Referer 优先级更高（在 http_downloader 里
             # 合并时规则覆盖任务级），规则是用户为该主机显式配置的
             # 全局设置。
-            headers={"Referer": spec.referer} if spec.referer else None,
+            headers=headers or None,
+            initial_connections=self.strategy.initial_chunks,
+            chunk_count=spec.chunk_count_override,
+            checksum_algorithm=spec.checksum_algorithm,
         )
 
         # 记录分片布局，供详情面板展示。
@@ -359,13 +772,18 @@ class DownloadEngine:
         progress_task = asyncio.create_task(self._consume_progress(task_id, channel))
 
         try:
-            await live.flow.run()
+            outcome = await live.flow.run()
             summary.state = TaskState.COMPLETED.value
             summary.bytes_done = summary.total_bytes or summary.bytes_done
+            summary.server_supports_ranges = outcome.server_supports_ranges
+            if outcome.checksum:
+                summary.checksum_value = outcome.checksum
+                summary.checksum_algorithm = outcome.checksum_algorithm
             self._zero_speed(summary)
             summary.finished_at = time.time()
             log.notice(CAT_ENGINE, f"任务完成 {summary.filename}")
             self._record_history(summary)
+            self._run_on_complete(summary)
         except asyncio.CancelledError:
             # 用户点了暂停或取消。状态在 pause/cancel 里已经写好了，
             # 这里绝不能改成 failed。
@@ -379,6 +797,10 @@ class DownloadEngine:
             # 内部会自己判断，这里调用是安全的。
             self._record_history(summary)
         except FlowError as err:
+            task_error = err.to_task_error()
+            self._task_errors[task_id] = task_error.to_dict()
+            summary.error_category = str(task_error.category)
+            summary.error_retryable = task_error.retryable
             if err.kind == FlowFailure.EXPIRED_LINK.value:
                 summary.state = TaskState.AWAITING_NEW_LINK.value
                 summary.error_message = err.detail or "服务器拒绝了下载链接"
@@ -395,8 +817,12 @@ class DownloadEngine:
             log.error(CAT_ENGINE, f"任务失败 {summary.filename}: {err}")
             self._record_history(summary)
         except DownloadError as err:
+            task_error = err.to_task_error()
+            self._task_errors[task_id] = task_error.to_dict()
             summary.state = TaskState.FAILED.value
             summary.error_message = err.detail or str(err)
+            summary.error_category = str(task_error.category)
+            summary.error_retryable = task_error.retryable
             self._zero_speed(summary)
             summary.finished_at = time.time()
             self._record_history(summary)
@@ -406,6 +832,95 @@ class DownloadEngine:
             # 任务结束：分片明细留一份最终状态，详情面板还能查。
             # 超过保留上限就丢最老的。
             self._retire_chunk_states(task_id)
+            self._finish_task(task_id)
+
+    def _finish_task(self, task_id: str) -> None:
+        """任务收尾：释放队列槽位，让下一个排队的开跑。"""
+        if task_id in self._queue:
+            self._queue.remove(task_id)
+        self._schedule()
+
+    # -- 磁盘 / 名字冲突 ---------------------------------------------
+
+    @staticmethod
+    def _check_disk_space(directory: Path, total_bytes: int | None) -> TaskError | None:
+        """目标分区的可用空间够不够（规格 §5.3）。
+
+        留 5% 余量：文件系统还要写元数据、日志、sidecar。
+        大小未知时不检查——下到一半失败比开始就失败更糟。
+        """
+        if not total_bytes or total_bytes <= 0:
+            return None
+        try:
+            usage = shutil.disk_usage(str(directory if directory.exists() else Path.home()))
+        except OSError:
+            return None
+        needed = int(total_bytes * 1.05)
+        if usage.free >= needed:
+            return None
+        return TaskError(
+            category=ErrorCategory.DISK,
+            message="磁盘空间不足",
+            detail=(
+                f"需要 {needed / 1024 / 1024:.1f} MB（含 5% 余量），"
+                f"可用 {usage.free / 1024 / 1024:.1f} MB"
+            ),
+            retryable=False,
+        )
+
+    def _resolve_name_conflict(self, destination: Path) -> Path:
+        """目标文件已存在时怎么办（规格 §5.3）。
+
+        - `keep_both`（默认）：加序号，两个都留着。
+        - `overwrite`：旧的挪去回收站；挪不动就退回保留两者。
+        - `ask`：引擎层没法问，按保留两者处理（UI 层会先问一遍）。
+
+        **占位者是未完成的任务时不适用「覆盖」**——那是同一个任务
+        的中间产物，覆盖等于自毁。
+        """
+        if not destination.exists():
+            return destination
+        if self._is_unfinished_artifact(destination):
+            return _resolve_keep_both(destination)
+        policy = self.name_conflict_policy
+        if policy == NAME_CONFLICT_OVERWRITE and _trash_or_rename(destination):
+            return destination
+        return _resolve_keep_both(destination)
+
+    def _is_unfinished_artifact(self, destination: Path) -> bool:
+        """目标位置是不是某个未完成任务的产物。"""
+        for summary in self.tasks.values():
+            if summary.state in (TaskState.COMPLETED.value,):
+                continue
+            if summary.destination and Path(summary.destination) == destination:
+                return True
+        return False
+
+    # -- 完成后行为 --------------------------------------------------
+
+    def _run_on_complete(self, summary: TaskSummary) -> None:
+        """完成后行为（规格 §1.7）：打开文件 / 打开文件夹 / 跑脚本 / 休眠。
+
+        默认「无操作」。**任何一步失败都不能让任务变成失败**——
+        文件已经下好了，「打开所在文件夹」打不开不是下载的问题。
+        """
+        options = self._task_options.get(summary.id, {})
+        action = options.get("on_complete") or summary.on_complete or "none"
+        if action in ("", "none"):
+            return
+        try:
+            if action == "open_file":
+                _open_path(Path(summary.destination))
+            elif action == "open_folder":
+                _reveal_path(Path(summary.destination))
+            elif action == "run_script":
+                script = options.get("on_complete_script", "")
+                if script:
+                    _run_script(Path(script))
+            elif action == "sleep":
+                _sleep_machine()
+        except Exception as err:
+            log.warning(CAT_ENGINE, f"完成后行为失败（{action}）: {err}")
 
     def _build_chunk_states(self, live: LiveTask) -> list[dict]:
         """构造分片状态列表。
@@ -517,7 +1032,41 @@ class DownloadEngine:
         )
         summary.speed_ema = out.next_ema
         summary.speed_bytes_per_sec = out.displayed_speed
+        self._push_speed_sample(summary.id, out.displayed_speed)
         return out.displayed_speed
+
+    #: 速度曲线的采样窗口（秒）。规格 §2.3 要的是「最近 60 秒」。
+    SPEED_HISTORY_WINDOW = 60.0
+
+    def _push_speed_sample(self, task_id: str, speed: float) -> None:
+        """记一个速度采样点。
+
+        **窗口按时间剪，不按条数剪**：条数剪会让慢速任务（比如每秒
+        只推一次进度）的曲线只剩几个点，图形上是一条横线，看不出
+        速度变化；按时间剪则不管多慢都是「最近 60 秒」。
+        """
+        now = time.time()
+        buf = self._speed_history.get(task_id)
+        if buf is None:
+            buf = deque()
+            self._speed_history[task_id] = buf
+        buf.append((now, max(0.0, speed)))
+        cutoff = now - self.SPEED_HISTORY_WINDOW
+        while buf and buf[0][0] < cutoff:
+            buf.popleft()
+
+    def get_speed_history(self, task_id: str) -> list[dict]:
+        """最近 60 秒的速度采样（契约 §3.1）。
+
+        返回 `[{"t": 时间戳, "v": 字节/秒}, ...]`，按时间升序。
+
+        任务不在引擎里（比如刚启动还没入队）时返回空列表，
+        前端会退回自己攒的采样。
+        """
+        buf = self._speed_history.get(task_id)
+        if not buf:
+            return []
+        return [{"t": round(ts, 3), "v": round(value, 2)} for ts, value in buf]
 
     def _zero_speed(self, summary: TaskSummary) -> None:
         """显示速度硬清零，EMA 缓存一起清掉。
@@ -527,6 +1076,9 @@ class DownloadEngine:
         """
         summary.speed_bytes_per_sec = 0.0
         summary.speed_ema = 0.0
+        # 曲线也要归零——否则详情面板看到的是「速度还在跑但任务
+        # 已经停了」的曲线，跟进度条上那 0 对不上。
+        self._push_speed_sample(summary.id, 0.0)
 
     def _record_history(self, summary: TaskSummary) -> None:
         """任务进终态时写一条历史。
@@ -591,10 +1143,19 @@ class DownloadEngine:
         if live is not None and live.task is not None and not live.task.done():
             return  # 还在跑
 
+        options = self._task_options.get(task_id, {})
+        original = self._specs.get(task_id)
         spec = StartSpec(
             url=summary.url,
             destination_directory=Path(summary.destination).parent,
             filename_override=Path(summary.destination).name,
+            referer=original.referer if original else None,
+            headers=dict(original.headers) if original else {},
+            proxy=options.get("proxy"),
+            chunk_count_override=options.get("chunk_count"),
+            checksum_algorithm=options.get("checksum_algorithm", summary.checksum_algorithm),
+            on_complete=options.get("on_complete", summary.on_complete),
+            on_complete_script=options.get("on_complete_script", ""),
         )
         new_live = LiveTask(task_id, spec)
         self.live[task_id] = new_live
@@ -690,6 +1251,7 @@ class DownloadEngine:
         self.live.pop(task_id, None)
         self._task_limiters.pop(task_id, None)
         self._chunk_states.pop(task_id, None)
+        self._speed_history.pop(task_id, None)
         if task_id in self._chunk_state_order:
             self._chunk_state_order.remove(task_id)
 

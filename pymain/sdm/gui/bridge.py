@@ -12,6 +12,8 @@ Python 对象；所有「主动推送」用 `_call_js()` 调前端全局函数�
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import dataclasses
 import hashlib
 import json
 import subprocess
@@ -89,6 +91,10 @@ class GuiBridge:
         self._clipboard_candidate: dict | None = None
         self._pending_dir: list[str] = []
         self._lock = threading.Lock()
+        #: 推送循环是否已经起来了（契约 §3.2）。
+        self._push_started = False
+        #: 推送循环里记的每个任务的状态指纹，用来判断「变了才推」。
+        self._push_fingerprints: dict[str, str] = {}
 
     # -- 生命周期 ----------------------------------------------------
 
@@ -112,12 +118,172 @@ class GuiBridge:
         except Exception as err:
             log.debug(CAT_GUI, f"调用前端 {func} 失败: {err}")
 
+    def _emit_event(self, kind: str, payload: Any = None) -> None:
+        """按契约 §3.2 推一个事件给前端。
+
+        前端只注册一个入口 `window.sdmEvent(kind, payload)`——
+        kind 是 task_updated / task_removed / global_speed_updated /
+        notice / settings_updated 之一。
+
+        **用两个独立的 JSON 字面量拼调用**，不把参数包成数组：
+        前端的签名是 `sdmEvent(kind, payload)`，包成数组的话
+        kind 会变成 `["task_updated", {...}]`，前端拿到的是数组
+        而不是事件类型。
+        """
+        if self._window is None:
+            return
+        try:
+            kind_json = json.dumps(kind)
+            payload_json = json.dumps(payload, ensure_ascii=False)
+            self._window.evaluate_js(f"sdmEvent({kind_json},{payload_json})")
+        except Exception as err:
+            # 前端没注册 sdmEvent（老页面 / 白屏）时不能把后端带崩——
+            # 轮询还在，界面照样能用。
+            log.debug(CAT_GUI, f"推送事件 {kind} 失败: {err}")
+
     def _run(self, coro) -> None:
         """把协程丢到引擎的事件循环里跑。"""
         if self._loop is None:
             asyncio.run(coro)
             return
         asyncio.run_coroutine_threadsafe(coro, self._loop)
+
+    def _apply_engine_setting(self, name: str, *args) -> None:
+        """调引擎的设置方法——同步还是异步都行。
+
+        引擎的这些方法一半同步（set_max_threads）一半异步
+        （set_ignore_ssl、set_speed_limit）。**直接调用异步的那个
+        只会造出一个协程对象、不 await 它**——Python 报
+        "coroutine was never awaited"，设置也静默不生效。
+
+        所以这里统一处理：拿到返回值，是协程就丢进引擎的事件循环。
+        """
+        method = getattr(self.engine, name, None)
+        if method is None:
+            return
+        result = method(*args)
+        if asyncio.iscoroutine(result):
+            self._run(result)
+
+    def _run_sync(self, coro, timeout: float = 20.0) -> Any:
+        """跑协程并**等结果**。
+
+        `_run` 是「发了就不管」，返回值恒为 None——但契约 §3.1 要求
+        `create_task` 返回 task_id，`probe_url` 要返回探测结果。
+        这两个都得等，所以另开一个同步版本。
+
+        **死锁保护**：万一在引擎自己的事件循环里调（不该发生，但
+        万一），等自己就是死锁——那种情况下只把协程丢进去，不等。
+        """
+        if self._loop is None:
+            return asyncio.run(coro)
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is self._loop:
+            log.warning(CAT_GUI, "在引擎事件循环里同步等待引擎——改成异步投递")
+            return asyncio.ensure_future(coro)
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError as err:
+            future.cancel()
+            raise TimeoutError("引擎调用超时") from err
+
+    # -- 推送通道（契约 §3.2） ----------------------------------------
+
+    def start_event_push(self) -> None:
+        """启动推送循环。
+
+        **推送是主通道，轮询是兜底**——所以这个循环的间隔（0.7s）
+        比前端的轮询（1.5s）短。前端拿到的数据永远比轮询新。
+
+        没有事件循环时不启动：无头环境（自检、测试）里这个循环
+        永远不会结束，还会占着线程。
+        """
+        if self._push_started or self._loop is None:
+            return
+        self._push_started = True
+        self._run(self._push_loop())
+
+    async def _push_loop(self) -> None:
+        """把任务变化推给前端。
+
+        **只推「变了的」任务。** 每个任务算一个指纹（进度、速度、
+        状态……），指纹变了才推 task_updated。前端收到后只更新那
+        一行，不重画整个列表——这是推送比轮询省事的地方。
+        """
+        while True:
+            try:
+                tasks = [t.to_dict() for t in self.engine.snapshot()]
+            except Exception as err:
+                log.debug(CAT_GUI, f"推送循环取任务失败: {err}")
+                tasks = []
+
+            seen: set[str] = set()
+            for task in tasks:
+                task_id = task.get("id") or ""
+                if not task_id:
+                    continue
+                seen.add(task_id)
+                fingerprint = self._task_fingerprint(task)
+                if self._push_fingerprints.get(task_id) != fingerprint:
+                    self._push_fingerprints[task_id] = fingerprint
+                    self._emit_event("task_updated", task)
+
+            for task_id in list(self._push_fingerprints):
+                if task_id not in seen:
+                    self._push_fingerprints.pop(task_id, None)
+                    self._emit_event("task_removed", {"id": task_id})
+
+            self._emit_event("global_speed_updated", self._global_speed_payload(tasks))
+
+            await asyncio.sleep(0.7)
+
+    @staticmethod
+    def _task_fingerprint(task: dict) -> str:
+        """任务的「变了没有」指纹。
+
+        只取会变的字段——文件名、分类这些不变的东西算进去只是
+        白白让指纹变。进度和速度每轮都在变，所以它们必须在。
+        """
+        volatile = (
+            "state",
+            "bytes_done",
+            "total_bytes",
+            "speed_bytes_per_sec",
+            "speed_limit_bytes_per_sec",
+            "completed_chunks",
+            "chunk_count",
+            "error_message",
+            "active_connections",
+            "uploaded_bytes",
+            "queued_position",
+        )
+        return "|".join(str(task.get(key)) for key in volatile)
+
+    def _global_speed_payload(self, tasks: list[dict]) -> dict:
+        """全局速度（契约 §3.2 的 global_speed_updated）。
+
+        **速度是所有「下载中」任务的速度之和**，不是平均——
+        状态栏要显示的是「现在一共在跑多快」。
+        """
+        speed = 0.0
+        active = 0
+        for task in tasks:
+            state = task.get("state")
+            if state == "downloading":
+                speed += float(task.get("speed_bytes_per_sec") or 0)
+                active += 1
+            elif state == "queued":
+                active += 1
+        limit = float(getattr(self.settings_store.settings, "bandwidth_bytes_per_sec", 0) or 0)
+        return {
+            "bytes_per_sec": round(speed, 2),
+            "limit_bytes_per_sec": limit,
+            "active_count": active,
+        }
 
     # -- 启动时的初始化 ----------------------------------------------
 
@@ -127,13 +293,17 @@ class GuiBridge:
         settings = self.settings_store.settings
 
         # 把设置推给引擎
-        self._run(self.engine.set_speed_limit(float(settings.bandwidth_bytes_per_sec)))
-        self.engine.set_max_threads(settings.threads_default)
-        self.engine.set_ignore_ssl(settings.network_ignore_ssl)
+        self._apply_engine_setting("set_speed_limit", float(settings.bandwidth_bytes_per_sec))
+        self._apply_engine_setting("set_max_threads", settings.threads_default)
+        self._apply_engine_setting("set_ignore_ssl", settings.network_ignore_ssl)
         get_logger().update_settings(settings.log_settings())
 
         # 计划任务调度
         self.schedules.start(self._on_schedule_fire)
+
+        # 推送通道（契约 §3.2）。启动之后前端靠它拿更新，
+        # 轮询降频到 1.5s 只当兜底。
+        self.start_event_push()
 
         return {
             "app": self.get_app_info(),
@@ -164,20 +334,40 @@ class GuiBridge:
 
     # -- 任务列表 ----------------------------------------------------
 
-    def get_tasks(self) -> list[dict]:
+    def get_tasks(self, filter: dict | None = None) -> list[dict]:
         """任务列表。
 
-        不带分片明细——分片有 32~128 项，每 700ms 传一次的话
+        不带分片明细——分片有 32~128 项，每 1.5s 传一次的话
         光序列化就是无谓开销。分片只在详情面板展开时单独取。
 
-        **顺带做终态检测。** 前端每 700ms 轮询一次，这里对比上一轮
-        的状态，发现新转终态的任务就发通知。Swift 版是在
-        DownloadListStore 里检测任务转终态时发通知（那边有状态变化
-        的推送），Python 侧靠轮询的副作用来做——效果一样。
+        **顺带做终态检测。** 对比上一轮的状态，发现新转终态的任务
+        就发通知。Swift 版是在 DownloadListStore 里检测任务转终态
+        时发通知（那边有状态变化的推送），Python 侧靠轮询的副作用
+        来做——效果一样。
+
+        `filter` 是契约 §3.1 定的：可含 `state` / `category`，
+        None = 全部。前端目前自己过滤（筛选器切得快，不值得每轮
+        往返一趟），但 CLI 和外部调用方按契约能用。
         """
         tasks = [task.to_dict() for task in self.engine.snapshot()]
         self._notify_terminal(tasks)
-        return tasks
+        return self._filter_tasks(tasks, filter)
+
+    @staticmethod
+    def _filter_tasks(tasks: list[dict], filter: dict | None) -> list[dict]:
+        """按契约 §3.1 的 filter 过滤任务。"""
+        if not filter or not isinstance(filter, dict):
+            return tasks
+        state = filter.get("state")
+        category = filter.get("category")
+        result = tasks
+        if state:
+            wanted = {state} if isinstance(state, str) else set(state)
+            result = [t for t in result if t.get("state") in wanted]
+        if category:
+            wanted = {category} if isinstance(category, str) else set(category)
+            result = [t for t in result if t.get("category") in wanted]
+        return result
 
     def _notify_terminal(self, tasks: list[dict]) -> None:
         """发现新转终态的任务就发通知。
@@ -232,6 +422,16 @@ class GuiBridge:
         except Exception as err:
             log.debug(CAT_GUI, f"系统通知发送失败: {err}")
 
+        # 同时推给前端（契约 §3.2 的 notice）——窗口在前台时，
+        # 用户先看到的是窗口里的提示，不是系统横幅。
+        self._emit_event(
+            "notice",
+            {
+                "level": "info" if kind == "completed" else "error",
+                "message": f"{title}：{filename}" if filename else title,
+            },
+        )
+
     def get_task_chunks(self, task_id: str) -> list[dict]:
         """单个任务的分片明细。详情面板用。"""
         return self.engine.get_chunks(task_id)
@@ -240,33 +440,98 @@ class GuiBridge:
         task = self.engine.get(task_id)
         return task.to_dict(with_chunks=True) if task else None
 
-    def add_url(
-        self,
-        url: str,
-        filename: str | None = None,
-        category: str | None = None,
-        save_dir: str | None = None,
-        max_threads: int | None = None,
-    ) -> dict:
-        """添加一个下载。"""
+    # -- 契约 §3.1 的 9 个必需方法 ------------------------------------
+    #
+    # 名字必须一字不差，前端和 CLI 都按这张表调。旧名字保留在
+    # 下面做别名（`add_url` / `update_settings` / `get_task` …）。
+
+    def create_task(self, url: str, options: dict | None = None) -> dict:
+        """新建一个下载（契约 §3.1）。
+
+        `options` 可含：filename / save_dir / category / proxy /
+        headers / chunk_count / start_when / checksum / on_complete /
+        on_complete_script / referer。
+
+        返回 `{"ok": bool, "task_id": str|None, "error": str|None}`。
+        """
         url = (url or "").strip()
         if not url.lower().startswith(("http://", "https://")):
-            return {"ok": False, "error": "请输入有效的 http(s) 链接"}
+            return {"ok": False, "task_id": None, "error": "请输入有效的 http(s) 链接"}
 
+        opts = dict(options or {})
+        directory, err = self._resolve_destination(url, opts)
+        if directory is None:
+            return {"ok": False, "task_id": None, "error": err or "无法确定保存目录"}
+
+        # 计划下载：不立刻建任务，交给 schedules（契约 §6 的 StartSpec
+        # 里没有触发时间字段，「什么时候跑」只能由桥接层排）。
+        # 到点后 `_on_schedule_fire` 会把 URL 加进队列。
+        if (opts.get("start_when") or "").strip().lower() == "scheduled" and opts.get("start_at"):
+            try:
+                item = self.schedules.add(url, float(opts["start_at"]), opts.get("note") or "")
+            except Exception as err:
+                log.warning(CAT_GUI, f"计划任务创建失败: {err}")
+                return {"ok": False, "task_id": None, "error": f"计划任务创建失败: {err}"}
+            return {
+                "ok": True,
+                "task_id": None,
+                "error": None,
+                "scheduled": True,
+                "schedule_id": item.id,
+            }
+
+        spec = self._build_start_spec(url, directory, opts)
+        try:
+            ids = self._run_sync(self.engine.start([spec]))
+        except Exception as err:
+            log.warning(CAT_GUI, f"创建下载失败: {err}")
+            return {"ok": False, "task_id": None, "error": str(err)}
+        task_id = ids[0] if ids else ""
+        self._apply_category(task_id, opts.get("category"))
+        return {"ok": True, "task_id": task_id, "error": None}
+
+    def _apply_category(self, task_id: str, category: str | None) -> None:
+        """把用户选的分类写回任务。
+
+        **引擎是按 URL 猜分类的**（`category_from_url(spec.url)`），
+        但用户在新建对话框里可以手动选。两个分类对不上时，
+        文件落在用户选的目录里、列表却归到另一类——点分类筛选
+        找不到自己刚下的东西。
+
+        引擎建完任务就不再动 category 了，所以这里覆盖一下是安全的。
+        """
+        if not task_id or not category:
+            return
+        resolved = _resolve_category(category)
+        if resolved is None:
+            return
+        try:
+            task = self.engine.get(task_id)
+            if task is not None:
+                task.category = resolved.value
+        except Exception as err:
+            log.debug(CAT_GUI, f"设置任务分类失败: {err}")
+
+    def _resolve_destination(self, url: str, opts: dict) -> tuple[Path | None, str]:
+        """算出这个下载落到哪个目录。
+
+        显式给了 save_dir 就用它；否则按「自动分类」开关决定是落
+        根目录还是分类子目录。
+
+        Swift 对照：App/MainWindow/DownloadListStore.swift:367
+        是 `if !classifyEnabled { return downloads }`。
+        """
+        save_dir = (opts.get("save_dir") or "").strip()
         if save_dir:
             directory = Path(save_dir)
         else:
             base = paths.download_dir()
             settings = self.settings_store.settings
             if not settings.classify_enabled:
-                # 关掉自动分类 → 一律落基础目录，不进分类子目录。
-                #
-                # Swift 对照：App/MainWindow/DownloadListStore.swift:367
-                # 是 `if !classifyEnabled { return downloads }`。
                 directory = base
             else:
                 cat = category_from_url(url)
-                if category:
+                if opts.get("category"):
                     # `category` 有两种来源：
                     #   - 前端传的分类名（"video" / "music" …）
                     #   - 早期 API 传的扩展名（"mp4" / "mp3" …）
@@ -276,37 +541,303 @@ class GuiBridge:
                     # —— 直接拿分类枚举用，不查扩展名表。
                     #
                     # 两种都支持：先按分类名解析，解析不了再按扩展名查。
-                    cat = _resolve_category(category) or cat
+                    cat = _resolve_category(opts["category"]) or cat
                 directory = base / cat.folder_name
         try:
             directory.mkdir(parents=True, exist_ok=True)
         except OSError as err:
-            return {"ok": False, "error": f"无法创建目录: {err}"}
+            return None, f"无法创建目录: {err}"
+        return directory, ""
 
-        spec = StartSpec(
-            url=url,
-            destination_directory=directory,
-            filename_override=filename or None,
-            max_threads_override=max_threads if max_threads and max_threads > 0 else None,
-        )
-        ids = self._run(self.engine.start([spec]))
-        return {"ok": True, "task_id": ids[0] if ids else ""}
+    def _build_start_spec(self, url: str, directory: Path, opts: dict) -> StartSpec:
+        """按契约 §2.1 拼 StartSpec。
+
+        **只填引擎真的支持的字段。** 契约里的 StartSpec 比现在的
+        引擎多（headers / proxy / chunk_count_override / start_when /
+        checksum_algorithm / on_complete …）。引擎那边还没跟上时，
+        把不认识的字段硬塞进去会直接 TypeError，整个建任务失败——
+        那还不如先不传，等引擎补齐了自动带上。
+
+        丢掉的字段记一条日志，方便看出「这个功能还没生效」。
+        """
+        headers: dict[str, str] = {}
+        for key, value in (opts.get("headers") or {}).items():
+            name = str(key).strip()
+            content = str(value).strip()
+            if name and content:
+                headers[name] = content
+
+        chunk_count = opts.get("chunk_count")
+        try:
+            chunk_count = int(chunk_count) if chunk_count not in (None, "") else None
+        except (TypeError, ValueError):
+            chunk_count = None
+        if chunk_count is not None and chunk_count <= 0:
+            chunk_count = None
+
+        max_threads = opts.get("max_threads")
+        try:
+            max_threads = int(max_threads) if max_threads not in (None, "") else None
+        except (TypeError, ValueError):
+            max_threads = None
+        if max_threads is not None and max_threads <= 0:
+            max_threads = None
+
+        wanted = {
+            "url": url,
+            "destination_directory": directory,
+            "filename_override": (opts.get("filename") or "").strip() or None,
+            "max_threads_override": max_threads,
+            "referer": (opts.get("referer") or "").strip() or None,
+            "headers": headers,
+            "proxy": (opts.get("proxy") or "").strip() or None,
+            "chunk_count_override": chunk_count,
+            "start_when": (opts.get("start_when") or "now").strip() or "now",
+            "checksum_algorithm": (opts.get("checksum") or "").strip() or None,
+            "on_complete": (opts.get("on_complete") or "none").strip() or "none",
+            "on_complete_script": (opts.get("on_complete_script") or ""),
+        }
+        supported = {f.name for f in dataclasses.fields(StartSpec)}
+        dropped = [
+            key
+            for key, value in wanted.items()
+            if key not in supported and value not in (None, "", {}, "now", "none")
+        ]
+        if dropped:
+            log.info(CAT_GUI, f"引擎还不支持这些下载参数，先忽略: {dropped}")
+        return StartSpec(**{k: v for k, v in wanted.items() if k in supported})
 
     def pause_task(self, task_id: str) -> dict:
-        self._run(self.engine.pause(task_id))
-        return {"ok": True}
+        """暂停一个任务。"""
+        try:
+            self._run(self.engine.pause(task_id))
+        except Exception as err:
+            return {"ok": False, "error": str(err)}
+        return {"ok": True, "error": None}
 
     def resume_task(self, task_id: str) -> dict:
-        self._run(self.engine.resume(task_id))
-        return {"ok": True}
+        """继续一个任务。"""
+        try:
+            self._run(self.engine.resume(task_id))
+        except Exception as err:
+            return {"ok": False, "error": str(err)}
+        return {"ok": True, "error": None}
 
     def cancel_task(self, task_id: str) -> dict:
-        self._run(self.engine.cancel(task_id))
-        return {"ok": True}
+        """取消一个任务（旧名字，别删）。"""
+        try:
+            self._run(self.engine.cancel(task_id))
+        except Exception as err:
+            return {"ok": False, "error": str(err)}
+        return {"ok": True, "error": None}
 
-    def remove_task(self, task_id: str) -> dict:
-        self._run(self.engine.remove(task_id))
-        return {"ok": True}
+    def remove_task(self, task_id: str, delete_file: bool = False) -> dict:
+        """从列表里移除一个任务。
+
+        `delete_file` 决定**已完成的成品**要不要一起删掉。
+        默认 False——用户点「移除」多半只是不想看见了，文件还得留着。
+        """
+        destination = ""
+        try:
+            task = self.engine.get(task_id)
+            destination = getattr(task, "destination", "") if task else ""
+        except Exception as err:
+            log.debug(CAT_GUI, f"取任务目标路径失败: {err}")
+        if delete_file and destination:
+            self.delete_file(destination)
+        try:
+            self._run(self.engine.remove(task_id))
+        except Exception as err:
+            return {"ok": False, "error": str(err)}
+        return {"ok": True, "error": None}
+
+    def get_task_detail(self, task_id: str) -> dict:
+        """单个任务的完整详情（契约 §3.1）。
+
+        返回 `{"task": {...}, "chunks": [...], "error": {...}|null,
+        "speed_history": [...]}`。前端详情面板一次拿全，不用分四次
+        往返（往返多的时候用户会看到面板一半一半地填）。
+        """
+        task = self.engine.get(task_id)
+        return {
+            "task": task.to_dict() if task else None,
+            "chunks": self.get_task_chunks(task_id),
+            "error": self.get_task_error(task_id),
+            "speed_history": self.get_speed_history(task_id),
+        }
+
+    def set_global_speed_limit(self, kbps: int | None) -> dict:
+        """设置全局限速（契约 §3.1）。
+
+        **参数单位是 KB/s**（整数），None = 不限速。
+        存进设置的是 bytes/s——存储层的单位不动，单位转换只发生
+        在这个边界上（跟设置页的带宽输入框一个规矩）。
+        """
+        if kbps is None:
+            bytes_per_sec = 0
+        else:
+            try:
+                bytes_per_sec = max(0, int(kbps)) * 1024
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "限速必须是整数（KB/s）"}
+        try:
+            self.settings_store.set("bandwidth_bytes_per_sec", bytes_per_sec)
+            self._apply_engine_setting("set_speed_limit", float(bytes_per_sec))
+        except Exception as err:
+            return {"ok": False, "error": str(err)}
+        return {"ok": True, "error": None}
+
+    # -- 契约 §3.1 的新增方法 ----------------------------------------
+
+    def probe_url(self, url: str, referer: str | None = None) -> dict:
+        """探测 URL，给新建任务对话框用（规格 §2.2 的自动解析）。
+
+        **探测失败不是终态**——返回 ok=False，调用方让用户改完重试，
+        弹窗不关。
+
+        `referer` 是可选的：有些站点不带 Referer 直接探测会被拒，
+        探测时带上用户填的 Referer 更准。
+
+        引擎还没实现 probe_url 时返回 ok=False + 说明，前端照样
+        显示「解析失败 + 重新解析」，不让对话框崩掉。
+        """
+        empty = {
+            "ok": False,
+            "filename": None,
+            "size": None,
+            "final_url": None,
+            "accepts_ranges": False,
+            "error": None,
+            "error_category": None,
+        }
+        probe = getattr(self.engine, "probe_url", None)
+        if probe is None:
+            empty["error"] = "引擎还没实现 URL 探测"
+            empty["error_category"] = "unknown"
+            return empty
+        try:
+            result = self._run_sync(probe((url or "").strip(), referer or None))
+        except Exception as err:
+            log.debug(CAT_GUI, f"探测 URL 失败: {err}")
+            empty["error"] = str(err)
+            empty["error_category"] = "unknown"
+            return empty
+        if not isinstance(result, dict):
+            return empty
+        merged = dict(empty)
+        merged.update(result)
+        return merged
+
+    def set_global_proxy(self, proxy: str | None) -> dict:
+        """设置全局代理。None / "" = 清除。"""
+        value = (proxy or "").strip()
+        setter = getattr(self.engine, "set_global_proxy", None)
+        if setter is None:
+            return {"ok": False, "error": "引擎还没实现全局代理"}
+        try:
+            self._run(setter(value or None))
+        except Exception as err:
+            return {"ok": False, "error": str(err)}
+        self.settings_store.set("proxy_url", value)
+        return {"ok": True, "error": None}
+
+    def set_task_proxy(self, task_id: str, proxy: str | None) -> dict:
+        """给单个任务设代理覆盖。"""
+        value = (proxy or "").strip()
+        setter = getattr(self.engine, "set_task_proxy", None)
+        if setter is None:
+            return {"ok": False, "error": "引擎还没实现任务级代理"}
+        try:
+            self._run(setter(task_id, value or None))
+        except Exception as err:
+            return {"ok": False, "error": str(err)}
+        return {"ok": True, "error": None}
+
+    def set_task_options(self, task_id: str, options: dict | None) -> dict:
+        """改任务的可选项：校验算法 / 完成后行为 / 代理。"""
+        setter = getattr(self.engine, "set_task_options", None)
+        if setter is None:
+            return {"ok": False, "error": "引擎还没实现任务选项"}
+        try:
+            self._run(setter(task_id, dict(options or {})))
+        except Exception as err:
+            return {"ok": False, "error": str(err)}
+        return {"ok": True, "error": None}
+
+    def move_task(self, task_id: str, position: str) -> dict:
+        """调整队列顺序：`top` 置顶 / `bottom` 置底。"""
+        where = (position or "").strip().lower()
+        if where not in ("top", "bottom"):
+            return {"ok": False, "error": "位置只能是 top 或 bottom"}
+        mover = getattr(self.engine, "move_task", None)
+        if mover is None:
+            return {"ok": False, "error": "引擎还没实现队列排序"}
+        try:
+            self._run(mover(task_id, where))
+        except Exception as err:
+            return {"ok": False, "error": str(err)}
+        return {"ok": True, "error": None}
+
+    def get_task_error(self, task_id: str) -> dict | None:
+        """单个任务的错误详情。
+
+        引擎的 `get_task_error` 还没上线时，退回任务摘要里的
+        `error_message`——信息少一点，但「为什么失败」不至于空白。
+        """
+        getter = getattr(self.engine, "get_task_error", None)
+        if getter is not None:
+            try:
+                return getter(task_id)
+            except Exception as err:
+                log.debug(CAT_GUI, f"取任务错误失败: {err}")
+        task = self.engine.get(task_id)
+        message = getattr(task, "error_message", None) if task else None
+        if not message:
+            return None
+        return {
+            "category": "unknown",
+            "message": message,
+            "detail": "",
+            "retryable": False,
+            "status": None,
+        }
+
+    def get_speed_history(self, task_id: str) -> list[dict]:
+        """最近 60 秒的速度采样点。
+
+        引擎还没实现时返回空列表——前端会改用自己轮询攒的曲线。
+        """
+        getter = getattr(self.engine, "get_speed_history", None)
+        if getter is None:
+            return []
+        try:
+            return list(getter(task_id) or [])
+        except Exception as err:
+            log.debug(CAT_GUI, f"取速度历史失败: {err}")
+            return []
+
+    # -- 旧名字（别名）------------------------------------------------
+    #
+    # 前端和 CLI 还在用这些名字，别删。
+
+    def add_url(
+        self,
+        url: str,
+        filename: str | None = None,
+        category: str | None = None,
+        save_dir: str | None = None,
+        max_threads: int | None = None,
+    ) -> dict:
+        """添加一个下载（旧名字，等价于 create_task）。"""
+        return self.create_task(
+            url,
+            {
+                "filename": filename,
+                "category": category,
+                "save_dir": save_dir,
+                "max_threads": max_threads,
+            },
+        )
 
     def clear_completed(self) -> dict:
         self._run(self.engine.clear_completed())
@@ -325,18 +856,38 @@ class GuiBridge:
         return {"ok": True}
 
     def retry_task(self, task_id: str) -> dict:
-        """重试失败的任务。"""
-        self._run(self.engine.resume(task_id))
-        return {"ok": True}
+        """重试失败的任务。
+
+        契约 §3.1：优先用引擎的 `retry_task`（从持久化进度恢复），
+        引擎还没实现时退回 `resume`。
+        """
+        retry = getattr(self.engine, "retry_task", None)
+        try:
+            if retry is not None:
+                self._run(retry(task_id))
+            else:
+                self._run(self.engine.resume(task_id))
+        except Exception as err:
+            return {"ok": False, "error": str(err)}
+        return {"ok": True, "error": None}
 
     def set_task_speed_limit(self, task_id: str, bytes_per_sec: float) -> dict:
         self._run(self.engine.set_task_speed_limit(task_id, float(bytes_per_sec)))
         return {"ok": True}
 
     def relink_task(self, task_id: str, new_url: str) -> dict:
-        """给等待新链接的任务换链接。"""
-        result = self._run(self.engine.relink(task_id, new_url))
-        return result
+        """给等待新链接的任务换链接。
+
+        **要等结果**——引擎会返回 {"decision": "unsafeReject", ...}
+        这种「拒绝换链」的判断，前端靠它提示用户。用「发了就不管」的
+        方式跑的话，返回值恒为 None，拒绝的提示就永远不弹。
+        """
+        try:
+            result = self._run_sync(self.engine.relink(task_id, new_url))
+        except Exception as err:
+            log.warning(CAT_GUI, f"换链接失败: {err}")
+            return {"decision": "error", "reason": str(err)}
+        return result if isinstance(result, dict) else {"decision": "ok"}
 
     # -- 文件操作 ----------------------------------------------------
 
@@ -401,21 +952,64 @@ class GuiBridge:
     # -- 设置 --------------------------------------------------------
 
     def get_settings(self) -> dict:
+        """全部设置（契约 §3.1）。"""
         return self.settings_store.settings.to_dict()
 
-    def update_settings(self, changes: dict) -> dict:
-        """改设置并立即生效。"""
+    def save_settings(self, changes: dict) -> dict:
+        """改设置并立即生效（契约 §3.1）。
+
+        **只改传入的键**——前端只知道自己改了哪几个。
+
+        改完之后把影响引擎的几项重新推一遍：限速、线程数、
+        SSL 校验、日志级别。全局代理也一起同步（契约 §6 的
+        proxy_url / proxy_scheme）。
+        """
+        if not isinstance(changes, dict):
+            return {"ok": False, "error": "设置必须是一个对象"}
         self.settings_store.update(changes)
         settings = self.settings_store.settings
-        self._run(self.engine.set_speed_limit(float(settings.bandwidth_bytes_per_sec)))
-        self.engine.set_max_threads(settings.threads_default)
-        self.engine.set_ignore_ssl(settings.network_ignore_ssl)
-        get_logger().update_settings(settings.log_settings())
-        return {"ok": True, "settings": settings.to_dict()}
+        try:
+            self._apply_engine_setting("set_speed_limit", float(settings.bandwidth_bytes_per_sec))
+            self._apply_engine_setting("set_max_threads", settings.threads_default)
+            self._apply_engine_setting("set_ignore_ssl", settings.network_ignore_ssl)
+            get_logger().update_settings(settings.log_settings())
+            self._apply_global_proxy(settings)
+        except Exception as err:
+            log.warning(CAT_GUI, f"应用设置失败: {err}")
+            return {"ok": False, "error": str(err)}
+        payload = settings.to_dict()
+        # 推给前端——别的窗口（或者同一窗口的另一个视图）得知道设置变了。
+        self._emit_event("settings_updated", payload)
+        return {"ok": True, "settings": payload}
+
+    def _apply_global_proxy(self, settings) -> None:
+        """把设置里的全局代理同步给引擎。
+
+        引擎还没实现 set_global_proxy 时静默跳过——代理设置存着，
+        等引擎补齐了自动生效，比现在报错强。
+        """
+        setter = getattr(self.engine, "set_global_proxy", None)
+        if setter is None:
+            return
+        proxy = (getattr(settings, "proxy_url", "") or "").strip()
+        if not proxy:
+            return
+        scheme = (getattr(settings, "proxy_scheme", "") or "http").strip()
+        url = proxy if "://" in proxy else f"{scheme}://{proxy}"
+        try:
+            self._run(setter(url))
+        except Exception as err:
+            log.warning(CAT_GUI, f"设置全局代理失败: {err}")
+
+    def update_settings(self, changes: dict) -> dict:
+        """改设置（旧名字，等价于 save_settings）。"""
+        return self.save_settings(changes)
 
     def set_language(self, language: str) -> dict:
         self.settings_store.set("locale", language)
-        return {"ok": True, "translations": I18n(language).catalog()}
+        catalog = I18n(language).catalog()
+        self._emit_event("settings_updated", self.get_settings())
+        return {"ok": True, "translations": catalog}
 
     def set_open_at_login(self, enabled: bool) -> dict:
         result = set_open_at_login(enabled)
@@ -579,7 +1173,7 @@ class GuiBridge:
 
     # -- 剪贴板候选 --------------------------------------------------
 
-    def get_clipboard_candidate(self) -> dict | None:  # noqa: D
+    def get_clipboard_candidate(self) -> dict | None:
         """前端轮询这个，拿剪贴板里发现的下载链接。"""
         with self._lock:
             candidate = self._clipboard_candidate
@@ -635,5 +1229,5 @@ class GuiBridge:
             return {"ok": False, "error": str(err)}
         if not result:
             return {"ok": False, "cancelled": True}
-        path = result[0] if isinstance(result, (list, tuple)) else str(result)
+        path = result[0] if isinstance(result, list | tuple) else str(result)
         return {"ok": True, "path": path}

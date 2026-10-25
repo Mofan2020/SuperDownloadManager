@@ -1,0 +1,50 @@
+{
+  "manifest_version": 3,
+  "name": "Super Download Manager",
+  "version": "2.0.6",
+  "description": "把浏览器下载交给 Super Download Manager 接管：多线程、断点续传、限速。",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "64": "icons/icon-64.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "Super Download Manager",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "permissions": [
+    "downloads",
+    "downloads.open",
+    "webRequest",
+    "cookies",
+    "storage",
+    "scripting",
+    "activeTab",
+    "contextMenus",
+    "nativeMessaging"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["sniffer.js"],
+      "css": ["hover-button.css"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

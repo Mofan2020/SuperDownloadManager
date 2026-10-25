@@ -1,0 +1,10 @@
+{
+  "name": "com.skyc8266.superdownloadmanager",
+  "description": "Super Download Manager 浏览器接管宿主",
+  "path": "/Users/REPLACE_WITH_YOUR_USERNAME/Library/Application Support/SuperDownloadManager/native-host/sdmd-native-host",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://REPLACE_WITH_EXTENSION_ID/",
+    "moz-extension://REPLACE_WITH_FIREFOX_EXTENSION_ID/"
+  ]
+}

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import threading
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -40,9 +40,31 @@ class Settings:
     notify_on_complete: bool = True
     hide_dock_when_window_closed: bool = False
     toolbar_show_labels: bool = True
+    #: 主题：system（跟随系统）/ light / dark。
+    #: "system" 时前端**不设** data-theme 属性，让 prefers-color-scheme 说话——
+    #: 写死成 light 再在深色系统下显示浅色，比什么都不做更糟。
+    theme: str = "system"
+    #: 任务列表里被隐藏的列（列 id 列表）。
+    #: 默认空 = 全部显示。列可见性是纯 UI 偏好，不该进 Swift 版的键空间，
+    #: 所以 key 用契约 §6 规定的 `sdm.<字段名>` 形式。
+    hidden_columns: list[str] = field(default_factory=list)
+
+    # 队列与并发
+    #: 同时活跃的任务数上限（契约 §2.4）。超出的任务停在 queued。
+    max_concurrent_tasks: int = 5
+    #: 动态分段的起点连接数（契约 §2.5）。
+    initial_connections: int = 2
+    #: 分片数上限（契约 §2.5）。
+    max_chunk_count: int = 32
 
     # 网络
     network_ignore_ssl: bool = False
+    #: 全局代理。空 = 不走代理。
+    proxy_url: str = ""
+    #: 代理协议：http / https / socks4 / socks5。
+    proxy_scheme: str = "http"
+    #: 浏览器接管配对 token（契约 §4.2）。空 = 还没配过。
+    browser_pair_token: str = ""
 
     # 日志
     logs_level: int = int(LogLevel.INFO)
@@ -82,6 +104,17 @@ _KEY_MAP = {
     "sdm.notify.onComplete": "notify_on_complete",
     "sdm.hideDockWhenWindowClosed": "hide_dock_when_window_closed",
     "sdm.toolbar.showLabels": "toolbar_show_labels",
+    # 契约 §6 新增键。Swift 版没有对应的键，按契约的规定用
+    # `sdm.<字段名>` 形式——别自作主张起个 camelCase 的名字，
+    # 将来 Swift 版真加了这个设置，两边的键名会对不上。
+    "sdm.theme": "theme",
+    "sdm.hidden_columns": "hidden_columns",
+    "sdm.max_concurrent_tasks": "max_concurrent_tasks",
+    "sdm.initial_connections": "initial_connections",
+    "sdm.max_chunk_count": "max_chunk_count",
+    "sdm.proxy_url": "proxy_url",
+    "sdm.proxy_scheme": "proxy_scheme",
+    "sdm.browser_pair_token": "browser_pair_token",
     "sdm.network.ignoreSSL": "network_ignore_ssl",
     "sdm.logs.level": "logs_level",
     "sdm.logs.persistence": "logs_persistence",
@@ -140,12 +173,21 @@ class SettingsStore:
                     if isinstance(value, int) and not isinstance(value, bool):
                         setattr(self._settings, field_name, value)
                 elif isinstance(current, float):
-                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    if isinstance(value, int | float) and not isinstance(value, bool):
                         setattr(self._settings, field_name, float(value))
                 elif isinstance(current, str):
                     if isinstance(value, str):
                         setattr(self._settings, field_name, value)
-                elif current is None and (value is None or isinstance(value, (int, float, str))):
+                elif isinstance(current, list):
+                    # 列表型设置（列可见性）也要能读回来。
+                    #
+                    # **不加这一支的话 `hidden_columns` 永远存不进去**——
+                    # 下面所有 isinstance 分支都不匹配 list，值会被
+                    # 静默丢掉，用户改了列可见性，下次启动又变回去。
+                    # 逐项校验类型：列表里混进非字符串会让前端比较时炸掉。
+                    if isinstance(value, list) and all(isinstance(x, str) for x in value):
+                        setattr(self._settings, field_name, list(value))
+                elif current is None and (value is None or isinstance(value, int | float | str)):
                     setattr(self._settings, field_name, value)
         return self._settings
 
@@ -179,8 +221,17 @@ class SettingsStore:
         """批量改。未知键忽略。"""
         with self._lock:
             for name, value in changes.items():
-                if hasattr(self._settings, name):
-                    setattr(self._settings, name, value)
+                if not hasattr(self._settings, name):
+                    continue
+                current = getattr(self._settings, name)
+                # 列表型键只接受「字符串列表」。前端传别的结构（比如把
+                # hidden_columns 传成逗号分隔的字符串）时宁可不改——
+                # 写坏的结构会在渲染时炸掉，比不生效更难查。
+                if isinstance(current, list) and not (
+                    isinstance(value, list) and all(isinstance(x, str) for x in value)
+                ):
+                    continue
+                setattr(self._settings, name, value)
         self.save()
 
     def legacy_key(self, field_name: str) -> str:

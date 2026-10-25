@@ -12,16 +12,22 @@ IDM does it on Windows. macOS had no good equivalent. This is the cross-platform
 
 ## Features
 
-- **32 segments per download by default, up to 128.** The scheduler re-plans the segment layout before transfer starts when the file size and segment size do not line up.
+- **Dynamic segmentation.** The segment layout grows while the transfer runs instead of being cut once at the start. The engine opens two connections, and only widens out once real progress arrives. A long-running segment gets split in half and the second half continues on a fresh connection.
+- **Graceful fallback.** A server that answers a Range request with `200` instead of `206` makes the engine fall back to a single stream instead of writing a corrupt file.
 - **Real streaming.** Bytes land on disk as they arrive. The progress bar moves while data is coming in, and a stalled connection is caught by an idle watchdog instead of a total-time limit.
 - **Resume from expired links.** When a server returns 403/410/451 mid-download, the task waits for a new link. The replacement URL is checked against the ETag and Content-Length before the download continues from the bytes already on disk.
+- **Session files.** The segment layout is written to `<name>.sdm.session.json`, so a crash or a kill can be resumed against the same layout.
+- **Structured errors.** Failures are classified into twelve categories, each with a plain-language explanation of what happened and whether a retry can fix it.
 - **Per-task and global speed limits,** plus time-of-day rules that throttle at night and unthrottle during the day.
+- **Proxies, checksums and post-completion actions.** Per-task or global HTTP/SOCKS proxies, optional md5/sha1/sha256 verification, and open-file / open-folder / run-script / sleep on completion.
 - **Automatic file categorization.** Downloads land in `~/Downloads/Video/`, `~/Downloads/Archives/` and so on. Files without extensions are identified by magic bytes.
-- **Browser takeover.** The Firefox extension intercepts downloads natively. The Safari extension sniffs links and hands them off.
+- **Browser takeover over Native Messaging.** Chrome, Edge, Firefox and Safari extensions hand downloads to the app and carry the page's Cookie, User-Agent and Referer with them.
+- **A task queue.** Only a bounded number of downloads run at once; the rest wait their turn and can be moved to the front or the back.
 - **`sdm` CLI.** Every command returns JSON, built to be called from shell scripts and AI agents.
 - **Background daemon with auto-start.** Survives logout and reboot.
-- **Liquid glass interface.** The window resizes freely and the layout reflows instead of clipping.
-- **macOS menu bar icon.** Add a URL, open the downloads folder, jump to settings — without switching to the window.
+- **Liquid glass interface.** The window resizes freely and the layout reflows instead of clipping. Light and dark themes.
+- **macOS menu bar and Dock.** A live status line in the menu bar, the overall progress on the Dock icon, and an AppleScript dictionary.
+- **Windows tray.** The same menu behaviour in the notification area, plus a registered `superdownloadmanager://` URL scheme.
 
 ## Requirements
 
@@ -83,8 +89,31 @@ Every command returns one line of JSON.
 
 See [`docs/extension-install.md`](docs/extension-install.md).
 
-- **Firefox** — load `manifest.json` as a temporary add-on for full download interception.
+The extensions talk to the app over **Native Messaging**. The app ships a small
+`sdmd-native-host` binary and installs the host manifest into your browser
+profile on first launch — no setup needed. The fallback channel is a loopback
+HTTP server that requires a pairing token.
+
+- **Chrome / Edge** — load the unpacked extension from `Extensions/Chrome/` or `Extensions/Edge/`. Downloads are intercepted and the page's cookies travel with them.
+- **Firefox** — load `Extensions/Firefox/manifest.json` as a temporary add-on for full download interception.
 - **Safari** — allow the unsigned extension manually. Apple does not permit download interception in Safari, so the extension sniffs links and hands them off instead.
+
+## AppleScript (macOS)
+
+The app ships an AppleScript dictionary, so it can be driven from Script Editor
+or any script that speaks Apple events:
+
+```applescript
+tell application "Super Download Manager"
+    set taskId to add download "https://example.com/big.zip"
+    pause all downloads
+    resume all downloads
+    get download list
+end tell
+```
+
+The commands go through the same task service as the GUI and the CLI — they
+never bypass the engine's state machine.
 
 ## File categorization
 

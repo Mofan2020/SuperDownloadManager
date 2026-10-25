@@ -12,3 +12,23 @@ platformdirs>=4.0
 #
 # 环境标记是必须的：Windows 上没有这个框架，装了直接失败。
 pyobjc-framework-UserNotifications>=12.0; sys_platform == "darwin"
+
+# macOS AppKit 绑定。
+#
+# **菜单栏（NSStatusItem）和 Dock 图标进度（NSDockTile）都要它。**
+# 少了它 `macos_status.install()` 会静默返回 False——菜单栏常驻入口
+# 整个消失，而且日志里只有一句「菜单栏图标没装上」。
+# 所以这个依赖跟 UserNotifications 一样是**必须的**，不是可选的。
+#
+# 环境标记是必须的：Windows 上没有这个框架，装了直接失败。
+pyobjc-framework-Cocoa>=12.0; sys_platform == "darwin"
+
+# Windows 系统托盘。
+#
+# **可选依赖**：macOS 那边用原生 NSStatusItem，不需要它。Windows 上
+# 没装的话 `sdm.gui.tray` 依然能 import（只是托盘不会出现），
+# 应用照常启动——常驻入口是加分项，不该挡住启动。
+#
+# Pillow 是 pystray 画托盘图标要的（pystray 的 Image 就是 PIL 的）。
+pystray>=0.19; sys_platform == "win32"
+Pillow>=10.0; sys_platform == "win32"

@@ -1,11 +1,15 @@
 """macOS 菜单栏（NSStatusItem）的行为。
 
-菜单结构照 Swift 版的 AppDelegate.makeMenu() 抄的——菜单项的标题、
-分组、快捷键都要对得上，不然跟 Swift 版行为不一致。
+菜单结构**照契约 §5.1** 来：状态行 / 显示主窗口 / 暂停全部 / 继续全部 /
+剪贴板监控 / 退出。
 
-真正碰 AppKit 的部分（建 status item、SF Symbol 图标）靠探针脚本
-验证，见 `pymain/scripts/probe_status_bar.py`。这里测的是不需要
-Cocoa 就能验的部分。
+> **这里跟以前的版本不一样。** 早先菜单是照 Swift 版
+> `AppDelegate.makeMenu()` 抄的（英文标题 + 加 URL / 访达 / 关于 / 设置）。
+> 契约 §5.1 把菜单钉死成六项中文菜单项，Swift 版的那些项不在契约里，
+> 所以菜单改了——**契约是并行开发的唯一真源**。
+
+真正碰 AppKit 的部分（建 status item、SF Symbol 图标、Dock 进度）
+靠代码审查 + 真机验证，这里测的是不需要 Cocoa 就能验的部分。
 """
 
 from __future__ import annotations
@@ -17,57 +21,69 @@ import pytest
 from sdm.gui import macos_status
 
 
-def test_menu_spec_matches_swift_version():
-    """菜单项的标题和快捷键要跟 Swift 版一致。"""
+def test_menu_spec_matches_the_contract():
+    """菜单项跟契约 §5.1 一字不差。
+
+    顺序也不能变——菜单栏是用户唯一能看到的功能清单。
+    """
     titles = [s.title for s in macos_status.MENU_SPEC if not s.separator]
     assert titles == [
-        "Open Main Window",
-        "Add URL…",
-        "Show Downloads in Finder",
-        "About Super Download Manager",
-        "Settings…",
-        "Quit Super Download Manager",
+        "空闲",
+        "显示主窗口",
+        "暂停全部",
+        "继续全部",
+        "剪贴板监控",
+        "退出",
     ]
 
 
 def test_menu_spec_shortcuts():
-    """Swift 版：⌘0 打开、⌘N 加 URL、⌘, 设置、⌘Q 退出。"""
+    """⌘0 打开主窗口、⌘Q 退出。"""
     by_action = {s.action: s for s in macos_status.MENU_SPEC if not s.separator}
     assert by_action["openMainWindow"].key_equivalent == "0"
-    assert by_action["addURL"].key_equivalent == "n"
-    assert by_action["openSettings"].key_equivalent == ","
     assert by_action["quitApp"].key_equivalent == "q"
-    for action in ("openMainWindow", "addURL", "openSettings", "quitApp"):
+    for action in ("openMainWindow", "quitApp"):
         assert by_action[action].command is True, f"{action} 该带 Command 修饰键"
 
 
 def test_menu_spec_separators():
-    """分组：主窗口/加 URL | Finder | 关于/设置 | 退出。"""
+    """分组：状态行 | 功能项 | 退出。"""
     kinds = ["sep" if s.separator else s.action for s in macos_status.MENU_SPEC]
     assert kinds == [
+        "statusLine",
+        "sep",
         "openMainWindow",
-        "addURL",
-        "sep",
-        "revealDownloads",
-        "sep",
-        "showAbout",
-        "openSettings",
+        "pauseAll",
+        "resumeAll",
+        "clipboardMonitor",
         "sep",
         "quitApp",
     ]
 
 
+def test_status_line_is_not_selectable():
+    """状态行只显示，不能点。"""
+    by_action = {s.action: s for s in macos_status.MENU_SPEC if not s.separator}
+    assert by_action["statusLine"].enabled is False
+
+
+def test_clipboard_item_is_checkable():
+    """「剪贴板监控」是勾选项。"""
+    by_action = {s.action: s for s in macos_status.MENU_SPEC if not s.separator}
+    assert by_action["clipboardMonitor"].checkable is True
+
+
 def test_every_action_has_a_handler_slot():
     """菜单里的每个动作都要有对应的处理方法名。
 
-    少一个就是点了没反应——Swift 版的 makeMenu 里也是一一对应的。
+    少一个就是点了没反应——菜单项跟处理器是一一对应的。
     """
     expected = {
+        "statusLine",
         "openMainWindow",
-        "addURL",
-        "revealDownloads",
-        "showAbout",
-        "openSettings",
+        "pauseAll",
+        "resumeAll",
+        "clipboardMonitor",
         "quitApp",
     }
     actual = {s.action for s in macos_status.MENU_SPEC if not s.separator}
@@ -78,14 +94,14 @@ def test_handler_dispatch():
     """注册了处理器就调得到，没注册的安静跳过。"""
     controller = macos_status.StatusBarController(bridge=None, window=None)
     seen: list[str] = []
-    controller.on("addURL", lambda: seen.append("addURL"))
+    controller.on("pauseAll", lambda: seen.append("pauseAll"))
     controller.on("quitApp", lambda: seen.append("quitApp"))
 
-    macos_status._dispatch(controller, "addURL")
+    macos_status._dispatch(controller, "pauseAll")
     macos_status._dispatch(controller, "quitApp")
     macos_status._dispatch(controller, "notRegistered")
 
-    assert seen == ["addURL", "quitApp"]
+    assert seen == ["pauseAll", "quitApp"]
 
 
 def test_handler_exception_does_not_propagate():
@@ -95,8 +111,16 @@ def test_handler_exception_does_not_propagate():
     def boom() -> None:
         raise RuntimeError("炸了")
 
-    controller.on("addURL", boom)
-    macos_status._dispatch(controller, "addURL")  # 不抛异常就算过
+    controller.on("pauseAll", boom)
+    macos_status._dispatch(controller, "pauseAll")  # 不抛异常就算过
+
+
+def test_update_status_records_the_status_text():
+    """状态行的文案更新后要留在 controller 上（菜单还没建时也要能算）。"""
+    controller = macos_status.StatusBarController(bridge=None, window=None)
+    text = controller.update_status(2.4 * 1024 * 1024, 3, 0)
+    assert text == "下载中 3 个 · 2.4 MB/s"
+    assert controller.status_text == text
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="只 macOS 有菜单栏")

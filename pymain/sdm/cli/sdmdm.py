@@ -148,7 +148,7 @@ def run(args: list[str] | None = None) -> int:
 
     if response.get("ok"):
         result = response.get("result")
-        if isinstance(result, (dict, list)):
+        if isinstance(result, dict | list):
             print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False))
         elif result is None:
             print("{}")

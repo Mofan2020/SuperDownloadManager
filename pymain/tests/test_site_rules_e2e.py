@@ -49,6 +49,31 @@ class _RecordingHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         type(self).requests.append(dict(self.headers))
         body = b"x" * 4096
+        rng = self.headers.get("Range")
+        if rng and rng.startswith("bytes="):
+            # **真按 Range 应答**：206 + Content-Range。
+            #
+            # 这个服务器原来一律回 200——它声明了 `Accept-Ranges: bytes`
+            # 却根本不认 Range。规格 §1.2.4 规定这种情况要退化成单流
+            # 下载（对 Range 请求返回 200 就是「服务器不支持分块」），
+            # 于是分片请求根本不会带 Range 头，下面两条测的就不是
+            # 「分片请求带规则头」这件事了。
+            spec = rng[len("bytes="):]
+            start_s, _, end_s = spec.partition("-")
+            start = int(start_s)
+            end = int(end_s) if end_s else len(body) - 1
+            end = min(end, len(body) - 1)
+            if start > end:
+                start, end = 0, len(body) - 1
+            chunk = body[start:end + 1]
+            self.send_response(206)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(len(chunk)))
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(body)}")
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            self.wfile.write(chunk)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "application/zip")
         self.send_header("Content-Length", str(len(body)))

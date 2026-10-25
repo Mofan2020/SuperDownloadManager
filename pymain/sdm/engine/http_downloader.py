@@ -12,9 +12,13 @@
 死连接由「空闲看门狗」判定（多久没来字节），而不是「总时长上限」。
 慢而健康的连接永远不会被杀。
 
-另外三个要点：
-- 重连时 Range 头从**已落盘字节数**继续，不是从分片起点重来。
+另外几个要点：
+- 重连时 Range 头从**已落盘字节**继续，不是从分片起点重来。
 - 403/410/451 归为「链接失效」类错误，不重试——重试只是浪费时间。
+- 写入是**有上限的**：动态分段会在下载途中缩短分片的区间，超出
+  上限的字节必须丢掉，否则两个分片的区间会重叠，文件就废了。
+- 进度上报的是**增量**，不是累计值。累计值会让文件级进度虚高
+  （2 MB 的文件报成 5 MB，取决于块大小）。
 - 忽略 SSL 验证是显式开关，默认关闭。
 """
 
@@ -33,6 +37,7 @@ import httpx
 from ..logging_setup import CAT_CHUNK, CAT_NET, get_logger
 from .content_sniffer import USER_AGENT, ContentProbe, ProbeError, merge_headers
 from .content_sniffer import probe as sniffer_probe
+from .errors import ErrorCategory, TaskError, error_for_status, parse_retry_after
 from .file_assembler import FileAssembler
 from .range_planner import Chunk
 from .speed_limiter import SpeedLimiter
@@ -55,18 +60,44 @@ class DownloadFailure(enum.Enum):
         return self.value
 
 
+#: 失败类型 → 规格 §5.1 的错误类别。
+#:
+#: `NOT_PARTIAL_CONTENT` 单独归到 `range_error`：规格说它「触发回退」，
+#: 不是「重试到失败」。
+_CATEGORY_BY_FAILURE: dict[DownloadFailure, ErrorCategory] = {
+    DownloadFailure.STATUS: ErrorCategory.SERVER_ERROR,
+    DownloadFailure.NOT_PARTIAL_CONTENT: ErrorCategory.RANGE_ERROR,
+    DownloadFailure.FORBIDDEN: ErrorCategory.AUTH,
+    DownloadFailure.TOO_MANY_REDIRECTS: ErrorCategory.CLIENT_ERROR,
+    DownloadFailure.NETWORK: ErrorCategory.NETWORK,
+    DownloadFailure.DECODING: ErrorCategory.CLIENT_ERROR,
+    DownloadFailure.UNKNOWN: ErrorCategory.UNKNOWN,
+}
+
+
 class DownloadError(Exception):
     """带失败分类的下载错误。"""
 
-    def __init__(self, kind: DownloadFailure, detail: str = "", status: int | None = None) -> None:
+    def __init__(
+        self,
+        kind: DownloadFailure,
+        detail: str = "",
+        status: int | None = None,
+        retry_after: float | None = None,
+    ) -> None:
         super().__init__(f"{kind.value}: {detail}" if detail else kind.value)
         self.kind = kind
         self.detail = detail
         self.status = status
+        self.retry_after = retry_after
 
     @property
     def is_retryable(self) -> bool:
-        """链接失效类错误重试没有意义——那是链接本身的问题。"""
+        """链接失效类错误重试没有意义——那是链接本身的问题。
+
+        `NOT_PARTIAL_CONTENT` 也不重试：服务器无视 Range，重试一万次
+        还是无视。它是给上层的**回退信号**，不是错误。
+        """
         return self.kind not in (
             DownloadFailure.FORBIDDEN,
             DownloadFailure.NOT_PARTIAL_CONTENT,
@@ -77,6 +108,27 @@ class DownloadError(Exception):
     def is_expired_link(self) -> bool:
         return self.kind == DownloadFailure.FORBIDDEN
 
+    @property
+    def category(self) -> ErrorCategory:
+        """这个失败对应的规格错误类别。"""
+        if self.status is not None and self.kind is DownloadFailure.STATUS:
+            return error_for_status(self.status).category
+        return _CATEGORY_BY_FAILURE.get(self.kind, ErrorCategory.UNKNOWN)
+
+    def to_task_error(self) -> TaskError:
+        """转成对外的错误描述（前端要显示的 category / message）。"""
+        if self.kind is DownloadFailure.STATUS and self.status is not None:
+            err = error_for_status(self.status, self.detail, self.retry_after)
+        else:
+            err = TaskError(
+                category=self.category,
+                detail=self.detail or str(self),
+                retryable=self.is_retryable,
+                status=self.status,
+                retry_after=self.retry_after,
+            )
+        return err
+
 
 @dataclass
 class ChunkResult:
@@ -86,6 +138,32 @@ class ChunkResult:
     bytes_written: int
     elapsed: float
     first_byte_at: float | None = None
+
+
+def _build_proxy_transport(proxy_url: str) -> httpx.AsyncBaseTransport | None:
+    """给 SOCKS 代理造一个传输层。
+
+    httpx 原生只支持 HTTP/HTTPS 代理。SOCKS4/5 需要 `httpx-socks`
+    这个第三方包——它没装就返回 None，让调用方给用户一个能看懂的
+    错误，而不是一个 ImportError 堆栈。
+    """
+    try:
+        from httpx_socks import AsyncProxyTransport
+    except ImportError:
+        return None
+    scheme = proxy_url.split("://", 1)[0].lower()
+    if scheme == "socks5":
+        return AsyncProxyTransport.from_url(proxy_url)
+    if scheme == "socks4":
+        # httpx-socks 的 SOCKS5 传输能兼容 SOCKS4 的大部分用法，
+        # 但显式用 socks4 模式更保险。
+        try:
+            from httpx_socks import AsyncProxyTransport
+
+            return AsyncProxyTransport.from_url(proxy_url, rdns=True)
+        except Exception:
+            return None
+    return None
 
 
 class HTTPDownloader:
@@ -101,16 +179,23 @@ class HTTPDownloader:
         ignore_ssl: bool = False,
         max_connections: int = 32,
         idle_timeout: float = 60.0,
-        max_retries: int = 6,
+        max_retries: int = 5,
         retry_backoff: float = 0.5,
+        retry_backoff_max: float = 30.0,
+        retry_jitter: float = 0.2,
         probe_retry_budget: float = 8.0,
         chunk_retry_budget: float = 30.0,
+        proxy: str | None = None,
     ) -> None:
         self.user_agent = user_agent
         self.ignore_ssl = ignore_ssl
         self.idle_timeout = idle_timeout
+        #: 规格 §1.5：每分片默认 5 次尝试。
         self.max_retries = max_retries
+        #: 规格 §1.5：退避基数 500ms，上限 30s，抖动 200ms 量级。
         self.retry_backoff = retry_backoff
+        self.retry_backoff_max = retry_backoff_max
+        self.retry_jitter = retry_jitter
         #: 探测阶段的总重试时间预算（秒）。
         #: 探测和分片是串行的，两层都按指数退避的话，
         #: 服务器一直返回 503 时用户要等 25 秒才看到失败——
@@ -121,6 +206,8 @@ class HTTPDownloader:
         #: 用户看到的是「下载中」卡半分钟然后失败。
         #: 超过预算就直接失败——再等下去也不会成功。
         self.chunk_retry_budget = chunk_retry_budget
+        #: 全局代理（规格 §1.6）。空 = 直连。
+        self.proxy = proxy or None
         self._client: httpx.AsyncClient | None = None
         self._max_connections = max_connections
         #: 连接建立时是否随机错开。默认开——避免所有分片同时建连接
@@ -148,13 +235,28 @@ class HTTPDownloader:
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
             verify = context
-        return httpx.AsyncClient(
-            limits=limits,
-            timeout=timeout,
-            follow_redirects=True,
-            verify=verify,
-            headers={"User-Agent": self.user_agent},
-        )
+
+        kwargs: dict = {
+            "limits": limits,
+            "timeout": timeout,
+            "follow_redirects": True,
+            "verify": verify,
+            "headers": {"User-Agent": self.user_agent},
+        }
+
+        if self.proxy:
+            scheme = self.proxy.split("://", 1)[0].lower()
+            if scheme in ("socks4", "socks5"):
+                transport = _build_proxy_transport(self.proxy)
+                if transport is None:
+                    raise RuntimeError(
+                        f"SOCKS 代理需要 httpx-socks 包才能用：{self.proxy}"
+                    )
+                kwargs["transport"] = transport
+            else:
+                kwargs["proxy"] = self.proxy
+
+        return httpx.AsyncClient(**kwargs)
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -175,6 +277,17 @@ class HTTPDownloader:
         self._client = None
         if old is not None:
             # 不能直接 close——在途请求会炸。标记一下让它们自然结束。
+            old._sdm_superseded = True  # type: ignore[attr-defined]
+
+    def set_proxy(self, value: str | None) -> None:
+        """换全局代理。跟 SSL 开关一样要重建客户端。"""
+        new = value or None
+        if new == self.proxy:
+            return
+        self.proxy = new
+        old = self._client
+        self._client = None
+        if old is not None:
             old._sdm_superseded = True  # type: ignore[attr-defined]
 
     async def aclose(self) -> None:
@@ -267,11 +380,16 @@ class HTTPDownloader:
         progress: Callable[[int], None] | None = None,
         headers: dict[str, str] | None = None,
         limiter: SpeedLimiter | None = None,
+        use_range: bool = True,
     ) -> ChunkResult:
         """把一个分片下完并落盘。
 
         失败时按可重试性重试；每次重试从**已落盘字节**继续，
         所以断线只损失一次重连，不损失已下载的数据。
+
+        `progress` 收到的是**增量**（本次写入的字节数），不是累计值。
+        上层把所有分片的增量求和，得到文件级进度——这个总量只会
+        单调上升。传累计值会让进度虚高好几倍。
         """
         last_error: DownloadError | None = None
         waited = 0.0
@@ -294,6 +412,7 @@ class HTTPDownloader:
                     progress=progress,
                     headers=headers,
                     limiter=limiter,
+                    use_range=use_range,
                 )
             except DownloadError as err:
                 if not err.is_retryable:
@@ -332,7 +451,17 @@ class HTTPDownloader:
             except Exception as err:
                 last_error = DownloadError(DownloadFailure.UNKNOWN, str(err))
 
-            backoff = self.retry_backoff * (2**attempt)
+            # 指数退避 + 抖动（规格 §1.5）。抖动是必要的：所有分片
+            # 同时失败时，没有抖动它们会**同时**重试，等于又一波
+            # 冲击服务器，容易把刚恢复的服务再打挂。
+            backoff = min(
+                self.retry_backoff * (2**attempt),
+                self.retry_backoff_max,
+            )
+            backoff += random.uniform(0, self.retry_jitter)
+            # 限流：服务器给了 Retry-After 就听它的。
+            if last_error.retry_after:
+                backoff = max(backoff, last_error.retry_after)
             if waited + backoff > self.chunk_retry_budget:
                 log.notice(
                     CAT_CHUNK,
@@ -381,6 +510,7 @@ class HTTPDownloader:
         progress: Callable[[int], None] | None,
         headers: dict[str, str] | None,
         limiter: SpeedLimiter | None,
+        use_range: bool = True,
     ) -> ChunkResult:
         """一次流式传输尝试。"""
         # 站点规则：按主机名匹配，命中就叠加 Referer / User-Agent /
@@ -400,7 +530,16 @@ class HTTPDownloader:
         request_headers = merge_headers(headers or {}, rule_headers)
         # Range 最后写死：分片的区间是按已落盘字节算出来的，
         # 外部传进来的头不能改它。
-        request_headers = merge_headers(request_headers, {"Range": f"bytes={start}-{chunk.end - 1}"})
+        #
+        # **请求的结束位置要在发请求之前定格。** 分片可能在请求发出
+        # 之后被拆短（动态分段），那时候 `chunk.end` 已经不是这次
+        # 请求要的范围了——用它去校验服务器回来的 Content-Range
+        # 会误判成「区间不匹配」，把好端端的下载判成失败。
+        requested_end = chunk.end - 1
+        if use_range:
+            request_headers = merge_headers(
+                request_headers, {"Range": f"bytes={start}-{requested_end}"}
+            )
 
         # 分片文件在字节流动前就打开并定位好。
         assembler.open_chunk(chunk.id, chunk.start)
@@ -408,6 +547,11 @@ class HTTPDownloader:
         started = time.monotonic()
         first_byte_at: float | None = None
         written = 0
+
+        # 写入上限的取值函数。分片被拆分时 `chunk.end` 会变小，
+        # 这里每次写之前都在锁内读一次当前值。
+        def _chunk_limit() -> int | None:
+            return chunk.end
 
         try:
             # 所有分片同时发起连接会撞服务器的 listen backlog，
@@ -432,14 +576,38 @@ class HTTPDownloader:
                     f"HTTP {status}",
                     status=status,
                 )
-            if status >= 500 or status == 429:
+            if status == 429:
+                raise DownloadError(
+                    DownloadFailure.STATUS,
+                    f"HTTP {status}",
+                    status=status,
+                    retry_after=parse_retry_after(response.headers.get("retry-after")),
+                )
+            if status >= 500:
                 raise DownloadError(DownloadFailure.STATUS, f"HTTP {status}", status=status)
             if status not in (200, 206):
                 raise DownloadError(DownloadFailure.STATUS, f"HTTP {status}", status=status)
-            if status == 200 and start > chunk.start:
-                # 服务器无视了 Range。续传请求拿到的是整个文件，
-                # 直接写进去会污染分片。
-                raise DownloadError(DownloadFailure.NOT_PARTIAL_CONTENT, "server ignored Range")
+            if use_range and status == 200:
+                # 服务器无视了 Range（规格 §1.2.4）。
+                #
+                # 这不是「重试一下就好」的错误——重试一万次它还是无视。
+                # 这是给上层的**回退信号**：改成单流下载，不分块。
+                #
+                # 必须**一个字节都不写**：200 的响应体是整个文件，
+                # 写进分片就废了。
+                raise DownloadError(
+                    DownloadFailure.NOT_PARTIAL_CONTENT,
+                    "服务器不支持分块请求（对 Range 请求返回 200）",
+                    status=status,
+                )
+            if not use_range and status == 206:
+                # 单流模式却拿到 206——服务器主动切了分块。
+                # 206 的 body 只是文件的一部分，按单流写会得到残缺文件。
+                raise DownloadError(
+                    DownloadFailure.NOT_PARTIAL_CONTENT,
+                    "单流请求却收到 206 响应",
+                    status=status,
+                )
             if status == 206:
                 # 服务器声称支持 Range，但返回的区间跟我们要的对不上。
                 # 典型场景：CDN 边缘节点缓存了别的 Range 响应，
@@ -447,17 +615,20 @@ class HTTPDownloader:
                 # 这种情况下把数据写进分片，文件就是错的——
                 # 而且错得很隐蔽：大小看着差不多，内容全乱。
                 # 所以必须当场拒绝，一个字节都不写。
+                #
+                # 比的是**这次请求实际要的范围**，不是分片现在的
+                # 结束位置——分片可能在请求发出之后被拆短。
                 content_range = response.headers.get("content-range", "")
-                if not self._content_range_matches(content_range, start, chunk.end - 1):
+                if not self._content_range_matches(content_range, start, requested_end):
                     raise DownloadError(
                         DownloadFailure.NOT_PARTIAL_CONTENT,
-                        f"Content-Range 不匹配：请求 bytes={start}-{chunk.end - 1}，"
+                        f"Content-Range 不匹配：请求 bytes={start}-{requested_end}，"
                         f"收到 {content_range or '(缺失)'}",
                     )
 
             log.notice(
                 CAT_CHUNK,
-                f"chunk {chunk.id} GET {url} range=bytes={start}-{chunk.end - 1} status={status}",
+                f"chunk {chunk.id} GET {url} range=bytes={start}-{requested_end} status={status}",
             )
 
             async for block in response.aiter_bytes(chunk_size=64 * 1024):
@@ -465,9 +636,28 @@ class HTTPDownloader:
                     first_byte_at = time.monotonic() - started
                 if limiter is not None and limiter.is_enabled():
                     await limiter.consume(len(block))
-                written += assembler.append(block, chunk.id)
-                if progress is not None:
-                    progress(written)
+
+                # **写入是有上限的。** 动态分段会在下载途中把在途分片
+                # 对半拆开，分片的区间随之缩短。传**取值函数**而不是
+                # 取好的数值——拆分线程可能刚刚把它改小了，而取值
+                # 函数是在分片锁内调用的，读和写不会错开。
+                #
+                # 超出上限的字节属于新分片的区间，留着就会重叠，
+                # 合并出来的文件是坏的（而且大小看着正常，极难发现）。
+                n, truncated = assembler.append_limited(block, chunk.id, _chunk_limit)
+                if n:
+                    written += n
+                    if progress is not None:
+                        # 报**增量**，不是累计值。
+                        progress(n)
+                if truncated:
+                    # 分片被拆短了，这一段到此为止。
+                    # 不算失败——剩下的字节归新分片。
+                    log.notice(
+                        CAT_CHUNK,
+                        f"chunk {chunk.id} 因分片拆分停止于 {chunk.start + written}",
+                    )
+                    break
 
             elapsed = time.monotonic() - started
             log.notice(CAT_CHUNK, f"chunk {chunk.id} 完成 bytes={written} elapsed={elapsed:.2f}s")
@@ -488,8 +678,8 @@ class HTTPDownloader:
         规则**覆盖**已有的同名头——UA 尤其重要：规则里填了 UA 就是
         「这个站点只认这个 UA」，追加在默认 UA 后面等于没填。
 
-        头名大小写不敏感（`User-Agent` 和 `user-agent` 是同一个头），
-        合并走 `merge_headers`，不会留下两个 UA 让服务器挑花眼。
+        头名大小写不敏感（`User-Agent` 和 `user-agent` 是同一个
+        头），合并走 `merge_headers`，不会留下两个 UA 让服务器挑花眼。
 
         没有匹配的规则就原样返回。规则里没填的字段不动已有的头——
         规则只做叠加，不做清空。

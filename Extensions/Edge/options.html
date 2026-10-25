@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Super Download Manager 扩展设置</title>
+    <style>
+      body {
+        font: 14px/1.6 -apple-system, "PingFang SC", sans-serif;
+        margin: 24px;
+        max-width: 560px;
+        color: #1f2937;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 4px;
+      }
+      .muted {
+        color: #6b7280;
+        font-size: 13px;
+      }
+      input[type="text"] {
+        width: 100%;
+        padding: 6px 8px;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        font: inherit;
+        box-sizing: border-box;
+      }
+      button {
+        margin-top: 10px;
+        padding: 6px 14px;
+        border: 0;
+        border-radius: 6px;
+        background: #8b5cf6;
+        color: #fff;
+        font: inherit;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: #e5e7eb;
+        color: #111827;
+        margin-left: 8px;
+      }
+      #status {
+        margin-top: 12px;
+        font-size: 13px;
+      }
+      code {
+        background: #f3f4f6;
+        padding: 1px 4px;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Super Download Manager 扩展设置</h1>
+    <p class="muted">
+      扩展通过浏览器的 Native Messaging 与本机应用通信。
+      如果本机没装原生宿主，可以在这里手动填入应用里显示的配对 token
+      （走回环 HTTP 通道 <code>127.0.0.1:7955</code>）。
+    </p>
+
+    <label for="token">配对 token</label>
+    <input id="token" type="text" placeholder="粘贴应用里的配对 token" />
+    <div>
+      <button id="save">保存</button>
+      <button id="clear" class="secondary">清除</button>
+    </div>
+    <div id="status"></div>
+
+    <script src="options.js"></script>
+  </body>
+</html>

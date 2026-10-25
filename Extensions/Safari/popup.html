@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>发送到下载器</title>
+    <style>
+      body {
+        font: 13px/1.5 -apple-system, "PingFang SC", sans-serif;
+        margin: 0;
+        padding: 14px;
+        width: 300px;
+        color: #1f2937;
+      }
+      h1 {
+        font-size: 14px;
+        margin: 0 0 8px;
+      }
+      .muted {
+        color: #6b7280;
+        font-size: 12px;
+      }
+      input[type="text"] {
+        width: 100%;
+        padding: 5px 7px;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        font: inherit;
+        box-sizing: border-box;
+      }
+      button {
+        width: 100%;
+        margin-top: 10px;
+        padding: 7px 12px;
+        border: 0;
+        border-radius: 6px;
+        background: #8b5cf6;
+        color: #fff;
+        font: inherit;
+        cursor: pointer;
+      }
+      #status {
+        margin-top: 10px;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>发送到下载器</h1>
+    <p class="muted">
+      Safari 不支持自动接管下载（这是 Safari 本身的限制）。用右键菜单
+      「发送到下载器」，或者在这里粘贴链接手动发。
+    </p>
+    <input id="url" type="text" placeholder="https://..." />
+    <button id="send">发送到下载器</button>
+    <div id="status"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>

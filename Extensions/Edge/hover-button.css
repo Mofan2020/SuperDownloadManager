@@ -1,0 +1,6 @@
+/* SDM hover-button — 悬停按钮的过渡效果。
+   样式本身写在 sniffer.js 里（内联），这里只留过渡，
+   方便在 DevTools 里单独看。 */
+#__sdm_hover_btn__ {
+    transition: opacity 120ms ease-in-out;
+}

@@ -128,6 +128,15 @@ class Dispatcher:
         category = params.get("category")
         threads = params.get("threads")
         referer = params.get("referer")
+        # 浏览器接管带过来的请求头（规格 §1.6「浏览器接管时自动继承
+        # 页面请求头是期望行为，不是可选功能」）。Cookie / UA 拿不到
+        # 就下不动——很多站点要登录态才给文件。
+        raw_headers = params.get("headers")
+        headers: dict[str, str] = {}
+        if isinstance(raw_headers, dict):
+            for key, value in raw_headers.items():
+                if isinstance(key, str) and isinstance(value, str) and key.strip():
+                    headers[key.strip()] = value
 
         # **文件名没给就留空**，不要拿 URL 猜一个填进去。
         #
@@ -162,6 +171,7 @@ class Dispatcher:
             filename_override=filename_override,
             max_threads_override=int(threads) if isinstance(threads, int) else None,
             referer=referer if isinstance(referer, str) else None,
+            headers=headers,
         )
         ids = await self.engine.start([spec])
         task_id = ids[0] if ids else ""
@@ -207,7 +217,7 @@ class Dispatcher:
         value = params.get("value")
 
         if key == "speed":
-            if isinstance(value, (int, float)):
+            if isinstance(value, int | float):
                 await self.engine.set_speed_limit(float(value))
             return IPCResponse.success(request.id, {"speed": value})
         if key == "threads":

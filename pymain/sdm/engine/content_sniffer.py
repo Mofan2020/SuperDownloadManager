@@ -55,6 +55,15 @@ class ContentProbe:
     content_type: str | None = None
     suggested_filename: str | None = None
     is_final: bool = True
+    #: 响应状态码。206 = 服务器认了 Range，200 = 没认。
+    status_code: int | None = None
+    #: 服务器**实际上**支不支持分块。
+    #:
+    #: `accepts_ranges` 读的是 `Accept-Ranges` 头，缺头时是「宽松
+    #: 默认 true」——但那只是声明，不是事实。规格 §1.2.4 要求看
+    #: **行为**：对 `Range: bytes=0-0` 回 206 就是认，回 200 就是
+    #: 不认。这个字段记的是事实，`None` 表示探测没给出结论。
+    range_supported: bool | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -65,6 +74,8 @@ class ContentProbe:
             "last_modified": self.last_modified,
             "content_type": self.content_type,
             "suggested_filename": self.suggested_filename,
+            "status_code": self.status_code,
+            "range_supported": self.range_supported,
         }
 
 
@@ -220,7 +231,12 @@ def merge_headers(*sources: dict[str, str] | None) -> dict[str, str]:
     return merged
 
 
-def parse_headers(headers: dict[str, str], final_url: str, original_url: str) -> ContentProbe:
+def parse_headers(
+    headers: dict[str, str],
+    final_url: str,
+    original_url: str,
+    status_code: int | None = None,
+) -> ContentProbe:
     """从响应头解析出探测结果。"""
     lower = {k.lower(): v for k, v in headers.items()}
 
@@ -265,6 +281,12 @@ def parse_headers(headers: dict[str, str], final_url: str, original_url: str) ->
         content_type=lower.get("content-type"),
         suggested_filename=filename,
         is_final=True,
+        status_code=status_code,
+        # **看行为不看声明。** 探测发的是 `Range: bytes=0-0`：
+        # 回 206 说明服务器认这个头，回 200 说明它无视了。
+        # `Accept-Ranges` 头可能压根没有，也可能写着 `bytes` 但
+        # 实际不认——只有状态码说了算。
+        range_supported=True if status_code == 206 else (False if status_code == 200 else None),
     )
 
 
@@ -317,7 +339,7 @@ async def probe(
             # 后者直接判任务失败。所以这里把状态码带出去，
             # 由调用方分类。
             raise ProbeError(f"HTTP {status}", status=status)
-        return parse_headers(headers, final_url, url)
+        return parse_headers(headers, final_url, url, status_code=status)
     finally:
         if owns_client:
             await client.aclose()

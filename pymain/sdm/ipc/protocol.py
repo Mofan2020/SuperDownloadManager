@@ -34,6 +34,22 @@ METHOD_CONFIG = "config"
 METHOD_RELINK = "relink"
 METHOD_PING = "ping"
 
+# -- 浏览器派单的扩展字段 --------------------------------------------
+#
+# 契约 §4.3：`add` 除了 url，还带浏览器上下文——
+# referer / cookie / user_agent / method / post_data。
+#
+# `headers` 是**跟 dispatcher 的约定**：Cookie 和 User-Agent 放进去，
+# 由 `Dispatcher._add` 塞进 `StartSpec.headers`（引擎本来就支持任务级
+# 自定义头，没有它很多站点会直接给 403）。
+#
+# **现状**：`Dispatcher._add` 只读 url / filename / category / threads /
+# referer，`headers` / `method` / `post_data` 会被丢掉——补这一步是
+# `dispatcher.py` 那边的事，不在本文件的改动范围内。
+PARAM_HEADERS = "headers"
+PARAM_METHOD = "method"
+PARAM_POST_DATA = "post_data"
+
 ALL_METHODS = frozenset({
     METHOD_ADD, METHOD_LIST, METHOD_PAUSE, METHOD_RESUME,
     METHOD_CANCEL, METHOD_CONFIG, METHOD_RELINK, METHOD_PING,

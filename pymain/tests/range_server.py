@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import ClassVar
 
 
 class RangeFileHandler(http.server.BaseHTTPRequestHandler):
@@ -25,6 +26,13 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
     #: message body」这种假故障，重试一轮又一轮。
     #: 真实服务器都是 1.1，这里对齐。
     protocol_version = "HTTP/1.1"
+
+    #: 正在处理的请求数。用来断言「并发上限真的生效了」。
+    active_requests: ClassVar[int] = 0
+    #: 观察到的最大并发数。
+    max_concurrent: ClassVar[int] = 0
+    #: 一共收到多少个请求。
+    request_count: ClassVar[int] = 0
 
     def end_headers(self) -> None:
         """每个响应都声明 Connection: close。
@@ -54,6 +62,18 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self) -> None:
+        # 并发计数。用来断言「并发上限真的生效」——比掐秒表准，
+        # 也不受 CI 机器负载影响。
+        type(self).active_requests += 1
+        type(self).request_count += 1
+        if type(self).active_requests > type(self).max_concurrent:
+            type(self).max_concurrent = type(self).active_requests
+        try:
+            self._do_GET()
+        finally:
+            type(self).active_requests -= 1
+
+    def _do_GET(self) -> None:
         if self.force_status:
             self.send_response(self.force_status)
             self.send_header("Content-Length", "0")
@@ -149,7 +169,7 @@ class QuietErrorMixin:
 
     def handle_error(self, request, client_address) -> None:
         exc = sys.exc_info()[1]
-        if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+        if isinstance(exc, ConnectionResetError | BrokenPipeError | ConnectionAbortedError):
             return
         super().handle_error(request, client_address)  # type: ignore[misc]
 
@@ -205,10 +225,29 @@ class RangeServer:
                 "force_status": force_status,
             },
         )
+        # 每个 RangeServer 一个独立的 handler 类——并发计数是类属性，
+        # 共用类的话两个服务器的计数会串。
+        self._handler_class = handler
         self._server = ThreadedRangeServer(("127.0.0.1", 0), handler)
         self.port = self._server.server_address[1]
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
+
+    @property
+    def max_concurrent_requests(self) -> int:
+        """观察到的最大并发请求数。"""
+        return self._handler_class.max_concurrent
+
+    @property
+    def request_count(self) -> int:
+        """服务器一共收到多少个请求。"""
+        return self._handler_class.request_count
+
+    def reset_counters(self) -> None:
+        """把并发计数清零。同一个服务器跑多轮对比时用。"""
+        self._handler_class.active_requests = 0
+        self._handler_class.max_concurrent = 0
+        self._handler_class.request_count = 0
 
     @property
     def url(self) -> str:

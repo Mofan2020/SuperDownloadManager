@@ -201,3 +201,59 @@ def test_install_on_non_darwin_returns_false(monkeypatch):
     """非 macOS 上注册直接返回 False，不抛异常。"""
     monkeypatch.setattr(url_scheme.sys, "platform", "linux")
     assert url_scheme.install(lambda u: None) is False
+
+
+# -- 派发前的解析（规格 §4.2 的路径 A）---------------------------
+#
+# **这条锁的是一个真 bug**：Apple Event 送过来的是完整的
+# `superdownloadmanager://add?url=http://...`，不剥掉这层就直接
+# 入队的话，引擎会把 `superdownloadmanager://...` 当成要下载的
+# 地址——快捷指令那条路整个是死的。
+
+
+def test_dispatcher_strips_scheme_before_calling_back():
+    """回调收到的必须是目标地址，不是原始串。"""
+    received: list[str] = []
+    dispatch = url_scheme.make_dispatcher(received.append)
+
+    dispatch("superdownloadmanager://add?url=http://example.com/a.zip")
+
+    assert received == ["http://example.com/a.zip"]
+
+
+def test_dispatcher_drops_unparsable_scheme():
+    """解析不出目标地址就不调回调——宁可不下载，也不能下错东西。"""
+    received: list[str] = []
+    dispatch = url_scheme.make_dispatcher(received.append)
+
+    dispatch("superdownloadmanager://add")
+    dispatch("https://example.com/a.zip")
+    dispatch("")
+
+    assert received == []
+
+
+def test_dispatcher_keeps_direct_netloc_form():
+    """直接把目标地址当 netloc 的写法也能派发。"""
+    received: list[str] = []
+    dispatch = url_scheme.make_dispatcher(received.append)
+
+    dispatch("superdownloadmanager://example.com/a.zip")
+
+    assert received == ["example.com/a.zip"]
+
+
+def test_windows_command_line_url_is_accepted():
+    """Windows 的 URL Scheme 把链接当命令行参数传进来。
+
+    **argparse 遇到未知的位置参数会直接报错退出（退出码 2）**，
+    应用连窗口都开不出来。所以位置参数必须留着。
+    """
+    from sdm.gui.main import parse_args
+
+    args = parse_args(["superdownloadmanager://add?url=http://example.com/a.zip"])
+    assert args.url == "superdownloadmanager://add?url=http://example.com/a.zip"
+
+    # 没有参数时也不能报错
+    assert parse_args([]).url == ""
+    assert parse_args(["--self-test"]).self_test is True

@@ -482,7 +482,21 @@ def test_r10_pause_keeps_partial_files(tmp_path: Path) -> None:
 
 
 def test_r11_parallelism_setting_changes_actual_concurrency(tmp_path: Path) -> None:
-    """R-11：改并发上限后，实际并发分片数必须变化。"""
+    """R-11：改并发上限后，实际并发连接数必须变化。
+
+    **断言的是「服务器观察到的并发数」，不是墙钟时间。**
+
+    原来这条测的是耗时：8 片 × 0.3s 延迟，cap=2 要 ≥0.9s、cap=8 要
+    快 2.5 倍。那是**静态分片计划**下的算法——分片切死了，cap=2 就
+    只能两片两片地排队。
+
+    规格 §1.2 改成动态分段之后，分片数是长出来的：连接少，分片就
+    少，总耗时并不会按比例变慢（这是动态分段的好处）。所以耗时不再
+    是「并发上限生效」的可靠指标。
+
+    可靠指标是**服务器同时看到几个请求**。这条测试现在直接量它：
+    cap=2 时并发不超过 2，cap=8 时并发能上去。
+    """
 
     async def _inner() -> None:
         total = 8 * 512 * 1024
@@ -491,7 +505,7 @@ def test_r11_parallelism_setting_changes_actual_concurrency(tmp_path: Path) -> N
 
         srv = RangeServer(total_bytes=total, chunk_delay=0.3, delay_per_block=False)
         try:
-            timings = {}
+            observed: dict[int, int] = {}
             for cap in (2, 8):
                 dest = tmp_path / f"out{cap}.bin"
                 flow = DownloadFlow(
@@ -499,21 +513,27 @@ def test_r11_parallelism_setting_changes_actual_concurrency(tmp_path: Path) -> N
                     destination=dest,
                     strategy=RangeStrategy(
                         initial_chunk_size=256 * 1024,
+                        # 最小分片 64 KB。默认的 1 MB 会把这个 4 MB 的
+                        # 文件卡在最多 4 片——拆不到 8 片，并发也就上不去。
+                        min_chunk_size=64 * 1024,
                         default_chunks=8,
                         max_chunks=8,
                     ),
                     parallelism_cap=cap,
                 )
-                t0 = time.monotonic()
+                srv.reset_counters()
                 await flow.run()
-                timings[cap] = time.monotonic() - t0
+                observed[cap] = srv.max_concurrent_requests
+                assert dest.read_bytes() == payload.read_bytes()
 
-            # 8 片，每片 0.3s 延迟
-            # cap=2 → 4 轮 → 1.2s；cap=8 → 1 轮 → 0.3s
-            assert timings[2] >= 0.9, f"cap=2 只用了 {timings[2]:.2f}s，没限住并发"
-            assert timings[8] < timings[2] * 0.7, (
-                f"cap=8 ({timings[8]:.2f}s) 应该明显快于 cap=2 ({timings[2]:.2f}s)"
+            assert observed[2] <= 3, f"cap=2 时并发到了 {observed[2]}，上限没生效"
+            assert observed[8] > observed[2], (
+                f"cap=8 的并发（{observed[8]}）应该比 cap=2（{observed[2]}）高"
             )
+            # 服务器观察到的并发可能比上限多 1：分片被拆分时，客户端
+            # 停止读取那一路连接就放掉了，但服务器还在往 socket 缓冲区
+            # 里写，得等它写失败才收尾。那一路在服务器侧还占着连接。
+            assert observed[8] <= 9, f"cap=8 时并发到了 {observed[8]}，超过上限太多"
         finally:
             srv.stop()
 

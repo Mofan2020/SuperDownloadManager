@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!--
+    Super Download Manager 的 AppleScript 字典（契约 §5.3）。
+
+    **最小可用集合：** 只有四个命令。规格 §4.3 要的就是「最小可用
+    字典」，多加命令反而会让 Script Editor 里的列表变得没用。
+
+    **事件类 = <suite> 的 code。** `<suite code="SDMD">` 决定了这个套件
+    里所有命令的 Apple Event 事件类（'SDMD'），每个命令的 `code`
+    则是事件 ID。`applescript_handler.py` 里注册 handler 时用的就是
+    这两个值——**改了一边就必须改另一边**，否则 AppleScript 发的事件
+    没人接。
+
+    **属性代码（'pnam' / 'cSta'）是 AE 的四字符码。** runtime 返回的
+    record 里，属性名要用这四个字符编码，AppleScript 才能把
+    `name of item 1` 映射到对应的值。handler 里拼字节时用的也是它们。
+
+    打包时这个文件要放进 `Contents/Resources/`，`Info.plist` 里写
+    `OSAScriptingDefinition` 指向它。
+-->
+<dictionary title="Super Download Manager Terminology">
+    <suite name="Super Download Manager Suite" code="SDMD" description="下载管理器的命令。">
+
+        <command name="add download" code="ADdl" description="添加一个下载任务">
+            <direct-parameter type="text" description="要下载的 URL"/>
+            <result type="text" description="新任务的 id"/>
+        </command>
+
+        <command name="pause all downloads" code="APau" description="暂停所有正在下载的任务">
+            <result type="boolean" description="true 表示暂停成功"/>
+        </command>
+
+        <command name="resume all downloads" code="ARes" description="继续所有已暂停的任务">
+            <result type="boolean" description="true 表示继续成功"/>
+        </command>
+
+        <command name="get download list" code="AGet" description="取所有任务的列表">
+            <result description="每个下载任务的名称和状态">
+                <type type="download info" list="yes"/>
+            </result>
+        </command>
+
+        <record-type name="download info" code="dlin" description="一个下载任务">
+            <property name="name" code="pnam" type="text" description="文件名"/>
+            <property name="state" code="cSta" type="text" description="任务状态（downloading / paused / completed …）"/>
+        </record-type>
+
+    </suite>
+</dictionary>

@@ -34,6 +34,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--debug", action="store_true", help="打开开发者工具并输出详细日志")
     parser.add_argument("--self-test", action="store_true", help="跑一遍无界面自检")
     parser.add_argument("--report", help="自检报告输出路径")
+    # Windows 的 URL Scheme 走命令行：注册表里的
+    # `shell\open\command` 是 `"<exe>" "%1"`，双击链接就是拿链接
+    # 当参数启动应用。**这个位置参数必须留着**——argparse 遇到
+    # 未知的位置参数会直接报错退出（退出码 2），应用连窗口都开不出来。
+    parser.add_argument(
+        "url",
+        nargs="?",
+        default="",
+        help="要下载的地址（Windows URL Scheme 唤起时由系统传入）",
+    )
     return parser.parse_args(argv)
 
 
@@ -126,6 +136,42 @@ def run_self_test(report_path: str | None = None) -> int:
         check("URL scheme", parsed == "http://example.com/a.zip", parsed or "解析失败")
     except Exception as err:
         check("URL scheme", False, str(err))
+
+    # 这一版新加的模块（规格 §3 / §4）。
+    #
+    # **同样的道理：静态分析认不认得它们，只有打包后才知道。**
+    # `sdm.gui.applescript` 还是个没有 `__init__.py` 的命名空间包，
+    # PyInstaller 对命名空间包的支持不如普通包稳——这里 import 一次
+    # 就能当场发现它没进包。
+    #
+    # build.py 的打包冒烟会跑这个自检（跑的是**打包后**的那个
+    # 可执行文件），所以这里红 = CI 的打包步骤红。
+    for label, module_path in (
+        ("AppleScript 处理器", "sdm.gui.applescript.applescript_handler"),
+        ("Windows 托盘", "sdm.gui.tray"),
+        ("原生消息宿主", "sdm.ipc.native_host"),
+        ("系统集成", "sdm.system_integration"),
+    ):
+        try:
+            import importlib
+
+            importlib.import_module(module_path)
+            check(label, True, module_path)
+        except Exception as err:
+            check(label, False, f"{module_path}: {err}")
+
+    # AppleScript 字典文件在不在。
+    #
+    # 打包时它被复制到 `Contents/Resources/`，源码运行时它在模块
+    # 旁边。两边都要能找到——找不到就是词典没进包，Script Editor
+    # 里看不到任何命令。
+    try:
+        from .applescript import applescript_handler
+
+        sdef = applescript_handler.sdef_path()
+        check("AppleScript 字典", sdef.is_file(), str(sdef))
+    except Exception as err:
+        check("AppleScript 字典", False, str(err))
 
     # Dock 图标策略（F148）
     #
@@ -230,11 +276,94 @@ def _install_cli_async(bridge) -> None:
         pass
 
 
+#: 菜单栏控制器的强引用。
+#:
+#: controller 持有 NSStatusItem 和 ObjC target。局部变量出了函数就没
+#: 人引用了 → Python GC 回收 → 菜单栏图标凭空消失。必须在这里按住。
+_status_bar_controller = None
+
+#: Windows 托盘控制器的强引用。同样的理由。
+_tray_controller = None
+
+#: 剪贴板监听器的强引用。
+#:
+#: 启动时 `capture_clipboard` 是关的，监听线程压根没跑；用户后来在
+#: 菜单栏勾上，得有个地方把它起起来。
+_clipboard_monitor = None
+
+
+def _start_clipboard_monitor() -> None:
+    """起剪贴板监听。
+
+    监听线程每轮自己读 `capture_clipboard`（clipboard.py 的
+    `_capture_enabled`），所以**关**不用管——下一轮它自己就停了。
+    但**开**要管：线程没起就永远不监听。
+    """
+    if _clipboard_monitor is None:
+        return
+    try:
+        _clipboard_monitor.start()
+    except Exception as err:
+        log.debug(CAT_GUI, f"启动剪贴板监听失败: {err}")
+
+
+def _remove_resident_entries() -> None:
+    """把常驻入口（菜单栏图标、托盘图标）摘掉。
+
+    **「退出」必须显式调这个**（契约 §5.1：「退出」必须显式调用
+    `StatusBarController.remove()` 把图标摘掉）。不调的话图标不是被
+    摘掉，而是跟着进程一起消失——Dock 上还会闪一下半透明的残影。
+    """
+    global _status_bar_controller, _tray_controller
+    if _status_bar_controller is not None:
+        try:
+            _status_bar_controller.remove()
+        except Exception as err:
+            log.debug(CAT_GUI, f"摘菜单栏图标失败: {err}")
+        _status_bar_controller = None
+    if _tray_controller is not None:
+        try:
+            _tray_controller.remove()
+        except Exception as err:
+            log.debug(CAT_GUI, f"摘托盘图标失败: {err}")
+        _tray_controller = None
+
+
+def _install_status_bar_on_main(bridge, window, on_quit=None, on_show=None) -> None:
+    """把菜单栏图标装到主线程上。
+
+    **NSStatusItem 必须在主线程创建。** pywebview 的 loaded 事件
+    回调跑在后台线程（webview/util.py:234 在新建的 Thread 里调
+    `events.loaded.set()`），直接在那边建 NSStatusItem，菜单栏里
+    不会出现任何图标——实测就是「菜单栏图标没装上」。
+
+    `AppHelper.callAfter` 把函数排到主线程的事件循环里执行，
+    pywebview 自己的 `window.show()` / `window.hide()` 也是这么干的。
+    """
+    try:
+        from PyObjCTools import AppHelper
+    except ImportError:
+        # 非 macOS 或者没装 PyObjCTools——直接同步装，至少逻辑走一遍。
+        _install_status_bar(bridge, window, on_quit=on_quit, on_show=on_show)
+        return
+
+    def _do_install() -> None:
+        try:
+            _install_status_bar(bridge, window, on_quit=on_quit, on_show=on_show)
+        except Exception as err:
+            log.warning(CAT_GUI, f"菜单栏图标安装失败: {err}")
+
+    AppHelper.callAfter(_do_install)
+
+
 def _install_status_bar(bridge, window, on_quit=None, on_show=None) -> None:
     """装 macOS 菜单栏图标。
 
+    菜单项跟契约 §5.1 一一对应：状态行 / 显示主窗口 / 暂停全部 /
+    继续全部 / 剪贴板监控 / 退出。
+
     Swift 版有（AppDelegate 手写的 NSStatusItem，MenuBarExtra 在
-    macOS 26 上不可靠）。菜单项和快捷键跟 Swift 版一致。
+    macOS 26 上不可靠）。
 
     `on_quit` 是「退出」的回调——关窗不退出之后，菜单栏的退出要走
     它（先置「正在退出」标志位，再 destroy 窗口），否则会被
@@ -251,6 +380,10 @@ def _install_status_bar(bridge, window, on_quit=None, on_show=None) -> None:
         return
 
     controller = macos_status.StatusBarController(bridge, window)
+    # **必须持有强引用。** controller 持有 NSStatusItem 和 ObjC target，
+    # 局部变量一退出函数就没引用了 → 被 GC 回收 → 菜单栏图标消失。
+    global _status_bar_controller
+    _status_bar_controller = controller
 
     def open_main_window() -> None:
         try:
@@ -262,32 +395,97 @@ def _install_status_bar(bridge, window, on_quit=None, on_show=None) -> None:
         if on_show is not None:
             on_show()
 
-    def add_url() -> None:
-        bridge._call_js("openAddDialog", None)
+    def pause_all() -> None:
+        """暂停全部。
 
-    def reveal_downloads() -> None:
+        **走 bridge.pause_all()**——它内部才走引擎的暂停逻辑
+        （只暂停排队中和下载中的，暂停的、完成的本来就不动）。
+        """
         try:
-            from .. import paths
-
-            bridge.reveal_in_finder(str(paths.download_dir()))
+            bridge.pause_all()
         except Exception as err:
-            log.debug(CAT_GUI, f"打开下载目录失败: {err}")
+            log.debug(CAT_GUI, f"暂停全部失败: {err}")
 
-    def show_about() -> None:
+    def resume_all() -> None:
+        """继续全部。"""
         try:
-            from AppKit import NSAlert
-
-            from ..version import __version__
-
-            alert = NSAlert.alloc().init()
-            alert.setMessageText_("Super Download Manager")
-            alert.setInformativeText_(f"版本 {__version__}\n开源的跨平台下载管理器")
-            alert.runModal()
+            bridge.resume_all()
         except Exception as err:
-            log.debug(CAT_GUI, f"关于对话框失败: {err}")
+            log.debug(CAT_GUI, f"继续全部失败: {err}")
 
-    def open_settings() -> None:
-        bridge._call_js("setView", "settings")
+    def toggle_clipboard() -> None:
+        """切换「剪贴板监控」。
+
+        **写的是 `settings.capture_clipboard`**——菜单栏、托盘、设置页
+        说的是同一件事。写完还得把勾选状态同步回菜单，不然勾还是
+        原来那个。
+        """
+        try:
+            current = bool(SettingsStore.shared().settings.capture_clipboard)
+            new_value = not current
+            macos_status.set_clipboard_monitor_enabled(new_value)
+            controller.set_clipboard_checked(new_value)
+            # 监听器每轮自己读设置（clipboard.py 的 _capture_enabled），
+            # 关掉下一轮就停；**开的时候得把线程起起来**——启动时
+            # 设置是关的，线程压根没跑。
+            if new_value:
+                _start_clipboard_monitor()
+        except Exception as err:
+            log.debug(CAT_GUI, f"切换剪贴板监控失败: {err}")
+
+    def quit_app() -> None:
+        # **必须显式摘掉菜单栏图标。** 不摘的话图标不是被拿掉，
+        # 而是跟着进程一起消失——Dock 上还会闪一下半透明的残影。
+        controller.remove()
+        if on_quit is not None:
+            on_quit()
+            return
+        try:
+            window.destroy()
+        except Exception as err:
+            log.debug(CAT_GUI, f"退出失败: {err}")
+
+    controller.on("openMainWindow", open_main_window)
+    controller.on("pauseAll", pause_all)
+    controller.on("resumeAll", resume_all)
+    controller.on("clipboardMonitor", toggle_clipboard)
+    controller.on("quitApp", quit_app)
+
+    if controller.install():
+        log.info(CAT_GUI, "菜单栏图标已装上")
+        # 勾选状态要跟设置对上一次，别让菜单显示成「没开」
+        try:
+            controller.set_clipboard_checked(
+                bool(SettingsStore.shared().settings.capture_clipboard)
+            )
+        except Exception as err:
+            log.debug(CAT_GUI, f"同步剪贴板勾选状态失败: {err}")
+    else:
+        log.warning(CAT_GUI, "菜单栏图标没装上")
+
+
+def _install_tray(bridge, window, on_quit=None, on_show=None) -> None:
+    """装 Windows 系统托盘图标。
+
+    **macOS 上什么都不做**——那边有菜单栏（NSStatusItem）。
+    托盘菜单跟菜单栏共用同一份规格（`macos_status.MENU_SPEC`），
+    所以两边行为天然一致。
+
+    装不上就当没有——托盘是常驻入口，不该挡住 app 启动。
+    """
+    from . import tray
+
+    if not tray.available():
+        return
+
+    def show_main_window() -> None:
+        try:
+            window.show()
+            window.restore()
+        except Exception as err:
+            log.debug(CAT_GUI, f"托盘唤起主窗口失败: {err}")
+        if on_show is not None:
+            on_show()
 
     def quit_app() -> None:
         if on_quit is not None:
@@ -298,17 +496,12 @@ def _install_status_bar(bridge, window, on_quit=None, on_show=None) -> None:
         except Exception as err:
             log.debug(CAT_GUI, f"退出失败: {err}")
 
-    controller.on("openMainWindow", open_main_window)
-    controller.on("addURL", add_url)
-    controller.on("revealDownloads", reveal_downloads)
-    controller.on("showAbout", show_about)
-    controller.on("openSettings", open_settings)
-    controller.on("quitApp", quit_app)
-
-    if controller.install():
-        log.info(CAT_GUI, "菜单栏图标已装上")
-    else:
-        log.warning(CAT_GUI, "菜单栏图标没装上")
+    controller = tray.install(bridge, on_show=show_main_window, on_quit=quit_app)
+    if controller is not None:
+        # **必须持有强引用。** 跟菜单栏控制器一个道理：局部变量
+        # 一退出函数就被 GC，托盘图标会凭空消失。
+        global _tray_controller
+        _tray_controller = controller
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -362,6 +555,26 @@ def main(argv: list[str] | None = None) -> int:
     clipboard = ClipboardMonitor(on_candidate=bridge.set_clipboard_candidate)
     if settings.settings.capture_clipboard:
         clipboard.start()
+    # **菜单栏的「剪贴板监控」勾选项要能把它起起来**（启动时设置是关的，
+    # 线程压根没跑）。
+    global _clipboard_monitor
+    _clipboard_monitor = clipboard
+
+    # Windows URL Scheme：系统把链接当命令行参数传进来。
+    #
+    # **要在这里就剥掉 scheme 外壳**——传进来的是完整的
+    # `superdownloadmanager://add?url=http://...`，直接入队的话引擎
+    # 会把这一整串当成下载地址。
+    launch_target = ""
+    if args.url:
+        from . import url_scheme
+
+        launch_target = url_scheme.parse_scheme_url(args.url)
+        if not launch_target:
+            # 不是本应用的 scheme 串，但可能就是一个普通的下载链接
+            # （用户手动 `sdm.exe https://...`）。那种直接用。
+            launch_target = args.url.strip()
+        log.info(CAT_GUI, f"命令行收到下载地址: {launch_target}")
 
     assets = Path(__file__).parent / "assets"
     index = assets / "index.html"
@@ -437,6 +650,102 @@ def main(argv: list[str] | None = None) -> int:
 
     _setup_notifications()
 
+    # -- 状态行 / Dock 进度 的周期刷新 -------------------------------
+    #
+    # **状态行 1.5 秒一次、Dock 进度 1 秒一次**（契约 §5.1）。不是
+    # 每帧——每帧刷会把菜单栏点得一顿一顿的。
+    #
+    # 两个刷新都**从 bridge.get_tasks() 拿数据**，跟 GUI 看到的是同一份
+    # 任务快照，菜单栏上的数字不会跟主窗口对不上。
+
+    def _collect_status() -> tuple[float, int, float]:
+        """当前的速度、活跃任务数、全局限速。"""
+        from . import macos_status
+
+        try:
+            tasks = bridge.get_tasks()
+        except Exception as err:
+            log.debug(CAT_GUI, f"读任务列表失败: {err}")
+            return 0.0, 0, 0.0
+        active = [
+            task
+            for task in tasks
+            if (task.get("state") or "") in macos_status.ACTIVE_STATES
+        ]
+        speed = sum(float(task.get("speed_bytes_per_sec") or 0.0) for task in active)
+        try:
+            limit = float(SettingsStore.shared().settings.bandwidth_bytes_per_sec or 0)
+        except Exception:
+            limit = 0.0
+        return speed, len(active), limit
+
+    def _refresh_status_line() -> None:
+        """刷新菜单栏状态行 / 托盘状态行。"""
+        try:
+            speed, count, limit = _collect_status()
+            if _status_bar_controller is not None:
+                _status_bar_controller.update_status(speed, count, limit)
+            if _tray_controller is not None:
+                _tray_controller.update_status(speed, count, limit)
+        except Exception as err:
+            log.debug(CAT_GUI, f"状态行刷新失败: {err}")
+
+    def _refresh_dock_progress() -> None:
+        """刷新 Dock 图标上的总体下载进度。
+
+        **没有活跃任务时 fraction 是 0**，`set_dock_progress(0)` 会把
+        Dock 图标恢复成默认的样子（契约 §4.4）。
+        """
+        from . import macos_status
+
+        if not macos_status.available():
+            return
+        try:
+            tasks = bridge.get_tasks()
+            macos_status.set_dock_progress(macos_status.compute_overall_progress(tasks))
+        except Exception as err:
+            log.debug(CAT_GUI, f"Dock 进度刷新失败: {err}")
+
+    def _start_refresh_timers() -> None:
+        """起两个周期刷新。
+
+        **AppKit 的改动要放主线程**——NSMenuItem 改标题、NSDockTile
+        画图都不是线程安全的，所以回调体用
+        `macos_status.run_on_main_thread()` 包一层。
+        """
+        from . import macos_status
+
+        def _schedule(interval: float, func, name: str) -> None:
+            def _tick() -> None:
+                if quitting:
+                    return
+                try:
+                    macos_status.run_on_main_thread(func)
+                except Exception as err:
+                    log.debug(CAT_GUI, f"{name} 刷新失败: {err}")
+                # **跑完再排下一个**，不是 while + sleep：
+                # sleep 的写法在回调卡住时整个周期就乱掉了。
+                timer = threading.Timer(interval, _tick)
+                timer.daemon = True
+                timer.name = name
+                timer.start()
+
+            timer = threading.Timer(interval, _tick)
+            timer.daemon = True
+            timer.name = name
+            timer.start()
+
+        _schedule(
+            macos_status.STATUS_REFRESH_SECONDS,
+            _refresh_status_line,
+            "sdm-status-refresh",
+        )
+        _schedule(
+            macos_status.DOCK_REFRESH_SECONDS,
+            _refresh_dock_progress,
+            "sdm-dock-refresh",
+        )
+
     def on_loaded() -> None:
         """页面加载完：把初始状态推给前端。"""
         state = bridge.bootstrap()
@@ -449,9 +758,27 @@ def main(argv: list[str] | None = None) -> int:
             name="sdm-install-cli",
             daemon=True,
         ).start()
-        # 菜单栏图标必须在主线程装（NSStatusItem 的要求），这里正好
-        # 是主线程。
-        _install_status_bar(bridge, window, on_quit=_request_quit, on_show=_restore_dock)
+        # 菜单栏图标必须在主线程装（NSStatusItem 的要求）。
+        #
+        # **on_loaded 跑在后台线程**——pywebview 的
+        # webview/util.py:234 是在新建的 Thread 里调
+        # `events.loaded.set()`，所以这里不是主线程。
+        # NSStatusItem 建在后台线程上，菜单栏里根本不会出现图标。
+        #
+        # AppHelper.callAfter 是 pywebview 自己用的那套（window.show()
+        # / hide() 都靠它），它会把函数排到主线程执行。
+        _install_status_bar_on_main(bridge, window, on_quit=_request_quit, on_show=_restore_dock)
+        # 状态行 / Dock 进度的周期刷新。
+        _start_refresh_timers()
+        # Windows URL Scheme 唤起时带进来的地址，在这里入队。
+        #
+        # **必须等页面加载完**：前端还没 bootstrap 完就插一条任务，
+        # 任务会出现在列表里但用户看不到它的行刷新。
+        if launch_target:
+            try:
+                bridge._run(bridge.add_url(launch_target))
+            except Exception as err:
+                log.warning(CAT_GUI, f"命令行地址入队失败: {err}")
 
     def on_scheme_url(target: str) -> None:
         """系统送来一个 `superdownloadmanager://` URL。
@@ -482,6 +809,20 @@ def main(argv: list[str] | None = None) -> int:
         url_scheme.install(on_scheme_url)
     except Exception as err:
         log.debug(CAT_GUI, f"URL scheme 注册跳过: {err}")
+
+    # 注册 AppleScript 命令（契约 §5.3）。
+    #
+    # **跟 URL scheme 挨着装**——两个都是 Apple Event 入口。
+    #
+    # 命令走的是**同一个 bridge**，不绕过引擎状态机：
+    # bridge.add_url / pause_all / resume_all 内部才会排队、限速、
+    # 走并发上限。
+    try:
+        from .applescript import applescript_handler
+
+        applescript_handler.install(bridge)
+    except Exception as err:
+        log.debug(CAT_GUI, f"AppleScript 注册跳过: {err}")
 
     # -- 关窗不退出 + Dock 图标 ------------------------------------
     #
@@ -524,6 +865,9 @@ def main(argv: list[str] | None = None) -> int:
 
     def _shutdown() -> None:
         """真正退出前的清理。"""
+        # **常驻入口要显式摘掉。** 菜单栏图标 / 托盘图标不摘的话，
+        # 它们是跟着进程一起消失的——Dock 上还会闪一下半透明的残影。
+        _remove_resident_entries()
         clipboard.stop()
         dispatch.stop()
         try:
@@ -577,12 +921,34 @@ def main(argv: list[str] | None = None) -> int:
 
     # 菜单栏的「退出」要先置标志位，否则会被 closing 拦下来。
     def _request_quit() -> None:
-        global quitting
+        # **nonlocal，不是 global。**
+        # quitting 定义在 main() 里，是 main() 的局部变量。写 global
+        # 的话 Python 会去找模块级的 quitting——找不到就新建一个，
+        # main() 里那个永远还是 False。结果：菜单栏点「退出」→
+        # destroy() → closing 触发 → on_closing 看到 quitting 还是
+        # False → 返回 False 取消关闭 → 程序退不出去，卡死。
+        nonlocal quitting
         quitting = True
+        # **显式摘掉常驻入口。** 契约 §5.1：「退出」必须显式调用
+        # StatusBarController.remove() 把图标摘掉。不摘的话图标不是
+        # 被拿掉，而是跟着进程一起消失——Dock 上还会闪一下残影。
+        _remove_resident_entries()
         try:
             window.destroy()
         except Exception as err:
             log.debug(CAT_GUI, f"退出失败: {err}")
+
+    # Windows 系统托盘（契约 §5.2）。
+    #
+    # **macOS 上是空操作**——那边有菜单栏。托盘菜单跟菜单栏共用同一份
+    # 规格（macos_status.MENU_SPEC），所以两边行为一致。
+    #
+    # **装在 `_request_quit` / `_restore_dock` 之后**：这两个是要传进去
+    # 的回调，得先有定义（不然这里就是 NameError）。
+    try:
+        _install_tray(bridge, window, on_quit=_request_quit, on_show=_restore_dock)
+    except Exception as err:
+        log.debug(CAT_GUI, f"系统托盘安装跳过: {err}")
 
     window.events.loaded += on_loaded
     window.events.closing += on_closing
@@ -603,6 +969,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        _remove_resident_entries()
         clipboard.stop()
         dispatch.stop()
         try:

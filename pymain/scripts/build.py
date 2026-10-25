@@ -210,7 +210,25 @@ TARGETS: list[tuple[str, str, str, list[str], bool, bool]] = [
     ("SuperDownloadManager", "sdm.gui.main", "main", GUI_EXTRA_IMPORTS, True, False),
     ("sdm", "sdm.cli.sdmdm", "run", CLI_EXTRA_IMPORTS, False, False),
     ("sdmd", "sdm.daemon.main", "main", DAEMON_EXTRA_IMPORTS, True, False),
+    # 浏览器原生消息宿主（规格 §3.1）。浏览器按清单里的 path 拉起
+    # 它，通过 stdio 收发 JSON 帧。
+    #
+    # **必须是独立可执行文件**——浏览器拉起的是清单里写死的那个
+    # 路径，不能是 GUI 自己。GUI 每次接管一个下载就得起一个宿主
+    # 进程出来，所以它得是个小东西（不带 GUI 资源）。
+    ("sdmd-native-host", "sdm.ipc.native_host", "main", DAEMON_EXTRA_IMPORTS, False, False),
 ]
+
+#: 辅助产物在 .app 的 Resources/ 下各自待的目录名。
+#:
+#: 目录名要避开 sdm / sdmd：PyInstaller 给 GUI 打的 .app 里
+#: 已经有 Resources/sdm 软链（指向 ../Resources/sdm），同名会
+#: 撞上，变成自指软链。
+MACOS_HELPER_DIRS = {
+    "sdm": "sdm-cli",
+    "sdmd": "sdmd-daemon",
+    "sdmd-native-host": "native-host",
+}
 
 
 def build_entrypoint(name: str, module: str, func: str) -> Path:
@@ -286,6 +304,17 @@ def build_macos() -> bool:
         set_str("CFBundleVersion", str(build))
         set_str("CFBundleIdentifier", BUNDLE_ID)
         set_str("CFBundleName", "Super Download Manager")
+        # AppleScript 字典（规格 §4.3）。
+        #
+        # **必须先有这个键，Script Editor 才认这个 app 的命令。**
+        # 没有 OSAScriptingDefinition 的话，词典文件放在包里也是
+        # 死的——用户看不到「add download」这些命令。
+        sdef_name = "SuperDownloadManager.sdef"
+        if (ROOT / "sdm" / "gui" / "applescript" / sdef_name).is_file():
+            set_str("OSAScriptingDefinition", sdef_name)
+            # 规格 §4.3 点名要这个键。没有它，系统不认为这个 app
+            # 能响应 Apple Event——词典在包里也是死的。
+            set_str("NSAppleScriptEnabled", "true")
         # 注册 URL scheme：Swift 版实现了 handleURLEvent 但从没在
         # Info.plist 注册，导致那个入口是死的（风险项 R-13）。
         # Python 版在这里补上。
@@ -344,8 +373,6 @@ def build_macos() -> bool:
     # 已经有 Resources/sdm 软链（指向 ../Resources/sdm），同名会
     # 撞上，变成自指软链。
     resources = app / "Contents" / "Resources"
-    cli_dir = resources / "sdm-cli"
-    daemon_dir = resources / "sdmd-daemon"
     for name, module, func, imports, with_assets, onefile in TARGETS[1:]:
         entry = build_entrypoint(name, module, func)
         args = [
@@ -360,7 +387,7 @@ def build_macos() -> bool:
         # onedir 的产物是目录：可执行文件 + 同级 _internal/。
         # 整个目录搬进去，_internal 要跟可执行文件平级。
         built = DIST / "macos" / name
-        dest = cli_dir if name == "sdm" else daemon_dir
+        dest = resources / MACOS_HELPER_DIRS.get(name, name)
         if built.is_file():
             shutil.copy2(built, dest / name)
         elif built.is_dir():
@@ -382,6 +409,18 @@ def build_macos() -> bool:
         shutil.copy2(src, dest)
         dest.chmod(0o755)
     print("安装脚本已放进 Resources")
+
+    # AppleScript 字典（规格 §4.3）。
+    #
+    # 放 Contents/Resources/ 下，Info.plist 里的
+    # OSAScriptingDefinition 指向它。缺了这个词典，Script Editor
+    # 里看不到任何命令——整个 AppleScript 通道就是死的。
+    sdef_src = ROOT / "sdm" / "gui" / "applescript" / "SuperDownloadManager.sdef"
+    if sdef_src.is_file():
+        shutil.copy2(sdef_src, resources / "SuperDownloadManager.sdef")
+        print("AppleScript 字典已放进 Resources")
+    else:
+        print("警告：找不到 AppleScript 字典，跳过")
 
     # ad-hoc 签名。
     #
@@ -458,9 +497,13 @@ def build_windows() -> bool:
             return False
         print(f"  {name}.exe 完成")
 
-    # CLI/daemon 打成 zip
+    # CLI/daemon/原生宿主打成 zip
     zips: list[tuple[Path, str]] = []
-    for name, archive_name in (("sdm", "sdm-cli.zip"), ("sdmd", "sdmd-daemon.zip")):
+    for name, archive_name in (
+        ("sdm", "sdm-cli.zip"),
+        ("sdmd", "sdmd-daemon.zip"),
+        ("sdmd-native-host", "sdmd-native-host.zip"),
+    ):
         src = win_dist / name
         if not src.is_dir():
             print(f"找不到 {src}")
@@ -470,7 +513,7 @@ def build_windows() -> bool:
         zips.append((archive, "."))
         print(f"  {archive_name} 完成（{archive.stat().st_size // 1024} KB）")
 
-    # GUI（onefile），带上两个 zip
+    # GUI（onefile），带上三个 zip
     entry = build_entrypoint(APP_NAME, "sdm.gui.main", "main")
     args = [
         sys.executable, "-m", "PyInstaller",

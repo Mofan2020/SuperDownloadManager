@@ -10,6 +10,7 @@ import platform
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from .logging_setup import CAT_GUI, get_logger
 
@@ -235,6 +236,190 @@ def get_app_executable() -> str | None:
         return sys.executable
     # 从源码运行时指向仓库里的启动脚本
     return None
+
+
+# -- URL Scheme 注册（Windows） --------------------------------------
+#
+# 注册 `superdownloadmanager://` 之后，双击网页里的这个链接就能唤起
+# 应用（Windows 会把它当成一个 URL 协议交给注册表里写的命令行）。
+#
+# macOS 那边靠 Info.plist 的 `CFBundleURLTypes`（build.py 写的），
+# 不需要注册表——所以这段只对 Windows 生效。
+
+
+#: 我们注册的 URL scheme。跟 build.py 写进 Info.plist 的
+#: `CFBundleURLSchemes`、以及 `gui/url_scheme.py` 里的 `URL_SCHEME`
+#: 是同一个。
+URL_SCHEME = "superdownloadmanager"
+
+#: 注册表里显示的名字（`Default` 值）。
+URL_SCHEME_DISPLAY_NAME = "Super Download Manager"
+
+#: 协议描述（`(Default)` 值）。
+URL_SCHEME_PROTOCOL_NAME = "URL:SuperDownloadManager Protocol"
+
+
+def url_scheme_registry_plan(
+    scheme: str = URL_SCHEME,
+    executable: str = "",
+) -> list[tuple[str, str, str]]:
+    """要往注册表里写的东西：`[(子路径, 值名, 值), ...]`。
+
+    **值名为空串 = 该键的默认值。** 注册表里的 `(Default)` 不是一个
+    叫 `(Default)` 的值，而是**键的默认值**——winreg 里用空字符串当
+    值名来写它。写成 `"(Default)"` 会在注册表里真的造出一个叫
+    `(Default)` 的普通值，系统认不出来，双击链接也就没反应。
+
+    **路径在 `Software\\Classes` 下，不是 `HKEY_CLASSES_ROOT`。**
+    HKCR 是 HKCU\\Software\\Classes 和 HKLM\\Software\\Classes 的合并
+    视图，往它底下写需要管理员权限；直接写 HKCU 那一半普通用户就能
+    装，不用提权。
+
+    拆成纯函数是为了能在 macOS 上测——注册表只有 Windows 有，
+    但路径怎么拼是纯逻辑，不该只能上 Windows 才验得了。
+    """
+    base = rf"Software\Classes\{scheme}"
+    return [
+        # 资源管理器里显示的协议名
+        (base, "Default", URL_SCHEME_DISPLAY_NAME),
+        # 协议描述
+        (base, "", URL_SCHEME_PROTOCOL_NAME),
+        # **有这个值（哪怕是空串）才表示「这是个 URL 协议」**
+        (base, "URL Protocol", ""),
+        # 双击链接时执行的命令行。%1 是链接本身
+        (base + r"\shell\open\command", "", f'"{executable}" "%1"'),
+    ]
+
+
+def register_url_scheme(executable: str | None = None) -> bool:
+    """注册 `superdownloadmanager://`，让双击链接能唤起应用。
+
+    **幂等：** 已经是这样了就什么都不做。注册表写入会通知系统
+    （Explorer 会刷新），每次启动都重写一遍是白折腾。
+
+    **不需要管理员权限**（写在 HKCU 下）。
+
+    `executable` 可以显式指定程序路径；从源码跑的时候
+    `get_app_executable()` 返回 None（没有 .exe 可注册），注册不了。
+
+    返回是否注册成功。
+    """
+    if platform.system() != "Windows":
+        log.info(CAT_GUI, "当前系统不需要注册 URL scheme")
+        return False
+
+    exe = executable or get_app_executable()
+    if not exe:
+        log.warning(CAT_GUI, "找不到程序路径，无法注册 URL scheme")
+        return False
+
+    try:
+        import winreg
+    except ImportError:
+        log.warning(CAT_GUI, "winreg 不可用，无法注册 URL scheme")
+        return False
+
+    try:
+        plan = url_scheme_registry_plan(URL_SCHEME, exe)
+        if _url_scheme_matches(winreg, plan):
+            return True
+        for subkey, value_name, value in plan:
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, subkey) as key:
+                winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, value)
+        log.info(CAT_GUI, f"URL scheme 已注册：{URL_SCHEME}://")
+        return True
+    except Exception as err:
+        log.warning(CAT_GUI, f"注册 URL scheme 失败: {err}")
+        return False
+
+
+def unregister_url_scheme() -> bool:
+    """注销 `superdownloadmanager://`。
+
+    把 `Software\\Classes\\<scheme>` 底下整棵树删掉。
+    返回是否成功（本来就没注册也算成功）。
+    """
+    if platform.system() != "Windows":
+        return False
+
+    try:
+        import winreg
+    except ImportError:
+        return False
+
+    try:
+        _delete_key_tree(winreg, rf"Software\Classes\{URL_SCHEME}")
+        log.info(CAT_GUI, f"URL scheme 已注销：{URL_SCHEME}://")
+        return True
+    except Exception as err:
+        log.warning(CAT_GUI, f"注销 URL scheme 失败: {err}")
+        return False
+
+
+def is_url_scheme_registered() -> bool:
+    """URL scheme 有没有注册。"""
+    if platform.system() != "Windows":
+        return False
+
+    try:
+        import winreg
+    except ImportError:
+        return False
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            rf"Software\Classes\{URL_SCHEME}",
+            0,
+            winreg.KEY_READ,
+        ) as key:
+            winreg.QueryValueEx(key, "URL Protocol")
+            return True
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _url_scheme_matches(winreg: Any, plan: list[tuple[str, str, str]]) -> bool:
+    """注册表里现在的内容是不是已经跟 plan 完全一样了。"""
+    for subkey, value_name, value in plan:
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, subkey, 0, winreg.KEY_READ
+            ) as key:
+                current, _ = winreg.QueryValueEx(key, value_name)
+        except (FileNotFoundError, OSError):
+            return False
+        if current != value:
+            return False
+    return True
+
+
+def _delete_key_tree(winreg: Any, path: str) -> None:
+    """删掉一个键和它下面所有的子键。
+
+    **必须先删子键再删父键**——父键里有东西的话 DeleteKey 会失败
+    （注册表不像文件系统那样会级联删除）。
+    """
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            path,
+            0,
+            winreg.KEY_READ | winreg.KEY_WRITE,
+        ) as key:
+            child_count = winreg.QueryInfoKey(key)[0]
+            for index in range(child_count):
+                child = winreg.EnumKey(key, index)
+                _delete_key_tree(winreg, path + "\\" + child)
+    except FileNotFoundError:
+        return
+    except OSError:
+        pass
+
+    try:
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
+    except OSError:
+        pass
 
 
 def is_open_at_login_enabled() -> bool:

@@ -229,6 +229,41 @@ def _windows_appdata() -> Path:
     return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "SuperDownloadManager"
 
 
+def install_native_host(resources: Path) -> dict:
+    """把浏览器原生消息宿主装上（规格 §3.1）。
+
+    浏览器按「原生消息宿主清单」里的 `path` 拉起宿主进程。清单要
+    写到各个浏览器的 NativeMessagingHosts 目录里——那是**用户级**
+    目录，不需要管理员权限。
+
+    装不上不影响下载功能（扩展还有回环 HTTP 那条通道），所以失败
+    只返回状态，不抛。
+    """
+    host_bin = resources / "native-host" / "sdmd-native-host"
+    if not host_bin.is_file():
+        return {"ok": False, "reason": "bundle_missing_host", "path": ""}
+    try:
+        from ..ipc.native_host import install_native_host as install
+
+        written = install(host_bin)
+        return {"ok": True, "reason": "installed", "path": str(written[0]) if written else ""}
+    except Exception as err:
+        return {"ok": False, "reason": f"install_failed: {err}", "path": ""}
+
+
+def install_native_host_windows(executable: Path) -> dict:
+    """Windows 版本：宿主 exe 已经解出来了，装清单即可。"""
+    if not executable.is_file():
+        return {"ok": False, "reason": "host_missing", "path": ""}
+    try:
+        from ..ipc.native_host import install_native_host as install
+
+        written = install(executable)
+        return {"ok": True, "reason": "installed", "path": str(written[0]) if written else ""}
+    except Exception as err:
+        return {"ok": False, "reason": f"install_failed: {err}", "path": ""}
+
+
 def _extract_zip_once(archive: Path, dest: Path) -> bool:
     """把 zip 解到 dest。已解过（dest 里有标记文件）就跳过。"""
     marker = dest / ".extracted"
@@ -261,6 +296,8 @@ def _ensure_windows() -> dict:
         "platform": "win32",
         "cli": {"ok": False, "reason": "not_bundle", "path": "", "in_path": False},
         "daemon": {"ok": False, "reason": "not_bundle", "path": ""},
+        "native_host": {"ok": False, "reason": "not_bundle", "path": ""},
+        "url_scheme": {"ok": False, "reason": "not_bundle"},
     }
     if not getattr(sys, "frozen", False):
         return result
@@ -272,11 +309,25 @@ def _ensure_windows() -> dict:
     runtime = base / "runtime"
     cli_zip = Path(meipass) / "sdm-cli.zip"
     daemon_zip = Path(meipass) / "sdmd-daemon.zip"
+    host_zip = Path(meipass) / "sdmd-native-host.zip"
 
     if not _extract_zip_once(cli_zip, runtime / "sdm"):
         return result
     if not _extract_zip_once(daemon_zip, runtime / "sdmd"):
         return result
+    # 原生消息宿主（规格 §3.1）。浏览器按清单里的 path 拉起它，
+    # 解不出来就装不了清单——但这不影响下载功能，所以失败只记
+    # 下来，不中断启动。
+    host_exe: Path | None = None
+    if _extract_zip_once(host_zip, runtime / "sdmd-native-host"):
+        candidate = runtime / "sdmd-native-host" / "sdmd-native-host.exe"
+        if candidate.is_file():
+            host_exe = candidate
+    result["native_host"] = {"ok": host_exe is not None, "path": str(host_exe or "")}
+    if host_exe is not None:
+        # 装清单（浏览器按清单里的 path 拉起宿主）。
+        installed = install_native_host_windows(host_exe)
+        result["native_host"] = installed
 
     cli_exe = runtime / "sdm" / "sdm.exe"
     daemon_exe = runtime / "sdmd" / "sdmd.exe"
@@ -348,6 +399,21 @@ def _ensure_windows() -> dict:
             result["daemon"] = {"ok": True, "reason": "task_registered", "path": task}
         except OSError as err:
             result["daemon"] = {"ok": False, "reason": f"task_failed: {err}", "path": task}
+
+    # URL Scheme 注册（规格 §4.2 的路径 A / §4.5）。
+    #
+    # **幂等**：`register_url_scheme()` 自己会先比对现状，一样就
+    # 什么都不写。注册表写入会通知 Explorer 刷新，每次启动都重写
+    # 一遍是白折腾。
+    #
+    # 写在 HKCU 下，普通用户就能注册，不需要管理员权限。
+    try:
+        from ..system_integration import register_url_scheme
+
+        ok = register_url_scheme()
+        result["url_scheme"] = {"ok": ok, "reason": "registered" if ok else "skipped"}
+    except Exception as err:
+        result["url_scheme"] = {"ok": False, "reason": f"url_scheme_failed: {err}"}
     return result
 
 
@@ -361,6 +427,7 @@ def ensure_installed() -> dict:
         "platform": sys.platform,
         "cli": {"ok": False, "reason": "not_bundle", "path": "", "in_path": False},
         "daemon": {"ok": False, "reason": "not_bundle", "path": ""},
+        "native_host": {"ok": False, "reason": "not_bundle", "path": ""},
     }
     resources = bundle_resources()
     if resources is None:
@@ -369,6 +436,9 @@ def ensure_installed() -> dict:
     if _is_macos():
         result["cli"] = install_cli(resources)
         result["daemon"] = register_daemon(resources)
+        # 浏览器原生消息宿主（规格 §3.1）。装不上不影响下载——
+        # 扩展还有回环 HTTP 那条通道，只是多一次手动配对。
+        result["native_host"] = install_native_host(resources)
     elif _is_windows():
         result = _ensure_windows()
     return result

@@ -17,6 +17,7 @@ import os
 import shutil
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
 
@@ -97,14 +98,62 @@ class FileAssembler:
 
     def append(self, data: bytes, chunk_id: int) -> int:
         """往分片文件追加字节，返回写入量。"""
+        return self.append_limited(data, chunk_id, limit=None)[0]
+
+    def append_limited(
+        self,
+        data: bytes,
+        chunk_id: int,
+        limit: int | Callable[[], int | None] | None,
+    ) -> tuple[int, bool]:
+        """追加字节，但**不超过** `limit`（绝对偏移上限）。
+
+        返回 `(写入量, 是否因为到达上限而截断)`。
+
+        **为什么需要上限。** 动态分段（规格 §1.2）会在下载过程中把
+        一个在途分片对半拆开——旧分片的区间随之缩短。那一路传输的
+        HTTP 请求已经带着旧的 Range 发出去了，服务器还会继续发字节。
+        如果照单全收，这些字节就写到了新分片的区间里，两个分片
+        的内容重叠，最后合并出来的文件是坏的，而且**大小看着正常**，
+        极难发现。
+
+        所以写入前先看上限，超出的部分丢掉。最多丢一个数据块
+        （64 KB），换来的是文件一定是对的。
+
+        **`limit` 可以传一个取值函数。** 这是必须的：拆分线程会在
+        传输线程读上限的同一瞬间把上限改小。取值函数在**分片锁内**
+        调用，于是「读上限」和「写字节」是原子的——拆分线程想改
+        上限也得先拿这把锁。
+
+        传函数时的时序：
+        1. 传输线程拿锁 → 调 limit() 拿到当前上限 → 写。
+        2. 拆分线程等锁 → 拿到锁 → 砍掉超出部分（`shrink_chunk`）。
+
+        两步都拿同一把锁，所以不会出现「上限是旧的、文件被砍过」
+        的交叉状态。
+        """
         with self._queue_lock:
             lock = self._chunk_locks.get(chunk_id)
             handle = self._handles.get(chunk_id)
         if lock is None or handle is None:
             raise AssemblerError(f"chunk {chunk_id} is not open")
 
-        # 只锁同一个分片的写入，不同分片互不阻塞。
+        truncated = False
         with lock:
+            current_limit = limit() if callable(limit) else limit
+            if current_limit is not None:
+                # `handle.tell()` 是**分片内**的偏移（从 0 开始），
+                # 而 `limit` 是**文件里的绝对偏移**。两者差一个分片
+                # 起点——不换算的话，第二个分片能写进两倍于它应有
+                # 的数据。单流下载（服务器无视 Range，把整个文件
+                # 发过来）时这个 bug 会让文件凭空多出一截。
+                base = self._chunk_starts.get(chunk_id, 0)
+                pos = base + handle.tell()
+                if pos >= current_limit:
+                    return 0, True
+                if pos + len(data) > current_limit:
+                    data = data[: current_limit - pos]
+                    truncated = True
             handle.write(data)
             handle.flush()
         n = len(data)
@@ -113,7 +162,43 @@ class FileAssembler:
             # 每个分片自己的最后写入时刻。详情页的「耗时」列用它——
             # 所有分片显示同一个值是没意义的。
             self._chunk_updated[chunk_id] = time.monotonic()
-        return n
+        return n, truncated
+
+
+    def shrink_chunk(self, chunk_id: int, new_end: int) -> int:
+        """把分片的结束位置往前挪，砍掉临时文件里多出来的字节。
+
+        动态分段把在途分片拆开时要调这个：分片的区间从
+        `[start, old_end)` 缩成 `[start, new_end)`，但临时文件里可能
+        已经写了超过 `new_end` 的字节——那些字节属于新分片的区间，
+        留着就会重叠。
+
+        **必须在写分片的同一把锁下调用**，否则会跟正在写的协程
+        打架：协程刚判断完「还能写」，这边就把文件截短了。
+
+        返回被砍掉的字节数（0 表示没砍）。
+        """
+        with self._queue_lock:
+            lock = self._chunk_locks.get(chunk_id)
+            handle = self._handles.get(chunk_id)
+            start = self._chunk_starts.get(chunk_id, 0)
+        if lock is None or handle is None:
+            return 0
+        with lock:
+            keep = max(0, new_end - start)
+            pos = handle.tell()
+            if pos <= keep:
+                return 0
+            try:
+                handle.truncate(keep)
+                handle.seek(keep)
+            except OSError:
+                return 0
+            removed = pos - keep
+        with self._queue_lock:
+            self._chunk_written[chunk_id] = keep
+        return removed
+
 
     def chunk_updated_at(self, chunk_id: int) -> float | None:
         """这个分片最后一次写入的时刻（monotonic 秒）。"""
