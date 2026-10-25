@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .. import paths
 from ..clipboard import ClipboardMonitor
+from ..console import force_utf8_stdio
 from ..engine.download_engine import DownloadEngine
 from ..i18n import I18n
 from ..ipc.dispatch_server import DispatchServer
@@ -41,6 +42,7 @@ def run_self_test(report_path: str | None = None) -> int:
 
     CI 用它挡住「打包出来才发现起不来」。
     """
+    force_utf8_stdio()
     checks: list[tuple[str, bool, str]] = []
 
     def check(name: str, ok: bool, detail: str = "") -> None:
@@ -107,6 +109,7 @@ def run_self_test(report_path: str | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    force_utf8_stdio()
     args = parse_args(argv)
 
     if args.self_test:

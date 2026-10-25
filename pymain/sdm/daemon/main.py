@@ -16,6 +16,7 @@ import signal
 import sys
 
 from .. import paths
+from ..console import force_utf8_stdio
 from ..engine.download_engine import DownloadEngine
 from ..ipc.dispatcher import Dispatcher
 from ..ipc.server import AsyncSocketServer
@@ -59,6 +60,9 @@ async def run() -> int:
 
 
 def main() -> int:
+    # Windows 控制台默认是 GBK，日志里的中文路径会抛
+    # UnicodeEncodeError，daemon 直接起不来
+    force_utf8_stdio()
     try:
         return asyncio.run(run())
     except KeyboardInterrupt:

@@ -60,15 +60,13 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent \
             pymain/dist/macos/SuperDownloadManager.app \
             build/release/SuperDownloadManager-macOS.zip
-          cd build/release
-          shasum -a 256 SuperDownloadManager-macOS.zip | tee SuperDownloadManager-macOS.zip.sha256
-          # CLI 单独打一个包。.app 里已经带了（Contents/Helpers/），
+          # CLI 单独打一个包。.app 里已经带了（Contents/Resources/sdm-cli/），
           # 但用户可能只想拿命令行工具，不装整个 app。
-          cd ..
           ditto -c -k --sequesterRsrc --keepParent \
             pymain/dist/macos/sdm \
             build/release/sdm-macOS.zip
           cd build/release
+          shasum -a 256 SuperDownloadManager-macOS.zip | tee SuperDownloadManager-macOS.zip.sha256
           shasum -a 256 sdm-macOS.zip | tee sdm-macOS.zip.sha256
 
       - uses: actions/upload-artifact@v4

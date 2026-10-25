@@ -6,7 +6,7 @@
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-多线程下载器，支持 macOS、Windows、Linux。
+IDM 的开源跨平台替代品。多线程下载器，支持 macOS、Windows、Linux。
 
 - 单个 Python 内核，Web UI，不带 Electron，不内置浏览器运行时
 - 默认 32 段并行，上限 128

@@ -21,6 +21,7 @@ import sys
 import uuid
 from typing import Any
 
+from ..console import force_utf8_stdio
 from ..ipc.client import ClientError, IPCClient
 from ..ipc.protocol import (
     METHOD_ADD,
@@ -127,6 +128,8 @@ def parse_args(args: list[str]) -> dict:
 
 def run(args: list[str] | None = None) -> int:
     """CLI 入口。返回退出码。"""
+    # Windows 控制台默认是 GBK，输出中文路径会抛 UnicodeEncodeError
+    force_utf8_stdio()
     if args is None:
         args = sys.argv[1:]
 

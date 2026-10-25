@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import paths
+from .console import safe_print
 
 
 class LogLevel(enum.IntEnum):
@@ -157,7 +158,9 @@ class SDMLogger:
             if len(self._recent) > 500:
                 del self._recent[:-500]
         if self._stderr:
-            print(f"[{entry.level.short_tag}] [{category}] {message}", flush=True)
+            # 用 safe_print 而不是 print：Windows 控制台默认 GBK，
+            # 日志里的中文路径会抛 UnicodeEncodeError。
+            safe_print(f"[{entry.level.short_tag}] [{category}] {message}")
         if self._started:
             try:
                 self._queue.put_nowait(entry)

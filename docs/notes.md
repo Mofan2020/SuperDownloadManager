@@ -174,3 +174,66 @@ codesign --verify --deep --strict SuperDownloadManager.app   # exit 0
 Contents/Resources/sdm-cli/sdm ping                          # 0.06s
 Contents/Resources/sdmd-daemon/sdmd                           # 0.18s 出 socket
 ```
+
+## 取消语义：CancelledError 不能转成 FlowError
+
+`DownloadFlow.run()` 原来把 `asyncio.CancelledError` 捕获后转成 `FlowError(kind="cancelled")`。看起来无害，实际是错的：
+
+```
+flow.run() 抛 FlowError("cancelled")
+  → 引擎的 except FlowError 分支
+  → summary.state = FAILED
+```
+
+**取消/暂停被报成了失败。** Swift 版就有这个毛病（暂停后任务显示失败），Python 版重构时又带进来了。
+
+引擎里其实有正确的分支：
+
+```python
+except asyncio.CancelledError:
+    if live.cancelled: summary.state = TaskState.CANCELLED.value
+    elif live.paused:  summary.state = TaskState.PAUSED.value
+```
+
+但它永远走不到——`flow.run()` 已经把 CancelledError 吃掉了。
+
+**修法**：`flow.run()` 里 CancelledError 原样往上抛。它在 Python 3.8+ 继承自 BaseException，不转的话 asyncio 才知道这是「请求取消」而不是「出错」。
+
+引擎的 `except FlowError` 里另加了一条 `kind == "cancelled"` 的判断作为双保险。
+
+R-08 原来只有一条测试，测的是 flow 层抛 FlowError——它锁死了错误行为。拆成两条：一条测 flow 层抛什么，一条测引擎层状态是什么（后者才是用户看到的）。
+
+## CI 上 macOS runner 的 abort（exit 134）
+
+pytest 退出时报：
+
+```
+Fatal Python error: _enter_buffered_busy: could not acquire lock for
+<_io.BufferedWriter name='<stderr>'> at interpreter shutdown, possibly
+due to daemon threads
+```
+
+**报的不是真正的失败原因**——真正的失败被这个 abort 盖住了。
+
+原因：客户端取消下载会直接关连接，服务器的线程读 socket 抛 `ConnectionResetError`。socketserver 默认把这个 traceback 打到 stderr。pytest 退出那一刻打，stderr 的锁已经销毁 → 整个进程 abort。
+
+修法是 `QuietErrorMixin`：`handle_error` 里把 `ConnectionResetError` / `BrokenPipeError` / `ConnectionAbortedError` 静默掉。这些是正常现象，不是错误。
+
+**教训**：测试基础设施的 stderr 噪音会在收尾时变成致命的 abort。凡是有后台线程往 stderr 写的地方，都得考虑解释器关闭那一刻。
+
+## monkeypatch 替换类方法时的一个坑
+
+`monkeypatch.setattr(Path, "unlink", fake)` 时，fake 必须是**函数**，不能是对象。
+
+Path.unlink 原本是方法。替换成普通对象时，Python 不会绑定 self——`path.unlink()` 以零参数调用它。于是所有删除请求都被当成「目标文件」的请求，测试变成假绿（看起来在验证锁竞争，实际上验证的是别的东西）。
+
+写成类并实现 `__get__` 也不行：`__get__` 返回绑定方法后，调用时同样不传 path。正确做法是闭包函数：
+
+```python
+def make(self):
+    def fake_unlink(path=None, *args, **kwargs):
+        ...
+    return fake_unlink
+```
+
+**这个坑差点让我得出错误结论**——看到「分片残留」以为是引擎的问题，实际是 fake 自己的问题。引擎那侧确实也有真 bug（live 被 pop 之后拿不到 flow），但如果 fake 是错的，测试结果就说明不了任何事。
