@@ -108,6 +108,36 @@ def run_self_test(report_path: str | None = None) -> int:
     return 0 if ok else 1
 
 
+def _install_cli_async(bridge) -> None:
+    """后台线程：把 CLI 装进 PATH、注册 daemon，然后把结果推给前端。
+
+    失败只记日志，不弹窗——启动时出点小状况不该挡住用户用软件。
+    """
+    try:
+        from .bootstrap import ensure_installed
+
+        result = ensure_installed()
+    except Exception as err:
+        log.warning(CAT_GUI, f"安装命令行工具失败: {err}")
+        return
+
+    cli = result.get("cli", {})
+    daemon = result.get("daemon", {})
+    if cli.get("ok"):
+        log.info(CAT_GUI, f"命令行工具: {cli.get('path')}（{cli.get('reason')}）")
+    elif cli.get("reason") not in ("not_bundle",):
+        log.warning(CAT_GUI, f"命令行工具没装上: {cli.get('reason')} {cli.get('path', '')}")
+    if daemon.get("ok"):
+        log.info(CAT_GUI, f"后台守护: {daemon.get('path')}（{daemon.get('reason')}）")
+    elif daemon.get("reason") not in ("not_bundle",):
+        log.warning(CAT_GUI, f"后台守护没注册上: {daemon.get('reason')}")
+
+    try:
+        bridge._call_js("onCliInstall", result)
+    except Exception:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     force_utf8_stdio()
     args = parse_args(argv)
@@ -172,6 +202,14 @@ def main(argv: list[str] | None = None) -> int:
         """页面加载完：把初始状态推给前端。"""
         state = bridge.bootstrap()
         window.evaluate_js(f"onBootstrap({json.dumps(state, ensure_ascii=False)})")
+        # 首次启动把 CLI 装进 PATH、注册 daemon。放后台线程里做——
+        # launchctl 那几步要读写系统目录，不能挡着窗口起不来。
+        threading.Thread(
+            target=_install_cli_async,
+            args=(bridge,),
+            name="sdm-install-cli",
+            daemon=True,
+        ).start()
 
     def on_url_request() -> None:
         """处理 `superdownloadmanager://` URL scheme。

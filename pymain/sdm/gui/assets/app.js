@@ -1407,6 +1407,25 @@ function openClipboardDialog(candidate) {
 
 function onScheduleFired() { refreshTasks(); }
 
+// 首次启动时后端把 CLI 装好（软链到 PATH、注册 daemon）。
+// 后端在后台线程里做，做完推过来。
+function onCliInstall(result) {
+  if (!result) return;
+  const cli = result.cli || {};
+  if (!cli.ok) {
+    if (cli.reason === "conflict") {
+      toast(t("cliInstallConflict", "PATH 里已有别的 sdm，没动它：") + " " + (cli.path || ""), "info");
+    } else if (cli.reason && cli.reason !== "not_bundle") {
+      toast(t("cliInstallFailed", "命令行安装失败：") + " " + cli.reason, "err");
+    }
+    return;
+  }
+  // 已经在 PATH 里就不用打扰用户了——这是正常状态，不是新闻。
+  if (cli.in_path === false) {
+    toast(t("cliInstallNoPath", "命令行已装好，但该目录不在 PATH 中：") + " " + (cli.path || ""), "info");
+  }
+}
+
 // ============ 启动 ============
 
 async function boot() {

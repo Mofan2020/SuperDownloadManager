@@ -107,11 +107,16 @@ def common_args(
     extra_imports: list[str] | None = None,
     with_gui_assets: bool = True,
     onefile: bool = False,
+    extra_data: list[tuple[str, str]] | None = None,
 ) -> list[str]:
     """两个平台共用的 PyInstaller 参数。
 
     `extra_imports` 控制要带哪些隐藏导入，`with_gui_assets` 控制
     要不要打前端资源和 i18n。CLI 两者都不需要。
+
+    `extra_data` 是额外的 (源路径, 包内目标目录) 对。Windows 上
+    GUI 是 onefile 单文件，装不下第二份 Python 运行时，所以 CLI
+    和 daemon 以 zip 形式塞进去，首次运行时再解出来。
     """
     args = [
         "--noconfirm",
@@ -131,6 +136,9 @@ def common_args(
         args.extend(["--add-data", f"{ROOT / 'sdm' / 'i18n'}{SEP}sdm/i18n"])
         # 前端资源
         args.extend(["--add-data", f"{ROOT / 'sdm' / 'gui' / 'assets'}{SEP}sdm/gui/assets"])
+
+    for src, dest in extra_data or []:
+        args.extend(["--add-data", f"{src}{SEP}{dest}"])
 
     # 控制台模式。GUI 用 --windowed（不该有黑框），CLI / daemon
     # 用 --console（要看到输出和 traceback）。
@@ -394,25 +402,54 @@ def build_windows() -> bool:
         return False
 
     t0 = time.time()
-    for name, module, func, imports, with_assets, onefile in TARGETS:
+    win_dist = DIST / "windows"
+
+    # 先打 CLI 和 daemon（onedir）。
+    #
+    # GUI 是 onefile 单文件，装不下第二份 Python 运行时。所以把
+    # CLI/daemon 打成 zip 塞进 GUI 里，首次运行时解到
+    # %LOCALAPPDATA%\SuperDownloadManager\ 下——解出来的还是
+    # onedir，启动快（onefile 每次启动要解包，慢十几秒）。
+    for name, module, func, imports, with_assets, _onefile in TARGETS:
+        if name == APP_NAME:
+            continue
         entry = build_entrypoint(name, module, func)
-        # GUI 用 onefile：Windows 用户的预期是「一个 exe，双击就能用」。
-        # onedir 的 GUI 是个目录，得连着 _internal 一起拷，发出去不直观。
-        #
-        # CLI 和 daemon 保持 onedir：onefile 每次启动要解包重签名，
-        # 实测慢十几秒。命令行工具让人等几秒是不能接受的。
-        use_onefile = onefile or name == APP_NAME
         args = [
             sys.executable, "-m", "PyInstaller",
-            *common_args(name, name == APP_NAME, imports, with_assets, use_onefile),
+            *common_args(name, False, imports, with_assets, False),
             str(entry),
         ]
         if run(args) != 0:
             print(f"PyInstaller 失败：{name}")
             return False
         print(f"  {name}.exe 完成")
+
+    # CLI/daemon 打成 zip
+    zips: list[tuple[Path, str]] = []
+    for name, archive_name in (("sdm", "sdm-cli.zip"), ("sdmd", "sdmd-daemon.zip")):
+        src = win_dist / name
+        if not src.is_dir():
+            print(f"找不到 {src}")
+            return False
+        archive = win_dist / archive_name
+        shutil.make_archive(str(archive.with_suffix("")), "zip", root_dir=str(src))
+        zips.append((archive, "."))
+        print(f"  {archive_name} 完成（{archive.stat().st_size // 1024} KB）")
+
+    # GUI（onefile），带上两个 zip
+    entry = build_entrypoint(APP_NAME, "sdm.gui.main", "main")
+    args = [
+        sys.executable, "-m", "PyInstaller",
+        *common_args(APP_NAME, True, GUI_EXTRA_IMPORTS, True, True, extra_data=zips),
+        str(entry),
+    ]
+    if run(args) != 0:
+        print("PyInstaller 失败：GUI")
+        return False
+    print(f"  {APP_NAME}.exe 完成")
+
     print(f"Windows 打包完成（{time.time() - t0:.0f}s）")
-    return smoke_test(DIST / "windows", darwin=False)
+    return smoke_test(win_dist, darwin=False)
 
 
 def _codesign(path: Path) -> bool:

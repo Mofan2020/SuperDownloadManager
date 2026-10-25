@@ -57,17 +57,15 @@ jobs:
           mkdir -p build/release
           # 用 ditto 而不是 zip：ditto 保留扩展属性和代码签名记录，
           # unzip 会丢，导致 codesign --verify 误报签名损坏。
+          #
+          # 只发一个包。CLI 和 daemon 就在 .app 里
+          # （Contents/Resources/sdm-cli/ 和 sdmd-daemon/），GUI 首次
+          # 启动会自己把 CLI 装进 PATH 并注册 daemon。
           ditto -c -k --sequesterRsrc --keepParent \
             pymain/dist/macos/SuperDownloadManager.app \
             build/release/SuperDownloadManager-macOS.zip
-          # CLI 单独打一个包。.app 里已经带了（Contents/Resources/sdm-cli/），
-          # 但用户可能只想拿命令行工具，不装整个 app。
-          ditto -c -k --sequesterRsrc --keepParent \
-            pymain/dist/macos/sdm \
-            build/release/sdm-macOS.zip
           cd build/release
           shasum -a 256 SuperDownloadManager-macOS.zip | tee SuperDownloadManager-macOS.zip.sha256
-          shasum -a 256 sdm-macOS.zip | tee sdm-macOS.zip.sha256
 
       - name: Verify macOS zip
         run: |
@@ -146,17 +144,9 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path build/release | Out-Null
-          # GUI 单文件
+          # 只发一个包。CLI 和 daemon 的 zip 已经塞在 GUI exe 里，
+          # 首次运行时自动解出来、装进 PATH、注册计划任务。
           Compress-Archive -Path pymain/dist/windows/SuperDownloadManager.exe -DestinationPath build/release/SuperDownloadManager-Windows.zip
-          # CLI 是 onedir（onefile 每次启动要解包，实测慢十几秒）。
-          # 连目录一起压，解压后是 sdm/ 目录（sdm.exe + _internal/），
-          # 而不是一堆散文件摊在根目录。
-          Compress-Archive -Path pymain/dist/windows/sdm -DestinationPath build/release/sdm-Windows.zip
-          # daemon 同样
-          Compress-Archive -Path pymain/dist/windows/sdmd -DestinationPath build/release/sdmd-Windows.zip
-          # 安装脚本单独一份（Windows 没有 .app 包可挂，脚本跟着 zip 走）
-          Copy-Item pymain/scripts/install.ps1 build/release/
-          Copy-Item pymain/scripts/uninstall.ps1 build/release/
           $hash = (Get-FileHash build/release/SuperDownloadManager-Windows.zip -Algorithm SHA256).Hash.ToLower()
           "$hash  SuperDownloadManager-Windows.zip" | Out-File -Encoding ascii build/release/SuperDownloadManager-Windows.zip.sha256
 
@@ -218,10 +208,6 @@ jobs:
             build/release/SuperDownloadManager-macOS.zip.sha256
             build/release/SuperDownloadManager-Windows.zip
             build/release/SuperDownloadManager-Windows.zip.sha256
-            build/release/sdm-Windows.zip
-            build/release/sdmd-Windows.zip
-            build/release/sdm-macOS.zip
-            build/release/sdm-macOS.zip.sha256
           draft: false
           prerelease: true
           generate_release_notes: false

@@ -1,3 +1,10 @@
+## v2.0.2
+
+- 一个包就够：命令行和后台守护都装在 app 里，首次启动自动装好
+- macOS 把 `sdm` 软链到 PATH 并注册开机自启
+- Windows 首次运行时释放命令行和守护进程，加进 PATH 并注册计划任务
+- macOS DMG 生成（`build.py --mac`）
+
 ## v2.0.1
 
 Python 重写版。跨 macOS、Windows、Linux，界面换成液态玻璃。
