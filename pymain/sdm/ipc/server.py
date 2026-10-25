@@ -24,6 +24,7 @@ from typing import Any
 
 from .. import paths
 from ..logging_setup import CAT_IPC, get_logger
+from ..version import SOCKET_PORT_WINDOWS
 
 log = get_logger()
 
@@ -52,7 +53,7 @@ class SocketServer:
         if self._is_windows:
             self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self._server.bind(("127.0.0.1", self.port or paths.SOCKET_PORT_WINDOWS))
+            self._server.bind(("127.0.0.1", self.port or SOCKET_PORT_WINDOWS))
         else:
             sock_path = Path(self.path).expanduser()
             sock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -70,7 +71,11 @@ class SocketServer:
         self._stop.clear()
         self._thread = threading.Thread(target=self._serve, name="sdm-ipc", daemon=True)
         self._thread.start()
-        log.info(CAT_IPC, f"IPC 服务器已启动: {self.path if not self._is_windows else f'127.0.0.1:{self.port}'}")
+        if self._is_windows:
+            endpoint = f"127.0.0.1:{self.port or SOCKET_PORT_WINDOWS}"
+        else:
+            endpoint = self.path
+        log.info(CAT_IPC, f"IPC 服务器已启动: {endpoint}")
 
     def stop(self) -> None:
         self._stop.set()
@@ -140,7 +145,7 @@ class AsyncSocketServer:
             self._server = await asyncio.start_server(
                 self._handle,
                 "127.0.0.1",
-                self.port or paths.SOCKET_PORT_WINDOWS,
+                self.port or SOCKET_PORT_WINDOWS,
             )
         else:
             sock_path = Path(self.path).expanduser()

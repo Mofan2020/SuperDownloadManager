@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .. import paths
 from ..logging_setup import get_logger
+from ..version import SOCKET_PORT_WINDOWS
 
 log = get_logger()
 
@@ -73,7 +74,7 @@ class IPCClient:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(self.timeout)
         try:
-            sock.connect(("127.0.0.1", self.port or paths.SOCKET_PORT_WINDOWS))
+            sock.connect(("127.0.0.1", self.port or SOCKET_PORT_WINDOWS))
             sock.sendall(payload + b"\n")
             buffer = b""
             while not buffer.endswith(b"\n"):
