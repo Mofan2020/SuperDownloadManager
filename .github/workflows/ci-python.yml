@@ -27,7 +27,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r pymain/requirements.txt
-          python -m pip install pytest ruff
+          # pyinstaller 要装：test_app_icon.py 靠它内置的默认图标
+          # 判断「--icon 有没有生效」——不装就 ModuleNotFoundError。
+          python -m pip install pytest ruff pyinstaller
 
       - name: Lint
         working-directory: pymain
@@ -52,7 +54,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r pymain/requirements.txt
-          python -m pip install pytest
+          # pyinstaller 要装：test_app_icon.py 靠它内置的默认图标
+          # 判断「--icon 有没有生效」——不装就 ModuleNotFoundError。
+          python -m pip install pytest pyinstaller
 
       # 在 macOS 上屏蔽掉 PyObjC，跑一遍全量。
       #

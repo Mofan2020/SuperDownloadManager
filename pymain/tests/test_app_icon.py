@@ -127,9 +127,11 @@ def test_pyinstaller_default_icon_differs():
     CI 上就是靠这个判断「--icon 有没有生效」——相同就说明 PyInstaller
     静默退回了默认图标。
     """
-    import PyInstaller
+    # importorskip 而不是硬 import——没装 PyInstaller 的环境跳过，
+    # 不该报 ModuleNotFoundError。CI 里装了，所以这条检查真会跑。
+    pyinstaller = pytest.importorskip("PyInstaller")
 
-    default = Path(PyInstaller.__file__).parent / "bootloader" / "images" / "icon-windowed.icns"
+    default = Path(pyinstaller.__file__).parent / "bootloader" / "images" / "icon-windowed.icns"
     if not default.is_file():
         pytest.skip("这个 PyInstaller 版本没有内置默认图标文件")
     ours = (RESOURCES / "AppIcon.icns").read_bytes()
