@@ -237,3 +237,30 @@ def make(self):
 ```
 
 **这个坑差点让我得出错误结论**——看到「分片残留」以为是引擎的问题，实际是 fake 自己的问题。引擎那侧确实也有真 bug（live 被 pop 之后拿不到 flow），但如果 fake 是错的，测试结果就说明不了任何事。
+
+## Windows 的安装方式
+
+macOS 有 .app 包，install.sh 挂在 `Contents/Resources/` 里跟着走。Windows 没有 .app
+这种东西——产物就是一个 exe，装 CLI 和注册 daemon 得另外想办法。
+
+对等实现：
+
+| | macOS | Windows |
+|---|---|---|
+| CLI 上 PATH | 软链 `~/.local/bin/sdm` | `.cmd` shim 放进 `%LOCALAPPDATA%\SuperDownloadManager\bin`，再把该目录加进用户 PATH |
+| daemon 常驻 | launchd LaunchAgent | 计划任务（登录时启动） |
+| 卸载 | `uninstall.sh` | `uninstall.ps1` |
+
+**为什么 Windows 用 .cmd shim 而不是软链**：Windows 的软链要开开发者模式或者管理员权限，
+普通用户装个下载器不该被要求改系统设置。shim 是个两行的批处理，指向真正的 exe。
+
+**计划任务的注册**用 `Register-ScheduledTask`，重复运行前先 `Unregister-ScheduledTask`
+——脚本要幂等，跑两次不能报错。
+
+CI 里加了一步用 PowerShell 解析器检查脚本语法：
+
+```powershell
+[System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errors)
+```
+
+脚本写错了要等用户手里才炸，那太晚。这步在 Windows runner 上跑，语法错误当场就红。

@@ -69,6 +69,22 @@ jobs:
           shasum -a 256 SuperDownloadManager-macOS.zip | tee SuperDownloadManager-macOS.zip.sha256
           shasum -a 256 sdm-macOS.zip | tee sdm-macOS.zip.sha256
 
+      - name: Verify macOS zip
+        run: |
+          # 校验 zip 必须用 ditto 解（不能用 unzip）——unzip 会丢扩展
+          # 属性和附加记录，让 codesign --verify 误报「资源缺失」。
+          #
+          # 这一步必须在 macOS runner 上做：ditto 是 macOS 专有工具。
+          # publish job 跑在 ubuntu 上，读不了 plist 也解不了这个 zip。
+          rm -rf /tmp/sdm-check
+          /usr/bin/ditto -x -k build/release/SuperDownloadManager-macOS.zip /tmp/sdm-check
+          /usr/bin/codesign --verify --deep --strict "/tmp/sdm-check/SuperDownloadManager.app"
+          # 版本号从 plist 读出来写进文件，publish job 拿去比对
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+            "/tmp/sdm-check/SuperDownloadManager.app/Contents/Info.plist" \
+            > build/release/built-version.txt
+          echo "built version: $(cat build/release/built-version.txt)"
+
       - uses: actions/upload-artifact@v4
         with:
           name: sdm-macos
@@ -170,22 +186,15 @@ jobs:
           name: sdm-windows
           path: build/release/
 
-      - name: Verify macOS zip
-        run: |
-          # 校验 zip 必须用 ditto 解（不能用 unzip）——unzip 会丢扩展
-          # 属性和附加记录，让 codesign --verify 误报「资源缺失」。
-          rm -rf /tmp/sdm-check
-          /usr/bin/ditto -x -k build/release/SuperDownloadManager-macOS.zip /tmp/sdm-check
-          /usr/bin/codesign --verify --deep --strict "/tmp/sdm-check/SuperDownloadManager.app"
-
       - name: Parse tag
         id: ver
         run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
 
       - name: Verify built version matches tag
         run: |
-          BUILT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
-                  "/tmp/sdm-check/SuperDownloadManager.app/Contents/Info.plist")
+          # 版本号在 build-macos job 里读出来写进这个文件——
+          # publish job 跑在 ubuntu 上，没有 PlistBuddy 读不了 plist。
+          BUILT=$(cat build/release/built-version.txt)
           if [ "$BUILT" != "${{ steps.ver.outputs.version }}" ]; then
             echo "版本不一致：tag=${{ steps.ver.outputs.version }} 产物=$BUILT" >&2
             exit 1
