@@ -20,10 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from sdm import clipboard  # noqa: E402
-from sdm.gui import bridge as bridge_mod  # noqa: E402
-from sdm.gui import macos_status  # noqa: E402
-
+from sdm import clipboard
+from sdm.gui import bridge as bridge_mod
+from sdm.gui import macos_status
 
 # -- i18n 一致性 ---------------------------------------------------
 
@@ -76,8 +75,6 @@ class _FakeEngine:
 
 def _make_bridge(monkeypatch, tasks=None, notify_on_complete=True, capture_clipboard=True):
     """造一个 GuiBridge，依赖全部替换掉。"""
-    from sdm.engine.download_engine import TaskSummary
-    from sdm.settings import SettingsStore
 
     summaries = tasks or []
 
@@ -173,7 +170,7 @@ def test_failure_notification_payload(monkeypatch):
 
     b.get_tasks()
 
-    title, subtitle, body = sent[0]
+    title, _subtitle, body = sent[0]
     assert title == "下载失败"
     assert body == "连接被重置"
 
@@ -369,7 +366,7 @@ def test_capture_enabled_reads_shared_settings(monkeypatch):
     from sdm.settings import SettingsStore
 
     class _FakeStore:
-        class settings:  # noqa: N801
+        class settings:
             capture_clipboard = False
 
     monkeypatch.setattr(
@@ -384,8 +381,8 @@ def test_capture_enabled_reads_shared_settings(monkeypatch):
 def test_dock_policy_constants_match_appkit():
     """常量跟 AppKit 一致（Regular=0, Accessory=1）。"""
     AppKit = pytest.importorskip("AppKit")
-    assert macos_status.POLICY_REGULAR == AppKit.NSApplicationActivationPolicyRegular
-    assert macos_status.POLICY_ACCESSORY == AppKit.NSApplicationActivationPolicyAccessory
+    assert AppKit.NSApplicationActivationPolicyRegular == macos_status.POLICY_REGULAR
+    assert AppKit.NSApplicationActivationPolicyAccessory == macos_status.POLICY_ACCESSORY
 
 
 def test_dock_grace_is_150ms():

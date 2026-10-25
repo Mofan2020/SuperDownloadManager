@@ -24,11 +24,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from sdm.engine import content_sniffer  # noqa: E402
-from sdm.engine.content_sniffer import ContentProbe  # noqa: E402
-from sdm.engine.http_downloader import HTTPDownloader  # noqa: E402
-from sdm.site_rules import SiteRule, SiteRuleStore  # noqa: E402
-
+from sdm.engine import content_sniffer
+from sdm.engine.content_sniffer import ContentProbe
+from sdm.engine.http_downloader import HTTPDownloader
+from sdm.site_rules import SiteRule
 
 # -- merge_headers：头部名大小写不敏感 ----------------------------
 

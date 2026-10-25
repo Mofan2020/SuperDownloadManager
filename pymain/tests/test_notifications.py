@@ -26,8 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from sdm import notifications  # noqa: E402
-
+from sdm import notifications
 
 # -- 假的 UserNotifications 模块 ----------------------------------
 
@@ -53,19 +52,19 @@ class _FakeContent:
     def init(self):
         return self
 
-    def setTitle_(self, value):  # noqa: N802
+    def setTitle_(self, value):
         self.title = value
 
-    def setSubtitle_(self, value):  # noqa: N802
+    def setSubtitle_(self, value):
         self.subtitle = value
 
-    def setBody_(self, value):  # noqa: N802
+    def setBody_(self, value):
         self.body = value
 
-    def setSound_(self, value):  # noqa: N802
+    def setSound_(self, value):
         self.sound = value
 
-    def setUserInfo_(self, value):  # noqa: N802
+    def setUserInfo_(self, value):
         self.user_info = value
 
 
@@ -82,7 +81,7 @@ class _FakeRequest:
         self.trigger = trigger
 
     @classmethod
-    def requestWithIdentifier_content_trigger_(cls, identifier, content, trigger):  # noqa: N802
+    def requestWithIdentifier_content_trigger_(cls, identifier, content, trigger):
         return cls(identifier, content, trigger)
 
 
@@ -95,13 +94,13 @@ class _FakeCenter:
         self.auth_options = None
         self.auth_requested = False
 
-    def setDelegate_(self, delegate):  # noqa: N802
+    def setDelegate_(self, delegate):
         self.delegate = delegate
 
-    def addRequest_withCompletionHandler_(self, request, handler):  # noqa: N802
+    def addRequest_withCompletionHandler_(self, request, handler):
         self.added.append(request)
 
-    def requestAuthorizationWithOptions_completionHandler_(  # noqa: N802
+    def requestAuthorizationWithOptions_completionHandler_(
         self, options, handler
     ):
         self.auth_options = options

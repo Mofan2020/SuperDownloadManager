@@ -15,14 +15,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from sdm.gui import url_scheme  # noqa: E402
-
+from sdm.gui import url_scheme
 
 # -- 解析 ----------------------------------------------------------
 
@@ -86,7 +83,7 @@ class _FakeEvent:
     def __init__(self, data):
         self._descriptor = _FakeDescriptor(data)
 
-    def paramDescriptorForKeyword_(self, keyword):  # noqa: N802
+    def paramDescriptorForKeyword_(self, keyword):
         assert keyword == url_scheme._KEY_DIRECT_OBJECT
         return self._descriptor
 

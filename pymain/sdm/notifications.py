@@ -214,7 +214,7 @@ def _notification_identifier(
     import hashlib
 
     digest = hashlib.sha256(
-        f"{title}\x00{subtitle}\x00{body}".encode("utf-8")
+        f"{title}\x00{subtitle}\x00{body}".encode()
     ).hexdigest()[:16]
     return f"sdm-{digest}"
 
@@ -321,10 +321,8 @@ def _build_delegate_class():
     `is overriding existing Objective-C class`。所以名字里带
     一个自增序号，每次建类都换个名。
     """
-    import objc
-    from Foundation import NSObject
-
     import UserNotifications as UN
+    from Foundation import NSObject
 
     global _delegate_seq
     _delegate_seq += 1

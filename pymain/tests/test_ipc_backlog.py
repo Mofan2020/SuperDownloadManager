@@ -12,13 +12,11 @@ import asyncio
 import sys
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from sdm.ipc import server as ipc_server  # noqa: E402
+from sdm.ipc import server as ipc_server
 
 
 def test_backlog_constant_matches_swift():

@@ -68,11 +68,10 @@ def test_self_test_fails_when_a_check_fails(monkeypatch, capsys):
     这条最要紧——CI 靠退出码判断。自检要是永远返回 0，
     它就是个摆设，「打包出来才发现起不来」照样会发生。
     """
-    from sdm.gui import main as gui_main
-
     # 让「分类解析」这项必然失败：把 bridge 里的解析函数
     # 换成一个恒返回 None 的假货。
     import sdm.gui.bridge as bridge_mod
+    from sdm.gui import main as gui_main
 
     monkeypatch.setattr(bridge_mod, "_resolve_category", lambda name: None)
 
@@ -86,8 +85,8 @@ def test_self_test_fails_when_a_check_fails(monkeypatch, capsys):
 
 def test_self_test_output_marks_failures(monkeypatch, capsys):
     """失败项在输出里标成 FAIL，不是 OK。"""
-    from sdm.gui import main as gui_main
     import sdm.gui.bridge as bridge_mod
+    from sdm.gui import main as gui_main
 
     monkeypatch.setattr(bridge_mod, "_resolve_category", lambda name: None)
 

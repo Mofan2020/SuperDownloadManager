@@ -18,9 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
 import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -29,10 +27,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from sdm.daemon import main as daemon_main  # noqa: E402
-from sdm.ipc import client as ipc_client  # noqa: E402
-from sdm import paths as sdm_paths  # noqa: E402
-
+from sdm import paths as sdm_paths
+from sdm.daemon import main as daemon_main
+from sdm.ipc import client as ipc_client
 
 # -- F165 响应上限 --------------------------------------------------
 
@@ -48,7 +45,6 @@ def test_read_response_rejects_oversized():
     截断出来的 JSON 解析会报一个跟真实原因无关的错，排查时容易
     被带偏。
     """
-    import socket as _socket
 
     class _FakeSock:
         def __init__(self):
@@ -66,7 +62,6 @@ def test_read_response_rejects_oversized():
 
 def test_read_response_returns_normal_payload():
     """正常响应照常返回（去掉尾部的换行）。"""
-    import socket as _socket
 
     class _FakeSock:
         def __init__(self, payload):
@@ -378,7 +373,7 @@ def test_classify_enabled_reads_shared_settings(monkeypatch):
     from sdm.ipc import dispatcher as disp_mod
 
     class _FakeStore:
-        class settings:  # noqa: N801
+        class settings:
             classify_enabled = False
 
     monkeypatch.setattr(

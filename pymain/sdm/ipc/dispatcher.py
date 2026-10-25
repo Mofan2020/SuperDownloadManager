@@ -9,7 +9,7 @@ import json
 from typing import Any
 
 from .. import paths
-from ..engine.categories import DownloadCategory, category_for_extension, category_from_url
+from ..engine.categories import category_for_extension, category_from_url
 from ..engine.download_engine import DownloadEngine, StartSpec, TaskSummary
 from ..logging_setup import CAT_IPC, get_logger
 from .protocol import (

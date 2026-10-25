@@ -31,12 +31,11 @@ from ..notifications import notify
 from ..schedules import ScheduleStore
 from ..settings import SettingsStore
 from ..site_rules import SiteRule, SiteRuleStore
-from ..system_integration import is_open_at_login_enabled
+from ..system_integration import is_open_at_login_enabled, set_open_at_login
 from ..system_integration import open_file as sys_open_file
 from ..system_integration import open_log_in_console as sys_open_log_in_console
 from ..system_integration import open_url as sys_open_url
 from ..system_integration import reveal_in_finder as sys_reveal
-from ..system_integration import set_open_at_login
 
 log = get_logger()
 

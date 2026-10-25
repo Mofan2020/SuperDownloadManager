@@ -23,8 +23,6 @@ import sys
 import time
 from pathlib import Path
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sdm.engine.content_sniffer import ProbeError
@@ -32,7 +30,7 @@ from sdm.engine.download_engine import DownloadEngine, StartSpec, TaskState, Tas
 from sdm.engine.http_downloader import HTTPDownloader
 from sdm.engine.speed_display import SpeedInput, compute
 from sdm.history_store import HistoryEntry, HistoryStore
-from sdm.logging_setup import LogLevel, LogSettings, SDMLogger
+from sdm.logging_setup import LogSettings, SDMLogger
 from sdm.system_integration import open_log_in_console
 from tests.conftest import run_async
 from tests.range_server import RangeServer

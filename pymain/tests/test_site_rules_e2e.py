@@ -22,6 +22,7 @@ import socketserver
 import sys
 import threading
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -29,8 +30,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from sdm.engine.http_downloader import HTTPDownloader  # noqa: E402
-from sdm.site_rules import SiteRule, SiteRuleStore  # noqa: E402
+from sdm.engine.http_downloader import HTTPDownloader
+from sdm.site_rules import SiteRule, SiteRuleStore
 
 
 class _RecordingHandler(http.server.BaseHTTPRequestHandler):
@@ -38,14 +39,14 @@ class _RecordingHandler(http.server.BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
 
-    requests: list[dict[str, str]] = []
+    requests: ClassVar[list[dict[str, str]]] = []
 
     def end_headers(self) -> None:
         self.send_header("Connection", "close")
         self.close_connection = True
         super().end_headers()
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         type(self).requests.append(dict(self.headers))
         body = b"x" * 4096
         self.send_response(200)
@@ -204,7 +205,7 @@ def test_rule_user_agent_overrides_existing_default(server, monkeypatch):
     `User-Agent: default-ua` 时，如果规则是「叠加」语义，两个值
     都在；如果覆盖，只剩规则的那个。
     """
-    base_url, requests = server
+    base_url, _requests = server
     _patch_store(monkeypatch, _rule(user_agent="rule-ua"))
 
     dl = HTTPDownloader(user_agent="default-ua", max_retries=0)
@@ -221,7 +222,7 @@ def test_rule_user_agent_lowercase_overrides_default(server, monkeypatch):
     头名大小写不敏感——规则里写 `user-agent` 和写 `User-Agent`
     是同一回事，不能两个都发出去。
     """
-    base_url, requests = server
+    base_url, _requests = server
     _patch_store(monkeypatch, _rule(user_agent="rule-ua"))
 
     dl = HTTPDownloader(user_agent="default-ua", max_retries=0)
@@ -330,7 +331,7 @@ def test_site_rule_never_produces_range_header(server, monkeypatch):
     规则模型里根本没有 Range 字段——这条测试锁住这个事实，
     将来有人加了 Range 字段，这里会红。
     """
-    base_url, requests = server
+    base_url, _requests = server
     _patch_store(monkeypatch, _rule(user_agent="rule-ua", referer="http://r/"))
 
     dl = HTTPDownloader(user_agent="default-ua", max_retries=0)
