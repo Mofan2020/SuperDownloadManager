@@ -192,6 +192,7 @@ def get_task_error(self, task_id: str) -> dict | None
 | `retry_task(task_id)` | 从持久化进度恢复 |
 | `get_task_error(task_id)` | |
 | `get_speed_history(task_id)` | 最近 60 秒的速度采样点 |
+| `get_status_summary()` | 全局摘要：`{"speed": 字节/秒, "active_count": int, "limit": 字节/秒, "progress": 0~1}`。**给菜单栏状态行和 Dock 进度用**，不走 `get_tasks()`——那个方法给每个任务建一个字典，1 秒一次、几百个任务时是白烧 CPU（规格 §6.4） |
 
 ### 3.2 Python → JS 推送
 
