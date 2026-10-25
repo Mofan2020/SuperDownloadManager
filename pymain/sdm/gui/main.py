@@ -47,6 +47,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _check_applescript_dict(check, is_macos: bool) -> None:
+    """自检里的「AppleScript 词典在不在」这一项。
+
+    **词典是 macOS 专属的东西**（Apple Events + Script Editor），
+    Windows 包里没有它、也不需要它。Windows CI 上查这个文件必然红
+    ——红掉的不是代码，是检查项写错了地方。
+
+    `is_macos` 单独传进来，不直接读 `sys.platform`，是为了能测：
+    源码跑的时候词典就在模块旁边，非 macOS 平台上查它是查得通的，
+    模拟不出「Windows 冻结包里没有词典」那个情形。
+    """
+    if not is_macos:
+        check("AppleScript 字典", True, "非 macOS，不需要词典")
+        return
+    try:
+        from .applescript import applescript_handler
+
+        sdef = applescript_handler.sdef_path()
+        check("AppleScript 字典", sdef.is_file(), str(sdef))
+    except Exception as err:
+        check("AppleScript 字典", False, str(err))
+
+
 def run_self_test(report_path: str | None = None) -> int:
     """无界面自检：检查依赖、路径、引擎能否起来。
 
@@ -140,9 +163,7 @@ def run_self_test(report_path: str | None = None) -> int:
     # 这一版新加的模块（规格 §3 / §4）。
     #
     # **同样的道理：静态分析认不认得它们，只有打包后才知道。**
-    # `sdm.gui.applescript` 还是个没有 `__init__.py` 的命名空间包，
-    # PyInstaller 对命名空间包的支持不如普通包稳——这里 import 一次
-    # 就能当场发现它没进包。
+    # 这里 import 一次就能当场发现它没进包。
     #
     # build.py 的打包冒烟会跑这个自检（跑的是**打包后**的那个
     # 可执行文件），所以这里红 = CI 的打包步骤红。
@@ -165,13 +186,7 @@ def run_self_test(report_path: str | None = None) -> int:
     # 打包时它被复制到 `Contents/Resources/`，源码运行时它在模块
     # 旁边。两边都要能找到——找不到就是词典没进包，Script Editor
     # 里看不到任何命令。
-    try:
-        from .applescript import applescript_handler
-
-        sdef = applescript_handler.sdef_path()
-        check("AppleScript 字典", sdef.is_file(), str(sdef))
-    except Exception as err:
-        check("AppleScript 字典", False, str(err))
+    _check_applescript_dict(check, sys.platform == "darwin")
 
     # Dock 图标策略（F148）
     #

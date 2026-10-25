@@ -135,3 +135,83 @@ def test_key_consistency_check_detects_missing_key(monkeypatch, capsys):
             break
     else:
         pytest.fail("输出里没有「文案键一致」这行")
+
+
+def test_applescript_dict_check_is_skipped_off_macos(monkeypatch):
+    """非 macOS 上不查词典（Windows CI 抓到的）。
+
+    `.sdef` 只存在于 macOS 的 .app 里（`Contents/Resources/`），
+    Windows 包里没有它、也不需要它——Apple Events 和 Script Editor
+    都是 macOS 的东西。自检在 Windows 上查它必然红。
+
+    旧写法是把这一项直接写在 `run_self_test` 里，读 `sys.platform`
+    自己决定——那样没法测：源码跑的时候词典就在模块旁边，
+    模拟不出「Windows 冻结包里没有词典」那个情形。
+    """
+    from sdm.gui.applescript import applescript_handler
+    from sdm.gui.main import _check_applescript_dict
+
+    # **把词典路径指到一个不存在的地方。** 这样「查了」和「跳过了」
+    # 两种实现的结果才不一样——否则在源码树上词典就在模块旁边，
+    # 查不查都过，测试等于没写。
+    monkeypatch.setattr(
+        applescript_handler, "sdef_path", lambda: Path("/不存在的/SuperDownloadManager.sdef")
+    )
+
+    results: list[tuple[str, bool, str]] = []
+    _check_applescript_dict(
+        lambda name, ok, detail="": results.append((name, ok, detail)),
+        is_macos=False,
+    )
+    assert results, "检查项没产出结果"
+    name, ok, detail = results[0]
+    assert name == "AppleScript 字典"
+    assert ok is True, f"非 macOS 不该判失败：{detail}"
+    assert "非 macOS" in detail, f"非 macOS 上这一项应该被跳过，实际是：{detail}"
+
+
+def test_applescript_dict_check_fails_when_missing_on_macos(monkeypatch):
+    """macOS 上词典不在必须判失败。
+
+    **这条不能松**：词典没进包的话，Script Editor 里一个命令都看不到，
+    而应用启动时不会报错——只有这一条检查挡得住。
+    """
+    from sdm.gui.applescript import applescript_handler
+    from sdm.gui.main import _check_applescript_dict
+
+    monkeypatch.setattr(
+        applescript_handler, "sdef_path", lambda: Path("/不存在的/SuperDownloadManager.sdef")
+    )
+
+    results: list[tuple[str, bool, str]] = []
+    _check_applescript_dict(
+        lambda name, ok, detail="": results.append((name, ok, detail)),
+        is_macos=True,
+    )
+    assert results
+    name, ok, _detail = results[0]
+    assert name == "AppleScript 字典"
+    assert ok is False, "macOS 上词典缺失必须判失败"
+
+
+def test_self_test_passes_on_non_macos_platform():
+    """把平台当成非 macOS 再跑一遍自检，它照样全过。"""
+    snippet = (
+        "import sys; sys.path.insert(0,'.'); "
+        "from sdm.gui.main import run_self_test; "
+        "sys.platform='win32'; "
+        "sys.exit(run_self_test())"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", snippet],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    assert "FAIL" not in stdout, f"模拟 Windows 时自检不该有失败项：\n{stdout}"
+    assert result.returncode == 0, f"自检退出码 {result.returncode}：\n{stdout}\n{stderr}"
