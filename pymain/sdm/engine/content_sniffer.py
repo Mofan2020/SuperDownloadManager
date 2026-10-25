@@ -197,6 +197,29 @@ def _decode_plain(raw: str) -> str | None:
     return cleaned or None
 
 
+def merge_headers(*sources: dict[str, str] | None) -> dict[str, str]:
+    """合并请求头，后面的覆盖前面的。
+
+    **头部名大小写不敏感**——`User-Agent` 和 `user-agent` 是同一个
+    头。直接 `dict.update()` 的话两个都会留下，httpx 会把两个都发
+    出去，服务器看到两个 UA 就可能挑一个不认的用。
+
+    所以这里按小写名去重：后来的覆盖先来的，同时把旧的那个
+    （不管它什么大小写）从结果里删掉。
+    """
+    merged: dict[str, str] = {}
+    seen: dict[str, str] = {}
+    for source in sources:
+        for key, value in (source or {}).items():
+            lower = key.lower()
+            old = seen.get(lower)
+            if old is not None and old != key:
+                merged.pop(old, None)
+            seen[lower] = key
+            merged[key] = value
+    return merged
+
+
 def parse_headers(headers: dict[str, str], final_url: str, original_url: str) -> ContentProbe:
     """从响应头解析出探测结果。"""
     lower = {k.lower(): v for k, v in headers.items()}
@@ -245,11 +268,26 @@ def parse_headers(headers: dict[str, str], final_url: str, original_url: str) ->
     )
 
 
-async def probe(url: str, client: httpx.AsyncClient | None = None) -> ContentProbe:
+async def probe(
+    url: str,
+    client: httpx.AsyncClient | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> ContentProbe:
     """发一个 `Range: bytes=0-0` 的 GET 探测目标。
 
     用 GET+Range 而不是 HEAD：很多服务器对 HEAD 的支持很差
     （返回 405，或者不返回 Content-Length）。
+
+    `extra_headers` 用于叠加站点规则的请求头（Referer / Cookie /
+    Basic Auth 等）。探测请求也是这个站点的请求——有的站点探测
+    阶段就 403，规则不生效的话任务根本起不来。
+
+    合并顺序：**默认 UA → extra_headers → Range**。
+
+    - 默认 UA 只是兜底，extra_headers 里的 UA 覆盖它（站点规则
+      指定的 UA 必须**替换**默认 UA，不是叠加在后面）。
+    - `Range: bytes=0-0` 最后写死。探测语义就是「只要第一个字节」，
+      外部传进来的头不能改它——改了探测拿到的长度就不是全长了。
     """
     owns_client = client is None
     if owns_client:
@@ -258,14 +296,12 @@ async def probe(url: str, client: httpx.AsyncClient | None = None) -> ContentPro
             timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=None),
         )
     try:
-        request = client.build_request(
-            "GET",
-            url,
-            headers={
-                "Range": "bytes=0-0",
-                "User-Agent": USER_AGENT,
-            },
+        request_headers = merge_headers(
+            {"User-Agent": USER_AGENT},
+            extra_headers,
+            {"Range": "bytes=0-0"},
         )
+        request = client.build_request("GET", url, headers=request_headers)
         response = await client.send(request, stream=True)
         try:
             headers = dict(response.headers)

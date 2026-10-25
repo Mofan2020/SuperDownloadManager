@@ -23,6 +23,7 @@ from typing import Any
 from .. import paths
 from ..engine.categories import DownloadCategory, category_from_url
 from ..engine.download_engine import DownloadEngine, StartSpec, TaskState
+from ..engine.speed_display import format_size
 from ..history_store import HistoryStore
 from ..i18n import I18n, available_languages
 from ..logging_setup import CAT_GUI, get_logger
@@ -30,12 +31,40 @@ from ..notifications import notify
 from ..schedules import ScheduleStore
 from ..settings import SettingsStore
 from ..site_rules import SiteRule, SiteRuleStore
+from ..system_integration import is_open_at_login_enabled
 from ..system_integration import open_file as sys_open_file
+from ..system_integration import open_log_in_console as sys_open_log_in_console
 from ..system_integration import open_url as sys_open_url
 from ..system_integration import reveal_in_finder as sys_reveal
 from ..system_integration import set_open_at_login
 
 log = get_logger()
+
+
+def _resolve_category(name: str) -> DownloadCategory | None:
+    """把一个字符串解析成分类。
+
+    两种输入都认：
+    - 分类名：`"video"` / `"music"` / `"archives"` …
+    - 扩展名：`"mp4"` / `"mp3"` / `"zip"` …
+
+    都认不出来的返回 None（调用方决定回退到按 URL 猜）。
+    """
+    value = (name or "").strip().lower()
+    if not value:
+        return None
+
+    # 分类名
+    try:
+        return DownloadCategory(value)
+    except ValueError:
+        pass
+
+    # 扩展名（去掉前导点，"mp4" 和 ".mp4" 都行）
+    from ..engine.categories import category_for_extension
+
+    return category_for_extension(value.lstrip("."))
+
 
 # pywebview 只在 GUI 环境可用，延迟导入让非 GUI 环境也能 import 本模块。
 try:  # pragma: no cover — 仅 GUI 环境
@@ -56,6 +85,8 @@ class GuiBridge:
         self._window: Any = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._notified: dict[str, set[str]] = {"completed": set(), "failed": set()}
+        #: 上一轮 get_tasks() 时每个任务的状态。用来发现「新转终态」。
+        self._last_states: dict[str, str] = {}
         self._clipboard_candidate: dict | None = None
         self._pending_dir: list[str] = []
         self._lock = threading.Lock()
@@ -139,8 +170,68 @@ class GuiBridge:
 
         不带分片明细——分片有 32~128 项，每 700ms 传一次的话
         光序列化就是无谓开销。分片只在详情面板展开时单独取。
+
+        **顺带做终态检测。** 前端每 700ms 轮询一次，这里对比上一轮
+        的状态，发现新转终态的任务就发通知。Swift 版是在
+        DownloadListStore 里检测任务转终态时发通知（那边有状态变化
+        的推送），Python 侧靠轮询的副作用来做——效果一样。
         """
-        return [task.to_dict() for task in self.engine.snapshot()]
+        tasks = [task.to_dict() for task in self.engine.snapshot()]
+        self._notify_terminal(tasks)
+        return tasks
+
+    def _notify_terminal(self, tasks: list[dict]) -> None:
+        """发现新转终态的任务就发通知。
+
+        Swift 对照：`App/MainWindow/DownloadListStore.swift:150-157`
+        （postCompleteNotification / postFailureNotification）。
+
+        **去重靠 `_notified`**——同一个任务只通知一次。任务在终态
+        上待着的时候，前端会一直轮询，每次都「变化」的话用户会被
+        通知轰炸。
+
+        **开关管两类通知**：`settings.notify_on_complete` 为 False
+        时完成和失败都不发（Swift `SettingsView.swift:156` 的语义）。
+        """
+        settings = SettingsStore.shared().settings
+        if not settings.notify_on_complete:
+            return
+
+        for task in tasks:
+            task_id = task.get("id") or ""
+            state = task.get("state") or ""
+            previous = self._last_states.get(task_id)
+            self._last_states[task_id] = state
+            if not task_id or previous == state:
+                continue
+            if state == "completed":
+                self._post_notification("completed", task)
+            elif state == "failed":
+                self._post_notification("failed", task)
+
+    def _post_notification(self, kind: str, task: dict) -> None:
+        """发一条完成/失败通知。同一个任务只发一次。"""
+        task_id = task.get("id") or ""
+        done = self._notified.setdefault(kind, set())
+        if task_id in done:
+            return
+        done.add(task_id)
+
+        catalog = I18n(self.settings_store.settings.locale).catalog()
+        title_key = "notifCompleteTitle" if kind == "completed" else "notifFailedTitle"
+        title = catalog.get(title_key, "下载完成" if kind == "completed" else "下载失败")
+        filename = task.get("filename") or task.get("url") or ""
+
+        if kind == "completed":
+            total = task.get("total_bytes")
+            body = format_size(total) if total else ""
+        else:
+            body = task.get("error_message") or catalog.get("notifBodyOfUnknownError", "未知错误")
+
+        try:
+            notify(title, filename, body)
+        except Exception as err:
+            log.debug(CAT_GUI, f"系统通知发送失败: {err}")
 
     def get_task_chunks(self, task_id: str) -> list[dict]:
         """单个任务的分片明细。详情面板用。"""
@@ -167,13 +258,27 @@ class GuiBridge:
             directory = Path(save_dir)
         else:
             base = paths.download_dir()
-            cat = category_from_url(url)
-            if category:
-                from ..engine.categories import category_for_extension
-
-                matched = category_for_extension(category)
-                cat = matched or cat
-            directory = base / cat.folder_name
+            settings = self.settings_store.settings
+            if not settings.classify_enabled:
+                # 关掉自动分类 → 一律落基础目录，不进分类子目录。
+                #
+                # Swift 对照：App/MainWindow/DownloadListStore.swift:367
+                # 是 `if !classifyEnabled { return downloads }`。
+                directory = base
+            else:
+                cat = category_from_url(url)
+                if category:
+                    # `category` 有两种来源：
+                    #   - 前端传的分类名（"video" / "music" …）
+                    #   - 早期 API 传的扩展名（"mp4" / "mp3" …）
+                    #
+                    # Swift 对照：App/MainWindow/DownloadListStore.swift:195
+                    #   `let resolvedCategory = category ?? DownloadCategory.from(url: url)`
+                    # —— 直接拿分类枚举用，不查扩展名表。
+                    #
+                    # 两种都支持：先按分类名解析，解析不了再按扩展名查。
+                    cat = _resolve_category(category) or cat
+                directory = base / cat.folder_name
         try:
             directory.mkdir(parents=True, exist_ok=True)
         except OSError as err:
@@ -318,6 +423,61 @@ class GuiBridge:
         self.settings_store.set("open_at_login", enabled)
         return {"ok": result}
 
+    def get_default_dir(self, category: str | None = None) -> dict:
+        """某个分类的默认保存目录。
+
+        Swift 对照：`App/MainWindow/ClipboardConfirmView.swift` 的
+        `defaultDir(for:)`——`~/Downloads/<分类文件夹名>`。
+
+        前端要按当前分类算默认目录（分类切换时自动同步），但下载
+        根目录和分类目录名是后端的事（`DownloadCategory.folder_name`
+        是 Video/Music/...，不是小写的分类值）。所以后端给。
+
+        没给分类就返回下载根目录本身。
+        """
+        base = paths.download_dir()
+        if not category:
+            return {"ok": True, "path": str(base)}
+        try:
+            from ..engine.categories import DownloadCategory
+
+            cat = DownloadCategory(category)
+        except ValueError:
+            return {"ok": True, "path": str(base)}
+        return {"ok": True, "path": str(base / cat.folder_name)}
+
+    def sync_open_at_login(self) -> dict:
+        """启动时同步开机自启状态。
+
+        Swift 对照：`App/SDMApp.swift:239` 调
+        `LaunchAtLogin.syncFromStorage()`，实现见
+        `App/LaunchAtLogin.swift:69-74`。
+
+        **语义是「从存储同步到系统」**：设置里说开了、系统里没开
+        （用户手动删了 LaunchAgent、或换了机器），就补上；设置里
+        说关了、系统里还开着，就注销掉。
+
+        **幂等**：两边已经一致时什么都不做——不重复写 plist，
+        不重复跑 launchctl。
+        """
+        target = bool(self.settings_store.settings.open_at_login)
+        try:
+            actual = is_open_at_login_enabled()
+        except Exception as err:
+            log.debug(CAT_GUI, f"读取开机自启状态失败: {err}")
+            return {"ok": False, "error": str(err)}
+
+        if target == actual:
+            return {"ok": True, "changed": False, "enabled": target}
+
+        try:
+            set_open_at_login(target)
+        except Exception as err:
+            log.warning(CAT_GUI, f"同步开机自启失败: {err}")
+            return {"ok": False, "error": str(err)}
+        log.info(CAT_GUI, f"开机自启已同步为 {target}")
+        return {"ok": True, "changed": True, "enabled": target}
+
     # -- 站点规则 ----------------------------------------------------
 
     def get_site_rules(self) -> list[dict]:
@@ -401,6 +561,18 @@ class GuiBridge:
     def get_log_file_path(self) -> dict:
         return {"ok": True, "path": str(get_logger().file_path)}
 
+    def open_log_in_console(self) -> dict:
+        """在 macOS 的 Console.app 里打开日志。
+
+        Swift 对照：`App/MainWindow/SettingsView.swift:374-384`
+        用 `x-man-page://console.app/subsystem/<id>` 跳到按子系统
+        过滤的视图。Python 版用 `open -a Console <日志文件>`——
+        Console.app 会把打开的文件收进去，够用。
+        """
+        path = str(get_logger().file_path)
+        ok = sys_open_log_in_console(path)
+        return {"ok": ok, "path": path}
+
     # -- 通知 --------------------------------------------------------
 
     def notify(self, title: str, body: str) -> dict:
@@ -416,6 +588,16 @@ class GuiBridge:
         return candidate
 
     def set_clipboard_candidate(self, url: str) -> None:
+        """设置剪贴板候选，等用户确认。
+
+        **已经在下载队列里的同一个 URL 不再提示。**
+        Swift 对照：`App/MainWindow/DownloadListStore.swift:416-421`。
+        不去重的话，同一个链接复制一次弹一次窗——用户明明已经
+        在下载了，还要再确认一遍。
+        """
+        if self._url_already_downloading(url):
+            return
+
         with self._lock:
             self._clipboard_candidate = {
                 "url": url,
@@ -423,6 +605,18 @@ class GuiBridge:
                 "default_threads": self.settings_store.settings.threads_default,
             }
         self._call_js("onClipboardCandidate", self._clipboard_candidate)
+
+    def _url_already_downloading(self, url: str) -> bool:
+        """这个 URL 是不是已经在下载队列里了。"""
+        from ..engine.download_engine import _is_terminal_state
+
+        try:
+            for task in self.engine.snapshot():
+                if task.url == url and not _is_terminal_state(task.state):
+                    return True
+        except Exception as err:
+            log.debug(CAT_GUI, f"检查重复下载失败: {err}")
+        return False
 
     def dismiss_clipboard_candidate(self) -> dict:
         with self._lock:

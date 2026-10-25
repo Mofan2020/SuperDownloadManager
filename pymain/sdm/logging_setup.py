@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import enum
 import queue
+import sys
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -91,7 +92,17 @@ class SDMLogger:
     _instance: SDMLogger | None = None
     _instance_lock = threading.Lock()
 
-    def __init__(self) -> None:
+    #: 每日清理的默认间隔（24 小时）。对应 Swift 版
+    #: `SDMLogger.init` 里 `Timer.scheduledTimer(withTimeInterval: 24*3600)`。
+    #: **测试可以注入更短的间隔**——生产默认就是 24 小时。
+    DEFAULT_CLEANUP_INTERVAL = 24 * 3600
+
+    def __init__(
+        self,
+        cleanup_interval: float | None = None,
+        log_dir: Path | None = None,
+        cleanup_enabled: bool | None = None,
+    ) -> None:
         self._settings = LogSettings()
         # 有界队列：高速下载时每个分片都写日志，无界队列会一直涨。
         # 满了就丢最旧的——日志丢几条不影响功能，但内存不能无限涨。
@@ -103,6 +114,29 @@ class SDMLogger:
         self._recent_lock = threading.Lock()
         self._stderr = False
         self._started = False
+        # 每日清理定时器。间隔可注入（测试用短间隔），
+        # 停止靠 Event 而不是 sleep——Event.wait 到点就醒，
+        # 不用等满一个周期。
+        self._cleanup_interval = (
+            self.DEFAULT_CLEANUP_INTERVAL if cleanup_interval is None else float(cleanup_interval)
+        )
+        self._cleanup_stop = threading.Event()
+        self._cleanup_thread: threading.Thread | None = None
+        # 日志目录覆盖。生产用 paths.log_dir()，测试传临时目录——
+        # 清理逻辑会**删文件**，绝不能让测试碰到用户真实的日志目录。
+        self._log_dir_override = Path(log_dir) if log_dir is not None else None
+        # 清理开关。默认开着，但 pytest 进程里必须关掉——
+        # `get_logger()` 在模块 import 时就会把单例起起来，
+        # 定时器随之启动，清理会删掉用户真实日志目录里的过期文件。
+        # 测试要验证清理逻辑就自己 new 一个带 log_dir= 的实例，
+        # 显式 cleanup_enabled=True。
+        if cleanup_enabled is None:
+            cleanup_enabled = "pytest" not in sys.modules
+        self._cleanup_enabled = bool(cleanup_enabled)
+        # 落盘用的锁。写线程和清理线程都要动同一个文件，
+        # 清理是「读出来重写」，写是「追加」——不串起来的话
+        # 清理会把刚写进去的几行冲掉。
+        self._file_lock = threading.Lock()
 
     @classmethod
     def shared(cls) -> SDMLogger:
@@ -119,18 +153,83 @@ class SDMLogger:
             return
         self._started = True
         self._stderr = to_stderr
-        paths.ensure_dirs()
+        if self._log_dir_override is not None:
+            # 测试实例：只建自己的目录，不碰用户的真实路径。
+            self._log_dir_override.mkdir(parents=True, exist_ok=True)
+        else:
+            paths.ensure_dirs()
         self._file_size = self._current_file_size()
         self._thread = threading.Thread(target=self._writer_loop, name="sdm-logger", daemon=True)
         self._thread.start()
+        self.start_cleanup_timer()
 
     def stop(self) -> None:
         if not self._started:
             return
+        self.stop_cleanup_timer()
         self._queue.put(None)
         if self._thread:
             self._thread.join(timeout=2.0)
         self._started = False
+
+    # -- 每日定时清理 ------------------------------------------------
+
+    def start_cleanup_timer(self) -> None:
+        """启动每日清理定时器（幂等）。
+
+        对应 Swift 版 `SDMLogger.init` 里的
+        `Timer.scheduledTimer(withTimeInterval: 24*3600, repeats: true)`。
+        Swift 版那个 Timer 在 init 里就挂上了；Python 版挂在
+        `start()` 上——定时器属于运行期的东西，进程没跑起来
+        不需要清理。
+
+        间隔默认 24 小时，构造时传 `cleanup_interval=` 可注入
+        更短的间隔（测试用，生产别改）。
+        """
+        if not self._cleanup_enabled:
+            return
+        if self._cleanup_thread is not None and self._cleanup_thread.is_alive():
+            return
+        self._cleanup_stop.clear()
+        self._cleanup_thread = threading.Thread(
+            target=self._cleanup_loop,
+            name="sdm-log-cleanup",
+            daemon=True,
+        )
+        self._cleanup_thread.start()
+
+    def stop_cleanup_timer(self) -> None:
+        """停掉每日清理定时器。
+
+        用 Event 而不是让线程自己跑完一轮——`Event.wait(timeout)`
+        会被 set 立刻唤醒，不用干等一个 24 小时周期。
+        """
+        self._cleanup_stop.set()
+        thread = self._cleanup_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        self._cleanup_thread = None
+
+    def _cleanup_loop(self) -> None:
+        """定时清理的循环体。
+
+        启动时先跑一次清理（Swift 版在 `updateSettings` 里
+        补跑一次），之后每 `cleanup_interval` 秒再跑一次。
+
+        `Event.wait(timeout)` 返回 True 表示被 stop 唤醒，
+        循环退出。清理本身不抛异常——定时器线程死了就没人在
+        下一次周期再清理了。
+        """
+        # 先清一次：进程可能挂了很久没清理过（比如机器睡眠）。
+        try:
+            self._run_cleanup()
+        except Exception:
+            pass
+        while not self._cleanup_stop.wait(self._cleanup_interval):
+            try:
+                self._run_cleanup()
+            except Exception:
+                pass
 
     # -- 设置 --------------------------------------------------------
 
@@ -143,7 +242,11 @@ class SDMLogger:
         validated = settings.validated()
         with self._lock:
             self._settings = validated
-        self._run_cleanup()
+        # 设置变更时立刻清一次（Swift 版 updateSettings 同理）。
+        # cleanup_enabled=False 时跳过——清理会删文件，pytest 进程里
+        # 不能让它碰用户真实的日志目录。
+        if self._cleanup_enabled:
+            self._run_cleanup()
 
     # -- 写入 --------------------------------------------------------
 
@@ -191,6 +294,9 @@ class SDMLogger:
 
     @property
     def log_dir(self) -> Path:
+        """日志目录。测试可以覆盖（构造参数 log_dir=）。"""
+        if self._log_dir_override is not None:
+            return self._log_dir_override
         return paths.log_dir()
 
     @property
@@ -230,13 +336,15 @@ class SDMLogger:
             settings = self._settings
         if not settings.persistence_enabled:
             return
-        self.log_dir.mkdir(parents=True, exist_ok=True)
         line = entry.format() + "\n"
-        with open(self.file_path, "a", encoding="utf-8") as fh:
-            fh.write(line)
-        self._file_size += len(line.encode("utf-8"))
-        if self._file_size > settings.max_bytes_per_file:
-            self._rotate()
+        # 落盘全程持锁：清理线程可能正在重写同一个文件。
+        with self._file_lock:
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+            with open(self.file_path, "a", encoding="utf-8") as fh:
+                fh.write(line)
+            self._file_size += len(line.encode("utf-8"))
+            if self._file_size > settings.max_bytes_per_file:
+                self._rotate()
 
     def _rotate(self) -> None:
         stamp = datetime.now().strftime("%Y-%m-%d")
@@ -254,7 +362,11 @@ class SDMLogger:
         self._file_size = 0
 
     def _run_cleanup(self) -> None:
-        """删掉过期的轮转文件，并把当前文件的行数压到上限。"""
+        """删掉过期的轮转文件，并把当前文件的行数压到上限。
+
+        清理是「读出来重写」，写线程是「追加」——两者动同一个
+        文件，必须串起来，否则刚写进去的几行会被清理冲掉。
+        """
         settings = self.settings
         cutoff = datetime.now() - timedelta(days=settings.retention_days)
         try:
@@ -274,18 +386,19 @@ class SDMLogger:
                 except OSError:
                     pass
         # 行数上限：只裁当前文件，轮转文件不动
-        try:
-            raw = self.file_path.read_text(encoding="utf-8")
-        except OSError:
-            return
-        lines = [ln for ln in raw.split("\n") if ln]
-        if len(lines) > settings.max_lines:
-            trimmed = "\n".join(lines[-settings.max_lines:]) + "\n"
+        with self._file_lock:
             try:
-                self.file_path.write_text(trimmed, encoding="utf-8")
-                self._file_size = len(trimmed.encode("utf-8"))
+                raw = self.file_path.read_text(encoding="utf-8")
             except OSError:
-                pass
+                return
+            lines = [ln for ln in raw.split("\n") if ln]
+            if len(lines) > settings.max_lines:
+                trimmed = "\n".join(lines[-settings.max_lines:]) + "\n"
+                try:
+                    self.file_path.write_text(trimmed, encoding="utf-8")
+                    self._file_size = len(trimmed.encode("utf-8"))
+                except OSError:
+                    pass
 
     # -- 读取 --------------------------------------------------------
 

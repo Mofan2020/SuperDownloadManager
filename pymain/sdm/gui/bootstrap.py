@@ -40,6 +40,27 @@ def _is_windows() -> bool:
     return sys.platform == "win32"
 
 
+def _windows_daemon_command(daemon_exe: Path) -> str:
+    """Windows 计划任务里启动 daemon 的命令行。
+
+    **必须设 `SDM_DAEMON=1`。** daemon 只认这个环境变量才进守护
+    模式（Swift 版 Daemon/main.swift:17-26 的守卫），没设就打印
+    提示然后 exit 0。计划任务会被标记成「已启动」但进程早就没了，
+    用户以为守护进程在跑，其实没有。
+
+    `schtasks` 没有直接设环境变量的参数，只能用 cmd 包一层。
+
+    **引号不能嵌套。** `cmd /c "set X=1&&"C:\\path\\x.exe""` 这种
+    写法 cmd 的 /c 解析会提前截断——外层引号包住整条命令时，路径
+    自己的引号会被当成结束符。所以外层不加引号，让 cmd 自己按
+    `&&` 切分，路径单独引起来。
+
+    cmd 的 `set VAR=VALUE` 里 VALUE 到下一个 `&` 为止，所以
+    `set SDM_DAEMON=1&&...` 存进去的值正好是 `1`。
+    """
+    return f'cmd /c set SDM_DAEMON=1&&"{daemon_exe}"'
+
+
 def bundle_resources() -> Path | None:
     """返回打包版的 Resources 目录；源码运行时返回 None。
 
@@ -149,6 +170,9 @@ def _launch_agent_plist(daemon_bin: Path) -> Path:
         "RunAtLoad": True,
         "KeepAlive": True,
         "ProcessType": "Background",
+        # daemon 只认 SDM_DAEMON=1，不设这个它会打印提示然后退出 0。
+        # launchd 会因为进程立刻退出而反复重启它——日志里全是崩溃。
+        "EnvironmentVariables": {"SDM_DAEMON": "1"},
         "StandardOutPath": f"/tmp/{LAUNCH_AGENT_LABEL}.out.log",
         "StandardErrorPath": f"/tmp/{LAUNCH_AGENT_LABEL}.err.log",
     }
@@ -313,7 +337,7 @@ def _ensure_windows() -> dict:
                 [
                     "schtasks", "/Create",
                     "/TN", task,
-                    "/TR", f'"{daemon_exe}"',
+                    "/TR", _windows_daemon_command(daemon_exe),
                     "/SC", "ONLOGON",
                     "/RL", "LIMITED",
                     "/F",

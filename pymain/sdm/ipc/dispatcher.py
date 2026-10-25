@@ -9,8 +9,8 @@ import json
 from typing import Any
 
 from .. import paths
-from ..engine.categories import category_for_extension
-from ..engine.download_engine import DownloadEngine, StartSpec
+from ..engine.categories import DownloadCategory, category_for_extension, category_from_url
+from ..engine.download_engine import DownloadEngine, StartSpec, TaskSummary
 from ..logging_setup import CAT_IPC, get_logger
 from .protocol import (
     METHOD_ADD,
@@ -26,6 +26,20 @@ from .protocol import (
 )
 
 log = get_logger()
+
+
+def _classify_enabled() -> bool:
+    """用户有没有关掉自动分类。
+
+    读的是 GUI 和 CLI 共享的那份设置（`sdm.classify.enabled`）。
+    读不到就当开着——默认行为是分类。
+    """
+    try:
+        from ..settings import SettingsStore
+
+        return bool(SettingsStore.shared().settings.classify_enabled)
+    except Exception:
+        return True
 
 
 class Dispatcher:
@@ -60,7 +74,7 @@ class Dispatcher:
         if method == METHOD_LIST:
             return IPCResponse.success(
                 request.id,
-                [task.to_dict() for task in self.engine.snapshot()],
+                [self._task_entry(task) for task in self.engine.snapshot()],
             )
 
         if method in (METHOD_PAUSE, METHOD_RESUME, METHOD_CANCEL):
@@ -76,6 +90,33 @@ class Dispatcher:
 
     # -- 各方法 ------------------------------------------------------
 
+    @staticmethod
+    def _task_entry(task: TaskSummary) -> dict[str, Any]:
+        """把任务转成 list 方法的条目。
+
+        **必须带 `total` 键**——Swift 版
+        `Daemon/IPC/Dispatcher.swift:103` 用的就是 `total`：
+
+        ```swift
+        "total": t.totalBytes.map { .int($0) } ?? AnyJSON.null,
+        ```
+
+        Python 内部的字段叫 `total_bytes`，但外部脚本是按 Swift
+        协议写的，读 `total`。少了这个键就落空（取到 null，
+        分不清「大小未知」和「没有这个字段」）。
+
+        大小未知时是 **None 不是 0**——0 表示「服务器说文件是 0 字节」，
+        None 才是「不知道多大」。Swift 那边也是 `?? AnyJSON.null`。
+
+        Swift 协议里的另外四个键（`id` / `url` / `state` /
+        `bytes_done`）保持原样。Python 多出来的字段
+        （speed_bytes_per_sec / filename / category 等）是**增量**，
+        不破坏按 Swift 协议写的读取方。
+        """
+        payload = task.to_dict()
+        payload["total"] = task.total_bytes
+        return payload
+
     async def _add(self, request: IPCRequest, params: dict[str, Any]) -> IPCResponse:
         url = params.get("url")
         if not isinstance(url, str) or not url:
@@ -88,24 +129,37 @@ class Dispatcher:
         threads = params.get("threads")
         referer = params.get("referer")
 
-        if not isinstance(filename, str) or not filename:
-            filename = DownloadEngine.filename_for(url)
+        # **文件名没给就留空**，不要拿 URL 猜一个填进去。
+        #
+        # 引擎的判据是 `not spec.filename_override`（download_engine.py
+        # 里探测成功后重锚到服务器 suggested_filename 的那段）。
+        # 一旦这里填了猜测值，判据为假，**服务器返回的真实文件名
+        # 就被挡掉了**——「用服务器给的文件名」这个功能在 CLI 路径
+        # 直接失效。Swift 版对应位置传的是 nil（Engine/
+        # DispatchServer.swift:93）。
+        filename_override = filename if isinstance(filename, str) and filename else None
 
         base = paths.download_dir()
-        if isinstance(category, str) and category:
+        # 关闭自动分类时一律落基础目录，不进分类子目录。
+        #
+        # Swift 对照：App/MainWindow/DownloadListStore.swift:367
+        # 是 `if !classifyEnabled { return downloads }`。GUI 和 CLI
+        # 共享同一个设置文件，两边语义必须一样——用户在设置里关了
+        # 分类，从命令行加的任务也得落基础目录。
+        if not _classify_enabled():
+            folder = ""
+        elif isinstance(category, str) and category:
             cat = category_for_extension(category)
             folder = cat.folder_name if cat else category.capitalize()
         else:
-            from ..engine.categories import category_from_url
-
             folder = category_from_url(url).folder_name
-        destination_dir = base / folder
+        destination_dir = base / folder if folder else base
         destination_dir.mkdir(parents=True, exist_ok=True)
 
         spec = StartSpec(
             url=url,
             destination_directory=destination_dir,
-            filename_override=filename,
+            filename_override=filename_override,
             max_threads_override=int(threads) if isinstance(threads, int) else None,
             referer=referer if isinstance(referer, str) else None,
         )

@@ -28,6 +28,13 @@ from ..version import SOCKET_PORT_WINDOWS
 
 log = get_logger()
 
+#: listen backlog。
+#:
+#: Swift 版写死 16（Daemon/IPC/SocketServer.swift:65 的
+#: `Darwin.listen(fd, 16)`）。asyncio 的默认 backlog 是 100，
+#: 这里显式对齐 Swift 的语义——两个实现的行为要一样。
+BACKLOG = 16
+
 
 class SocketServer:
     """行分隔 JSON 的 IPC 服务器。"""
@@ -66,7 +73,7 @@ class SocketServer:
             self._server.bind(str(sock_path))
             os.chmod(sock_path, 0o600)
 
-        self._server.listen(16)
+        self._server.listen(BACKLOG)
         self._server.settimeout(0.5)
         self._stop.clear()
         self._thread = threading.Thread(target=self._serve, name="sdm-ipc", daemon=True)
@@ -146,6 +153,7 @@ class AsyncSocketServer:
                 self._handle,
                 "127.0.0.1",
                 self.port or SOCKET_PORT_WINDOWS,
+                backlog=BACKLOG,
             )
         else:
             sock_path = Path(self.path).expanduser()
@@ -154,7 +162,11 @@ class AsyncSocketServer:
                 sock_path.unlink()
             except OSError:
                 pass
-            self._server = await asyncio.start_unix_server(self._handle, path=str(sock_path))
+            self._server = await asyncio.start_unix_server(
+                self._handle,
+                path=str(sock_path),
+                backlog=BACKLOG,
+            )
             os.chmod(sock_path, 0o600)
 
     async def stop(self) -> None:

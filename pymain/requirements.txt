@@ -3,3 +3,12 @@ httpx>=0.27,<1.0
 pywebview>=5.0,<7.0
 keyring>=24.0
 platformdirs>=4.0
+
+# macOS 通知框架。
+#
+# UserNotifications 是系统框架，PyObjC 的绑定需要单独装。
+# 少了它通知会退回 osascript 通道——能弹横幅，但点通知没法把
+# 主窗口拉到前面（那是 UN 独有的能力）。
+#
+# 环境标记是必须的：Windows 上没有这个框架，装了直接失败。
+pyobjc-framework-UserNotifications>=12.0; sys_platform == "darwin"

@@ -166,7 +166,12 @@ class DownloadFlow:
 
         # 1. 探测
         try:
-            probe = await self.downloader.probe(self.url)
+            probe = await self.downloader.probe(
+                self.url,
+                # 任务级的头（Referer 等）也要带上——探测阶段
+                # 有些站点就 403，不带头根本起不来。
+                extra_headers=dict(self.headers) or None,
+            )
         except ProbeError as err:
             # 403/410/451 是链接失效，不是探测出错——任务要进
             # 「等待新链接」状态，已下载的字节要留着。

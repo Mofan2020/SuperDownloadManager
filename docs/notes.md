@@ -140,20 +140,300 @@ macOS 菜单栏图标（NSStatusItem）用 PyObjC 实现，几个不查文档就
 
 NSStatusItem 必须在主线程创建——GUI 的 `on_loaded` 回调正好在主线程。
 
-## 关窗口后 app 常驻：pywebview 做不到
+## UserNotifications：没有 bundle identity 会 abort 进程
+
+Swift 版用 `UNUserNotificationCenter` 发通知，Python 版一开始想用
+`osascript` 顶一下。差别不只是「点通知能不能回主窗口」——`UN` 那条路
+有个会**直接杀掉进程**的坑。
+
+`UNUserNotificationCenter.currentNotificationCenter()` 要求进程有 bundle
+identity。从源码跑 Python 时没有，`NSInternalInconsistencyException`
+（`bundleProxyForCurrentProcess is nil`）——**ObjC 异常，不是 Python
+异常**，`try/except Exception` 接不住，进程直接 abort（exit 134）。
+
+所以判定必须发生在碰框架之前：
+
+```python
+def _bundle_identifier() -> str | None:
+    from Foundation import NSBundle
+    return NSBundle.mainBundle().bundleIdentifier() or None
+```
+
+拿不到就走 osascript 兜底。兜底路径只能弹横幅，**点通知回不到主窗口**
+——那是 UN 独有的能力。
+
+打包成 .app 就有 bundle identity（`CFBundleIdentifier` 在 Info.plist
+里），所以两条路都留着：开发时走 osascript，发版走 UN。
+
+### 打包时得显式声明 hidden import
+
+`requirements.txt` 里加：
+
+```
+pyobjc-framework-UserNotifications>=12.0; sys_platform == "darwin"
+```
+
+环境标记必须有——Windows 上没这个框架。
+
+**光装上还不够**：`notifications.py` 里是 `import UserNotifications` 包在
+`try/except ImportError` 里，PyInstaller 的静态分析会跳过它，不显式
+声明的话打包出来的 .app 里没有这个模块，通知会静默退回 osascript。
+`build.py` 里加：
+
+```python
+MACOS_GUI_EXTRA_IMPORTS = ["UserNotifications"]
+```
+
+### ObjC 类名不能重复
+
+PyObjC 把 Python 类按**类名**注册进 Objective-C 运行时。同名类第二次
+定义会抛：
+
+```
+_NotificationsDelegate is overriding existing Objective-C class
+```
+
+`install_delegate()` 被调两次就炸（热重载、或者测试里每个 case 都调一
+次）。解法是类名带自增序号：
+
+```python
+_delegate_seq += 1
+cls_name = f"_SDMNotificationsDelegate{_delegate_seq}"
+cls = type(cls_name, (NSObject,), {...})
+```
+
+另外 delegate 实例必须**强引用**——局部变量被回收后系统回调就找不到
+对象了，表现为「点了通知什么反应都没有」。
+
+### macOS 的 os.log 不存在
+
+Python 3.14 才加 `os.log()`。3.11 上没有。想往统一日志里写，用
+`Foundation.NSLog`（实测可用）。
+
+### 通知 identifier 要带任务 id
+
+系统按 identifier 去重。Swift 版是 `complete-<task.id.uuidString>`，
+Python 版照抄——同一个任务重复通知会替换掉旧的，不同任务各弹各的。
+
+## URL scheme 怎么接住：NSAppleEventManager
+
+Swift 版实现了 `handleURLEvent` 但从没在 Info.plist 注册 `CFBundleURLTypes`，
+系统根本不会送 URL 过来——那个入口是死的（台账 R-13）。Python 版把
+注册补上了（`build.py` 往 Info.plist 写 `CFBundleURLTypes`），比 Swift
+好。但**注册只是让系统知道「这个 app 收这个 scheme」，还得有东西接住
+送来的 URL**。
+
+pywebview 没有 `url_request` 事件（`window.py` 的事件清单里没有），
+`window.get_current_url()` 永远返回 index.html。macOS 后端也没实现
+`application:openURLs:`。
+
+**解法：`NSAppleEventManager`。** URL scheme 的系统级入口本来就是
+Apple Event——`kInternetEventClass` / `kAEGetURL`。注册一个 handler
+就能接住，**不碰 pywebview 的任何东西**（它的 NSApplication 实例自己
+持有，不去动它的委托）。
+
+三个坑：
+
+1. `setEventHandler:andSelector:forEventClass:andEventID:` 的
+   eventClass / eventID 要的是**整数**不是字符串。传 `'GURL'` 报
+   `ValueError: depythonifying 'unsigned int', got 'str'`。四字符码
+   自己转：`(ord(c[0]) << 24) | (ord(c[1]) << 16) | ...`。
+2. ObjC 的 `handleURL:withReplyEvent:` 有两个参数，PyObjC 的 Python
+   方法就要写 `self, event, reply` 三个——**self 对应 ObjC 的第一个
+   参数**。少一个抛 `BadPrototypeError: expects 2 arguments, ... has
+   1 positional arguments`。
+3. handler 必须保持**强引用**——局部变量被回收后系统回调找不到对象，
+   表现为「双击链接唤起 app 但什么反应都没有」。
+
+取 URL 的路径：`event.paramDescriptorForKeyword_(keyDirectObject)`
+拿到描述符，再 `.data()` 取字节串。`keyDirectObject` 是 `'----'`，
+四字符码 0x2d2d2d2d。
+
+## referer 要一路传到请求头
+
+Swift 版读了 referer 就扔了（`Daemon/IPC/Dispatcher.swift` 里
+`referer` 参数收下但没用，`App/SDMApp.swift` 那套也一样），
+Python 版不能照抄。
+
+链路是三段，**每段都要传**，少一段就白搭：
+
+```
+dispatcher 读到 referer
+  → StartSpec.referer
+    → DownloadFlow(headers={"Referer": ...})     ← 分片请求
+    → downloader.probe(url, extra_headers={...}) ← 探测请求
+```
+
+**探测请求最容易漏。** 探测是 `Range: bytes=0-0` 的 GET，
+有些站点探测阶段就 403——不带头的话任务连启动都做不到，
+用户看到的是「下载失败」，但真实原因是 Referer 缺失。
+
+`DownloadFlow` 内部还有一次探测（`download_flow.py` 的 `_run`
+里），那处也得传 `extra_headers=self.headers`——引擎层探过一次
+不代表 flow 不用再探一次。
+
+优先级：**站点规则 > 任务级 referer**。规则是用户为该主机显式
+配置的全局设置，任务级 referer 只是一次性补充。
+
+## 测试别往用户目录里写
+
+`SDMLogger` 默认写到 `~/Library/Logs/SuperDownloadManager/sdm.log`，
+`HistoryStore` 默认写到 `~/Library/Application Support/SuperDownloadManager/history.sqlite`。
+测试跑一次就往那儿追加东西——用户的日志里混着测试的记录，
+下载历史里也是，sqlite 还会越涨越大。
+
+**方案一（错的那版）**：在 `tests/conftest.py` 里用 autouse fixture
+monkeypatch `paths.log_dir`。当时能挡住大部分，但**漏了**。
+
+漏的原因有两条，都是实测出来的：
+
+**一、logger 是全局单例 + 后台写盘线程。** 日志 entry 先进队列，
+写盘线程随后才落盘。fixture 一结束（monkeypatch 回滚），写盘线程
+再处理队列里剩下的 entry 时，路径已经变回用户真实目录——那几条
+日志就写进用户的日志文件了。实测每次全量测试漏 140 字节左右。
+
+**二、`HistoryStore` 在 `__init__` 里就把路径取走了**
+（`path or paths.history_db_path()`）。单例在测试早期构造，
+后面再 patch 也不生效。
+
+**方案二（现在这版）**：给 `sdm/paths.py` 加三个环境变量覆盖，
+`conftest.py` 在**模块加载时**设好，全程不撤销。
+
+```python
+# sdm/paths.py
+def config_dir() -> Path:
+    override = os.environ.get("SDM_CONFIG_DIR")
+    if override:
+        return Path(override)
+    ...
+
+def log_dir() -> Path:      # SDM_LOG_DIR
+def download_dir() -> Path: # SDM_DOWNLOAD_DIR
+```
+
+```python
+# tests/conftest.py —— 模块级，不是 fixture
+_SANDBOX = Path(tempfile.mkdtemp(prefix="sdm-pytest-"))
+os.environ["SDM_CONFIG_DIR"] = str(_SANDBOX / "config")
+os.environ["SDM_LOG_DIR"] = str(_SANDBOX / "logs")
+os.environ["SDM_DOWNLOAD_DIR"] = str(_SANDBOX / "downloads")
+```
+
+**环境变量而不是 monkeypatch**：环境变量是进程级的，一改就是整个
+pytest 进程的事，不随 fixture 生命周期回滚。后台线程什么时候处理
+队列都无所谓。
+
+顺带说，这两个环境变量对产品也有用——便携模式可以把配置和数据库
+放在 U 盘里。
+
+**守卫机制**：`tests/test_isolation_guard.py` 断言四个路径都在沙箱里，
+外加「环境变量优先级高于平台默认」和「没有环境变量时走平台默认」。
+机制哪天被拆了它就红。负向验证做过——把 `SDM_CONFIG_DIR` 的设置
+去掉、或者把 `paths.py` 里的覆盖逻辑删掉，守卫都抓到了。
+
+同样的道理适用于**任何会删文件**的功能——比如日志的每日清理
+（F119）。测试里那类定时器不能对着真目录跑：清理间隔要可注入，
+测试用临时目录。
+
+验证方法：跑一遍全量测试，比对用户目录里文件的大小和 mtime 有没有
+变。这条检查现在是每次全量测试都跑的一部分。
+
+## Dock 图标：关窗后藏起来，唤回时露出来
+
+Swift 版 `App/SDMApp.swift:444-541` 的 `updateDockVisibility`：
+关窗后切 `.accessory`（不占 Dock，只在菜单栏待着），任一窗口变 key
+立刻切回 `.regular`。
+
+Python 侧对应 `sdm/gui/macos_status.py` 的 `set_dock_visible()`。
+
+**AppKit 的策略常量得实测，别凭记忆。** 实测
+`AppKit.NSApplicationActivationPolicyRegular = 0`、
+`Accessory = 1`。注意非 GUI 进程里 `activationPolicy()` 返回 **2**
+（Prohibited）——那是「没有激活策略」，不是 Accessory。
+
+**0.15 秒宽限**：Swift 版关窗后延迟 0.15s 再切策略，避免 cmd-W
+之后马上点托盘时 Dock 图标闪一下。Python 版用 `threading.Timer`。
+
+**sheet 和 nonactivating panel 不算「主窗口在前」**：选目录的
+NSOpenPanel 关闭时不该触发 Dock 策略切换。判据是
+`win.sheetParent() is not None` 和 `styleMask & NSNonactivatingPanelWindowMask`。
+后者这个常量 PyObjC 没暴露（实测 `AppKit.NSNonactivatingPanelWindowMask`
+是 N/A），值是 1 << 7 = 128，写死并注明出处。
+
+**pywebview 没有「窗口变 key」事件**，所以两条唤回路径分开处理：
+
+| 路径 | 怎么接 |
+|---|---|
+| 菜单栏「打开主窗口」 | `StatusBarController` 的 `openMainWindow` 回调 → `on_show` 参数 |
+| Dock 图标点击 | pywebview 无对应事件；`events.shown` 只在首次显示 set 一次，`events.restored` 是取消最小化/退全屏，都覆盖不到 |
+
+`events.shown` / `events.restored` 也挂了 `_restore_dock`——覆盖
+「从最小化恢复」和「首次显示」，但**不能**指望它们覆盖
+「关窗后从 Dock 唤回」。
+
+## 分类名和扩展名是两回事
+
+`bridge.add_url()` 收一个 `category` 参数。Swift 版
+`App/MainWindow/DownloadListStore.swift:195` 是
+`category ?? DownloadCategory.from(url: url)`——直接拿分类枚举用。
+
+Python 版原来写成 `category_for_extension(category)`，把分类名
+当扩展名查。前端传的 `"video"` 查不到 → 回退到按 URL 猜 →
+落进 `archives` 目录。**用户选了「视频」，文件进了「归档」。**
+
+现在 `sdm/gui/bridge.py` 的 `_resolve_category()` 两种都认：
+先按分类名（`DownloadCategory(value)`），认不出来再按扩展名查
+（`category_for_extension`）。
+
+## 自检要真的能失败
+
+`--self-test` 是 CI 和打包流程的守门人。给它加检查项时，光加一项
+不够——**要证明它失败时退出码非零**，否则它就是个摆设。
+
+`tests/test_self_test.py` 里有两条：
+
+- 把 `_resolve_category` 换成恒返回 None 的假货 → 自检必须退出非零
+- 往英文文案表塞一个中文表没有的 key → 「文案键一致」必须报 FAIL
+
+第二条是为了区分「检查恒真」和「检查真的在查」。中英 key 集合本来
+就一致，正常数据下这两种实现结果一样——只有造出不一致的数据
+才能区分。
+
+**顺带一个坑**：`I18n.catalog()` 返回的是「en 打底 + 当前语言覆盖」
+的合并表，key 集合恒等。拿它检查中英一致性永远发现不了缺键。
+要直接读 `sdm.i18n.CATALOGS`。
+
+
+## 关窗口后 app 常驻：pywebview 拦得住
+
 
 Swift 版关闭窗口后 app 还活着（SwiftUI App + 状态栏图标），能从菜单
-栏唤回。Python 版做不到，两个原因：
+栏唤回。
 
-1. **closing 事件不可靠**。pywebview 的 `Event.set()` 在非锁模式下把
-   handler 扔到另一个线程跑，然后**立刻**检查返回值——几乎必然读到
-   空的 `return_values`，所以「返回 False 取消关闭」基本不生效。
-2. **窗口关掉 `webview.start()` 就返回**，main 结束，进程退出。
+**早先这里写着「pywebview 做不到」，是错的。** 查过源码之后结论反
+过来。三个事实：
 
-菜单栏图标本身能用（打开主窗口、加 URL、Finder、设置、关于、退出），
-但「关窗口后常驻」没做。设置页那个「关闭窗口时隐藏 Dock 图标」开关
-（Swift 版的 `sdm.hideDockWhenWindowClosed`）在 Python 版是死的——字段
-在、UI 在、功能没接。
+| 位置 | 事实 |
+|---|---|
+| `webview/window.py:163` | `self.events.closing = Event(self, True)` —— **should_lock=True** |
+| `webview/event.py:53-63` | should_lock 为真时 `execute()` **同步调用** handler，返回值收进 `return_values`；`set()` 返回 `len(false_values) != 0` |
+| `webview/platforms/cocoa.py:1315-1317` | `should_cancel = window.events.closing.set()`，为真就 `return Foundation.NO`（取消关闭） |
+
+所以 closing handler **返回 False 就能取消关闭**。
+
+两个坑：
+
+1. handler 的返回值必须是 `False` 本身。返回 `None` 不算取消——`set()`
+   只找 `is False` 的值。
+2. pywebview 用 `inspect.signature` 决定怎么调 handler：零参数就零参数
+   调，带 `window` 这个名字的参数就传 window。写零参数最稳。
+
+窗口被 hide 之后 `webview.start()` 不返回，main 不结束，进程就活着。
+菜单栏的 quitApp 走 `window.destroy()`，那条路要能真正退出——用一个
+「正在退出」标志位区分，别被关闭拦截挡住。
+
+设置页那个「关闭窗口时隐藏 Dock 图标」开关（Swift 版的
+`sdm.hideDockWhenWindowClosed`）跟着这条一起接。
 
 ## v2.0.2 分发：为什么只有一个包
 

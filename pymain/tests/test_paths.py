@@ -35,6 +35,9 @@ def test_socket_path_falls_back_when_too_long(tmp_path, monkeypatch):
     deep = tmp_path / ("d" * 40) / ("e" * 40) / ("f" * 40)
     monkeypatch.setenv("HOME", str(deep))
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    # 测试沙箱会设这个（隔离用户配置），这里要测的是默认路径
+    # 装不下时的回退行为，得先把它清掉。
+    monkeypatch.delenv("SDM_CONFIG_DIR", raising=False)
 
     path = paths.socket_path()
 
@@ -90,6 +93,8 @@ def test_download_dir_is_home_downloads(tmp_path, monkeypatch):
         monkeypatch.setenv("USERPROFILE", str(home))
     else:
         monkeypatch.setenv("HOME", str(home))
+    # 沙箱的下载目录覆盖会盖掉默认值——这里测的就是默认值。
+    monkeypatch.delenv("SDM_DOWNLOAD_DIR", raising=False)
     assert paths.download_dir() == home / "Downloads"
 
 

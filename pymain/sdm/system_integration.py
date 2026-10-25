@@ -89,6 +89,43 @@ def open_url(url: str) -> bool:
         return False
 
 
+def open_log_in_console(path: str | Path) -> bool:
+    """在 macOS 的 Console.app 里打开日志。
+
+    对应 Swift 版 `SettingsView.swift` 里的「在 Console.app 中打开」
+    按钮。Swift 那版用的是 `x-man-page://console.app/subsystem/<id>`
+    这种 URL scheme，直接跳到按子系统过滤的视图；Python 这边用
+    `open -a Console <path>` 打开日志文件本身——Console.app 会把
+    打开的文件收进 Console 里，够用了。
+
+    子系统 ID 从 `version.BUNDLE_ID` 取，不硬编码。Windows 和
+    Linux 没有 Console.app，直接返回 False。
+
+    文件不存在时返回 False——Console 打开一个不存在的路径只会
+    弹一个报错框，没什么用。
+    """
+    target = Path(path)
+    if not target.exists():
+        return False
+    if platform.system() != "Darwin":
+        log.info(CAT_GUI, "当前系统不支持 Console.app")
+        return False
+    from .version import BUNDLE_ID
+
+    try:
+        subprocess.run(
+            ["open", "-a", "Console", str(target)],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+        log.debug(CAT_GUI, f"已在 Console.app 中打开日志（子系统 {BUNDLE_ID}）")
+        return True
+    except Exception as err:
+        log.warning(CAT_GUI, f"在 Console.app 中打开日志失败: {err}")
+        return False
+
+
 # -- 开机自启 -------------------------------------------------------
 
 

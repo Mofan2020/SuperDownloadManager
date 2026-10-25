@@ -95,7 +95,7 @@
   "settingsAboutTitle": "Super Download Manager",
   "settingsAboutVersion": "版本",
   "settingsBandwidth": "带宽限制",
-  "settingsBandwidthHint": "0 = 不限速",
+  "settingsBandwidthHint": "单位 KB/s。0 = 不限速。",
   "settingsBehaviour": "行为",
   "settingsBehaviourHint": "更改立即生效。",
   "settingsCategoriesHint": "在 v1.0.5+ 中可增删扩展名。v1.0 列表在代码里，应用内编辑器后续版本加入。",
@@ -214,5 +214,9 @@
   "toolbarAddURL": "添加 URL…",
   "toolbarClearCompleted": "清除已完成",
   "toolbarPauseAll": "全部暂停",
-  "toolbarResumeAll": "全部继续"
+  "toolbarResumeAll": "全部继续",
+  "listColumnName": "名称",
+  "listColumnState": "状态",
+  "listColumnSize": "大小",
+  "listColumnSpeed": "速度"
 }

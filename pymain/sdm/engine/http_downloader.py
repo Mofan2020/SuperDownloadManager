@@ -31,7 +31,7 @@ from dataclasses import dataclass
 import httpx
 
 from ..logging_setup import CAT_CHUNK, CAT_NET, get_logger
-from .content_sniffer import USER_AGENT, ContentProbe, ProbeError
+from .content_sniffer import USER_AGENT, ContentProbe, ProbeError, merge_headers
 from .content_sniffer import probe as sniffer_probe
 from .file_assembler import FileAssembler
 from .range_planner import Chunk
@@ -187,21 +187,52 @@ class HTTPDownloader:
 
     # -- 探测 --------------------------------------------------------
 
-    async def probe(self, url: str) -> ContentProbe:
+    async def probe(
+        self,
+        url: str,
+        extra_headers: dict[str, str] | None = None,
+    ) -> ContentProbe:
         """探测目标，失败时重试。
 
-        探测请求也���能失败——CDN 短暂返回 503、代理瞬断、
+        探测请求也**必须**带站点规则的头——有的站点探测阶段就
+        403（需要 Referer 或特定 UA），规则不生效的话任务连
+        启动都做不到。规则在重试循环外算一次：规则不会在一次
+        探测的过程中变，重算只是白读文件。
+
+        `extra_headers` 是任务级的头（比如任务的 referer）。
+        **站点规则优先**——规则是用户在设置里为该主机显式配置的
+        「跟这个站点说话的方式」（需要 Referer、特殊 UA、登录
+        Cookie），任务级 referer 只是调用方的一次性补充。
+        规则优先的代价是任务 referer 被规则盖掉时用户看不到提示，
+        换来的是「配了规则就一定按规则走」这个可预期的语义。
+
+        头的优先级（从低到高）：
+        1. 下载器自己的默认 UA（`self.user_agent`）
+        2. 任务级的头（`extra_headers`）
+        3. 站点规则的头——规则里的 UA **覆盖**默认 UA，不是追加
+
+        探测请求也失败——CDN 短暂返回 503、代理瞬断、
         DNS 抖动都会命中。如果探测一失败就把整个任务判死，
         用户看到的是「下载失败」，而实际上等一秒重试就好了。
 
         403/410/451 不重试——那是链接本身失效，重试没意义，
         要交给上层进「等待新链接」状态。
         """
+        rule_headers = await asyncio.to_thread(self.apply_site_rule, url, {})
+        request_headers = merge_headers(
+            {"User-Agent": self.user_agent},
+            extra_headers or {},
+            rule_headers,
+        )
         last_error: Exception | None = None
         elapsed = 0.0
         for attempt in range(self.max_retries + 1):
             try:
-                return await sniffer_probe(url, client=self.client)
+                return await sniffer_probe(
+                    url,
+                    client=self.client,
+                    extra_headers=request_headers,
+                )
             except ProbeError as err:
                 if err.is_expired_link:
                     raise
@@ -352,8 +383,24 @@ class HTTPDownloader:
         limiter: SpeedLimiter | None,
     ) -> ChunkResult:
         """一次流式传输尝试。"""
-        request_headers = dict(headers or {})
-        request_headers["Range"] = f"bytes={start}-{chunk.end - 1}"
+        # 站点规则：按主机名匹配，命中就叠加 Referer / User-Agent /
+        # Cookie / Basic Auth。
+        #
+        # 不加这步的话，站点规则整个功能是死的——规则存着、界面能编辑，
+        # 但下载请求从来不带上这些头。需要 Referer 才能下的站点会直接
+        # 403。
+        #
+        # 规则优先于任务级的头：规则是用户为该主机显式配置的全局设置，
+        # 任务级 referer 只是一次性补充。
+        #
+        # 规则读取要碰磁盘（site_rules.json），Basic Auth 还要查钥匙串
+        # （macOS 上是 `security` 子进程），放线程里做，别把事件循环
+        # 卡住。
+        rule_headers = await asyncio.to_thread(self.apply_site_rule, url, {})
+        request_headers = merge_headers(headers or {}, rule_headers)
+        # Range 最后写死：分片的区间是按已落盘字节算出来的，
+        # 外部传进来的头不能改它。
+        request_headers = merge_headers(request_headers, {"Range": f"bytes={start}-{chunk.end - 1}"})
 
         # 分片文件在字节流动前就打开并定位好。
         assembler.open_chunk(chunk.id, chunk.start)
@@ -435,11 +482,27 @@ class HTTPDownloader:
 
     # -- 站点规则 ----------------------------------------------------
 
-    def apply_site_rule(self, url: str, headers: dict[str, str], site_rules) -> dict[str, str]:
-        """套用匹配到的站点规则（Referer / UA / Cookie / BasicAuth）。"""
+    def apply_site_rule(self, url: str, headers: dict[str, str]) -> dict[str, str]:
+        """套用匹配到的站点规则（Referer / UA / Cookie / BasicAuth）。
+
+        规则**覆盖**已有的同名头——UA 尤其重要：规则里填了 UA 就是
+        「这个站点只认这个 UA」，追加在默认 UA 后面等于没填。
+
+        头名大小写不敏感（`User-Agent` 和 `user-agent` 是同一个头），
+        合并走 `merge_headers`，不会留下两个 UA 让服务器挑花眼。
+
+        没有匹配的规则就原样返回。规则里没填的字段不动已有的头——
+        规则只做叠加，不做清空。
+
+        **同步方法**——读 JSON 文件、查钥匙串都是阻塞操作。
+        async 路径上要用 `asyncio.to_thread` 包一层，别把事件循环卡住。
+        """
         from ..site_rules import SiteRuleStore
 
-        rule = SiteRuleStore.shared().match(url)
+        store = SiteRuleStore.shared()
+        rule = store.match(url)
         if rule is None:
             return headers
-        return SiteRuleStore.shared().apply_to_headers(rule, headers)
+        # apply_to_headers 会就地改 headers，所以给它一份副本。
+        rule_headers = store.apply_to_headers(rule, {})
+        return merge_headers(headers, rule_headers)

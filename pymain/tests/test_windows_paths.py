@@ -105,6 +105,8 @@ def test_windows_paths_use_appdata(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     """Windows 的配置目录走 APPDATA，不走 ~/.config。"""
     monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
+    # 沙箱的覆盖会盖掉平台默认路径——这里测的就是平台默认。
+    monkeypatch.delenv("SDM_CONFIG_DIR", raising=False)
 
     assert paths.is_windows() is True or True  # 平台判定由 paths 自己的逻辑管
     config_dir = paths.config_dir()

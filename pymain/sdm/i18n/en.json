@@ -95,7 +95,7 @@
   "settingsAboutTitle": "Super Download Manager",
   "settingsAboutVersion": "Version",
   "settingsBandwidth": "Bandwidth limit",
-  "settingsBandwidthHint": "0 = unlimited",
+  "settingsBandwidthHint": "Unit: KB/s. 0 = unlimited.",
   "settingsBehaviour": "Behaviour",
   "settingsBehaviourHint": "These take effect immediately.",
   "settingsCategoriesHint": "Add / remove extensions in v1.0.5+. The v1.0 list lives in the code; an in-app editor arrives later.",
@@ -214,5 +214,9 @@
   "toolbarAddURL": "Add URL…",
   "toolbarClearCompleted": "Clear Completed",
   "toolbarPauseAll": "Pause All",
-  "toolbarResumeAll": "Resume All"
+  "toolbarResumeAll": "Resume All",
+  "listColumnName": "Name",
+  "listColumnState": "Status",
+  "listColumnSize": "Size",
+  "listColumnSpeed": "Speed"
 }

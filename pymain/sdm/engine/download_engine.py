@@ -23,7 +23,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..logging_setup import CAT_ENGINE, CAT_QUEUE, get_logger
+from ..history_store import HistoryEntry, HistoryStore
+from ..logging_setup import CAT_ENGINE, CAT_QUEUE, CAT_STORE, get_logger
 from .categories import category_from_url
 from .download_flow import DownloadFlow, FlowError, FlowFailure
 from .file_assembler import _unlink_with_retry
@@ -32,6 +33,7 @@ from .http_downloader import DownloadError, HTTPDownloader
 from .progress_channel import ProgressChannel
 from .range_planner import RangeStrategy
 from .resume_state import ResumeState
+from .speed_display import SpeedInput, compute
 from .speed_limiter import SpeedLimiter
 from .speed_policy import SpeedPolicy
 
@@ -56,6 +58,19 @@ class TaskState(enum.Enum):
         return self in (TaskState.QUEUED, TaskState.DOWNLOADING)
 
 
+def _is_terminal_state(state: str) -> bool:
+    """状态字符串是不是终态（完成/失败/取消）。
+
+    历史落库和速度清零都以终态为准。TaskState.is_terminal 是
+    唯一真源，这里从字符串反查——快照里的 state 是字符串，
+    不是枚举。
+    """
+    try:
+        return TaskState(state).is_terminal
+    except ValueError:
+        return False
+
+
 @dataclass
 class TaskSummary:
     """任务的对外视图。GUI、CLI、IPC 都读这个结构。"""
@@ -76,6 +91,9 @@ class TaskSummary:
     chunks: list[dict] = field(default_factory=list)
     chunk_count: int = 0
     completed_chunks: int = 0
+    #: 显示速度的 EMA 缓存（Swift 版在 GUI 的 store 里，这里放引擎）。
+    #: 终态/暂停时清零——Swift v1.0.7 的 bug 就是进度满了速度还在显示。
+    speed_ema: float = 0.0
 
     def to_dict(self, with_chunks: bool = False) -> dict:
         """转成 JSON 可序列化的字典。
@@ -139,6 +157,7 @@ class DownloadEngine:
         parallelism_cap: int = 32,
         default_download_dir: Path | None = None,
         downloader: HTTPDownloader | None = None,
+        history_store: HistoryStore | None = None,
     ) -> None:
         self.strategy = strategy or RangeStrategy()
         self.parallelism_cap = parallelism_cap
@@ -161,6 +180,11 @@ class DownloadEngine:
         # dict，攒多了占内存。超过上限就丢最老的。
         self._chunk_states: dict[str, list[dict]] = {}
         self._chunk_state_order: list[str] = []
+        # 历史库。引擎是终态的唯一权威，所以落库放在这里而不是
+        # GUI 层——daemon 模式没有 GUI，历史也得写进去。
+        # 构造 HistoryStore 不碰磁盘（路径解析 + 惰性连接），
+        # 真正建库发生在第一次 insert()。
+        self.history_store = history_store or HistoryStore()
 
     #: 保留多少个已结束任务的分片明细
     CHUNK_STATE_RETENTION = 20
@@ -277,7 +301,11 @@ class DownloadEngine:
         # HTTPDownloader()，那个实例没有 SSL 绕过开关，
         # CDN 拒证书时探测静默失败，任务就永远卡在「下载中」。
         try:
-            probe = await self.downloader.probe(spec.url)
+            probe = await self.downloader.probe(
+                spec.url,
+                # 任务级的头（Referer 等）——探测阶段有些站点就 403。
+                extra_headers={"Referer": spec.referer} if spec.referer else None,
+            )
         except Exception:
             # 探测失败不直接判死——下面的正式流程会再探一次，
             # 那时才会带着真实错误信息回来（403 会在那里被
@@ -308,6 +336,16 @@ class DownloadEngine:
             limiter=self._task_limiters.get(task_id) or self.limiter,
             downloader=self.downloader,
             progress_channel=channel,
+            # 任务级的 Referer。
+            #
+            # `add` 方法可以带 referer 参数（浏览器扩展派单时会把
+            # 页面地址带过来），这个头必须真的发出去——很多站点要
+            # Referer 才给下载。
+            #
+            # 站点规则的 Referer 优先级更高（在 http_downloader 里
+            # 合并时规则覆盖任务级），规则是用户为该主机显式配置的
+            # 全局设置。
+            headers={"Referer": spec.referer} if spec.referer else None,
         )
 
         # 记录分片布局，供详情面板展示。
@@ -324,9 +362,10 @@ class DownloadEngine:
             await live.flow.run()
             summary.state = TaskState.COMPLETED.value
             summary.bytes_done = summary.total_bytes or summary.bytes_done
-            summary.speed_bytes_per_sec = 0.0
+            self._zero_speed(summary)
             summary.finished_at = time.time()
             log.notice(CAT_ENGINE, f"任务完成 {summary.filename}")
+            self._record_history(summary)
         except asyncio.CancelledError:
             # 用户点了暂停或取消。状态在 pause/cancel 里已经写好了，
             # 这里绝不能改成 failed。
@@ -335,7 +374,10 @@ class DownloadEngine:
                 summary.state = TaskState.CANCELLED.value
             elif live.paused:
                 summary.state = TaskState.PAUSED.value
-            summary.speed_bytes_per_sec = 0.0
+            self._zero_speed(summary)
+            # 取消是终态，要落历史；暂停不是终态，_record_history
+            # 内部会自己判断，这里调用是安全的。
+            self._record_history(summary)
         except FlowError as err:
             if err.kind == FlowFailure.EXPIRED_LINK.value:
                 summary.state = TaskState.AWAITING_NEW_LINK.value
@@ -348,14 +390,16 @@ class DownloadEngine:
             else:
                 summary.state = TaskState.FAILED.value
                 summary.error_message = err.detail or str(err)
-            summary.speed_bytes_per_sec = 0.0
+            self._zero_speed(summary)
             summary.finished_at = time.time()
             log.error(CAT_ENGINE, f"任务失败 {summary.filename}: {err}")
+            self._record_history(summary)
         except DownloadError as err:
             summary.state = TaskState.FAILED.value
             summary.error_message = err.detail or str(err)
-            summary.speed_bytes_per_sec = 0.0
+            self._zero_speed(summary)
             summary.finished_at = time.time()
+            self._record_history(summary)
         finally:
             progress_task.cancel()
             self.live.pop(task_id, None)
@@ -412,7 +456,14 @@ class DownloadEngine:
 
     async def _consume_progress(self, task_id: str, channel: ProgressChannel) -> None:
         """把进度流写进任务快照。"""
-        last = 0
+        # 起点用快照里已有的字节数，不是 0。
+        #
+        # 恢复下载时，进度流的第一帧报的是**整个已下载量**
+        # （flow 里 `progress_channel.report(pre_existing)`），
+        # 从 0 起算的话第一帧的 delta 就是整个文件，算出来的
+        # 速度是个巨大的假值，EMA 第一帧直接被这个假值带跑。
+        summary = self.tasks.get(task_id)
+        last = summary.bytes_done if summary is not None else 0
         last_time = time.monotonic()
         async for total in channel.stream():
             summary = self.tasks.get(task_id)
@@ -429,9 +480,88 @@ class DownloadEngine:
             elapsed = now - last_time
             if elapsed > 0:
                 delta = total - last
-                summary.speed_bytes_per_sec = max(0.0, delta / elapsed)
                 last = total
                 last_time = now
+                self._apply_speed(summary, delta, elapsed)
+
+    def _apply_speed(self, summary: TaskSummary, delta_bytes: int, elapsed: float) -> float:
+        """把一次进度增量折算成对外显示的速度（EMA 平滑）。
+
+        对应 Swift 版 `DownloadListStore.tick()` 里调
+        `SpeedDisplay.compute()` 的那一步。Swift 那边是 200ms
+        固定 tick，这里是事件驱动（ProgressChannel 推一次算一次），
+        所以窗口长度用实际 elapsed。
+
+        **EMA 缓存在任务快照上**（每个任务一份），不在全局——
+        Swift 版的 `smoothedSpeed` 是 GUI store 里的字典，
+        Python 版没有 store 这一层，引擎是速度的唯一来源，
+        GUI/CLI/IPC 都读同一个字段。
+
+        终态/暂停时 `compute()` 直接返回 0 并把 EMA 缓存清零：
+        Swift v1.0.7 的 bug 就是进度满了速度还在显示（EMA 以
+        0.6 的系数往 0 衰减，要过一秒才掉下去）。
+
+        `engine_speed_bytes_per_sec` 传 0：Python 引擎没有独立的
+        测速源，速度只能从进度增量除以实际间隔得到——这件事
+        交给 `compute()` 里的 `delta / tick_interval` 分支做，
+        公式只有一份，引擎不自己重写。
+        """
+        out = compute(
+            SpeedInput(
+                state=summary.state,
+                engine_speed_bytes_per_sec=0.0,
+                delta_bytes_since_last_tick=max(0, delta_bytes),
+                tick_interval_seconds=max(0.0, elapsed),
+            ),
+            summary.speed_ema,
+        )
+        summary.speed_ema = out.next_ema
+        summary.speed_bytes_per_sec = out.displayed_speed
+        return out.displayed_speed
+
+    def _zero_speed(self, summary: TaskSummary) -> None:
+        """显示速度硬清零，EMA 缓存一起清掉。
+
+        终态和暂停都走这里。**不是**让 EMA 衰减到 0——那正是
+        Swift v1.0.7 的 bug：进度条满了速度还在显示。
+        """
+        summary.speed_bytes_per_sec = 0.0
+        summary.speed_ema = 0.0
+
+    def _record_history(self, summary: TaskSummary) -> None:
+        """任务进终态时写一条历史。
+
+        **为什么在引擎里写，而不是 GUI 层**：引擎是终态状态的
+        唯一权威——daemon 模式没有 GUI，历史也得落库。Swift 版
+        写在 `SDMApp.swift` 的 `onChange(of: store.tasks)` 里，
+        那是 GUI 层的观察者，daemon 跑起来就没有了。
+
+        **写库失败绝不能影响下载主流程**：磁盘满、库被锁、
+        表结构不对……任何异常都吞掉，只记日志。
+
+        幂等：`INSERT OR REPLACE`，同一个 task id 写多少次都只有
+        一行。Swift 版每次 store 变化都重写所有终态行，效果一样。
+        """
+        if not _is_terminal_state(summary.state):
+            return
+        try:
+            self.history_store.insert(
+                HistoryEntry(
+                    id=summary.id,
+                    url=summary.url,
+                    filename=summary.filename,
+                    destination_path=summary.destination,
+                    total_bytes=summary.total_bytes,
+                    bytes_done=summary.bytes_done,
+                    state=summary.state,
+                    error_message=summary.error_message,
+                    started_at=summary.started_at,
+                    finished_at=summary.finished_at or time.time(),
+                    sha256=None,
+                )
+            )
+        except Exception as err:
+            log.warning(CAT_STORE, f"历史落库失败 {summary.id}: {err}")
 
     # -- 控制 --------------------------------------------------------
 
@@ -448,7 +578,9 @@ class DownloadEngine:
             if live.task is not None and not live.task.done():
                 live.task.cancel()
         summary.state = TaskState.PAUSED.value
-        summary.speed_bytes_per_sec = 0.0
+        # 暂停也要清 EMA 缓存——恢复后第一帧不该带着暂停前的
+        # 旧速度往下衰减（Swift v1.0.7 的 bug 就是这个）。
+        self._zero_speed(summary)
 
     async def resume(self, task_id: str) -> None:
         """恢复任务。分片文件在盘上，所以是真的从断点继续。"""
@@ -468,7 +600,8 @@ class DownloadEngine:
         self.live[task_id] = new_live
         summary.state = TaskState.DOWNLOADING.value
         summary.error_message = None
-        summary.speed_bytes_per_sec = 0.0
+        # 恢复后第一帧从零开始算，不带暂停前的旧 EMA。
+        self._zero_speed(summary)
         new_live.task = asyncio.create_task(self._run_task(task_id, new_live))
 
     async def cancel(self, task_id: str) -> None:
@@ -499,7 +632,11 @@ class DownloadEngine:
         if summary is not None:
             if summary.state != TaskState.COMPLETED.value:
                 summary.state = TaskState.CANCELLED.value
-            summary.speed_bytes_per_sec = 0.0
+                summary.finished_at = time.time()
+            self._zero_speed(summary)
+            # 取消是终态，落历史。幂等——引擎里其他路径也可能
+            # 写过同一条，INSERT OR REPLACE 不会多出第二行。
+            self._record_history(summary)
         # 等分片任务真正停下再删文件。
         #
         # task.cancel() 只是请求取消，任务还在收尾、文件还开着。

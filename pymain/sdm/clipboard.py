@@ -62,11 +62,39 @@ class ClipboardMonitor:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
+            # **kill switch 每轮都查。**
+            #
+            # Swift 对照：`App/MainWindow/DownloadListStore.swift:388`
+            # 的 `guard clipboardCapture`。
+            #
+            # 之前只在启动时判断一次（gui/main.py 里
+            # `if settings.capture_clipboard: clipboard.start()`），
+            # 用户在设置里关掉后，监听器还在跑——要重启 app 才生效。
+            # 现在每轮读一次设置，下一轮就停。
+            if not self._capture_enabled():
+                self._stop.wait(self._interval)
+                continue
             try:
                 self._check()
             except Exception as err:
                 log.debug(CAT_GUI, f"剪贴板检查失败: {err}")
             self._stop.wait(self._interval)
+
+    @staticmethod
+    def _capture_enabled() -> bool:
+        """用户有没有关掉剪贴板捕获。
+
+        读 `SettingsStore.shared()`——那是单例，每轮读都能拿到最新值
+        （用户在设置页改开关会写进同一个实例）。
+
+        读不到就当开着——默认行为是捕获。
+        """
+        try:
+            from .settings import SettingsStore
+
+            return bool(SettingsStore.shared().settings.capture_clipboard)
+        except Exception:
+            return True
 
     def _check(self) -> None:
         text, change = read_clipboard()

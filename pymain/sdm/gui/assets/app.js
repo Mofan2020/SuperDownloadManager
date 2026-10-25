@@ -23,6 +23,10 @@ const State = {
   clipboardCandidate: null,
   showToolbarLabels: true,
   booted: false,
+  // 下载列表的排序。sortKey 为 null 时用默认排序（下载中优先）。
+  // 可选：filename / size / speed / state。
+  sortKey: null,
+  sortAsc: true,
 };
 
 const api = () => window.pywebview?.api;
@@ -280,9 +284,99 @@ function filteredTasks() {
   if (State.categoryFilter) {
     list = list.filter((x) => x.category === State.categoryFilter);
   }
-  // 下载中的排前面，其余按加入时间倒序
+  if (State.sortKey) {
+    return sortTasks(list, State.sortKey, State.sortAsc);
+  }
+  // 默认排序：下载中的排前面，其余按加入时间倒序。
+  //
+  // **跟 Swift 不同，保留现有的「下载中优先」。** Swift 版默认按
+  // state 升序（App/MainWindow/DownloadListView.swift:78-80），
+  // 但下载中优先对下载器更实用——用户关心的是「现在在跑哪些」，
+  // 不是「按状态字母排」。用户点表头就能切到 state 排序。
   const order = { downloading: 0, queued: 1, paused: 2, awaiting_new_link: 3, failed: 4, completed: 5, cancelled: 6 };
   return list.sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9));
+}
+
+// 按指定键排序。
+//
+// Swift 对照：App/MainWindow/DownloadListView.swift:254-256 的
+// KeyPathComparator。排序键四个：filename / totalBytesOrZero /
+// speedBytesPerSec / state。
+//
+// **未知大小永远排最后**（不管升序还是降序）。Swift 的
+// `totalBytesOrZero` 用 0 代表「不知道」，但 0 在升序时排最前，
+// 跟注释写的 "so columns sort unknown to the end" 不符——这里按
+// 注释的意图实现：未知大小的沉到底。
+function sortTasks(list, key, asc) {
+  const dir = asc ? 1 : -1;
+  const stateOrder = { downloading: 0, queued: 1, paused: 2, awaiting_new_link: 3, failed: 4, completed: 5, cancelled: 6 };
+  return list.slice().sort((a, b) => {
+    if (key === "size") {
+      const av = a.total_bytes;
+      const bv = b.total_bytes;
+      const aUnknown = av === null || av === undefined;
+      const bUnknown = bv === null || bv === undefined;
+      // 未知大小沉底——两个都未知时保持原顺序
+      if (aUnknown && bUnknown) return 0;
+      if (aUnknown) return 1;
+      if (bUnknown) return -1;
+      return (Number(av) - Number(bv)) * dir;
+    }
+    if (key === "speed") {
+      return ((a.speed_bytes_per_sec || 0) - (b.speed_bytes_per_sec || 0)) * dir;
+    }
+    if (key === "state") {
+      const av = stateOrder[a.state] ?? 9;
+      const bv = stateOrder[b.state] ?? 9;
+      return (av - bv) * dir;
+    }
+    // filename
+    const av = (a.filename || a.url || "");
+    const bv = (b.filename || b.url || "");
+    return av.localeCompare(bv) * dir;
+  });
+}
+
+// 点表头切排序。同一个键再点一次换升降序。
+function toggleSort(key) {
+  if (State.sortKey === key) {
+    State.sortAsc = !State.sortAsc;
+  } else {
+    State.sortKey = key;
+    State.sortAsc = true;
+  }
+  renderDownloads();
+}
+
+// 重绘排序表头。
+//
+// 表头不是一次性的——排序状态会变（用户点了别的列、或者又点了
+// 同一个列换升降序），所以每次渲染列表都重画一遍。
+function updateSortHeader(container) {
+  if (!container) return;
+  clear(container);
+  container.appendChild(sortHeaderCell("filename", t("listColumnName"), false));
+  container.appendChild(sortHeaderCell("state", t("listColumnState"), false));
+  container.appendChild(el("div"));  // 进度列，没有排序键
+  container.appendChild(sortHeaderCell("size", t("listColumnSize"), true));
+  container.appendChild(sortHeaderCell("speed", t("listColumnSpeed"), true));
+  container.appendChild(el("div"));  // ETA 列
+  container.appendChild(el("div"));  // 操作列
+}
+
+// 一个可点击的表头单元格。
+function sortHeaderCell(key, label, rightAlign) {
+  const active = State.sortKey === key;
+  const arrow = active ? (State.sortAsc ? "↑" : "↓") : "";
+  const cell = el("div", {
+    class: "sh" + (active ? " active" : "") + (rightAlign ? " right" : ""),
+    title: label,
+  }, [
+    el("span", { text: label }),
+    el("span", { class: "arrow", text: arrow }),
+  ]);
+  cell.addEventListener("click", () => toggleSort(key));
+  return cell;
 }
 
 // 建一行（只做一次）。返回 {node, refs}，refs 里存着要更新的元素引用。
@@ -458,9 +552,12 @@ function renderDownloads() {
   if (!wrap) {
     clear(view);
     wrap = el("div", { class: "list-wrap" });
+    wrap.appendChild(el("div", { class: "sort-header" }));
     wrap.appendChild(el("div", { class: "list" }));
     view.appendChild(wrap);
   }
+  // 表头每次重绘——排序状态（哪一列、升降序）会变。
+  updateSortHeader(wrap.querySelector(".sort-header"));
   const list = wrap.querySelector(".list");
   const emptyEl = view.querySelector(".empty");
   if (emptyEl) emptyEl.remove();
@@ -837,9 +934,16 @@ function renderSettings() {
   threadsInput.addEventListener("change", () => {
     api()?.update_settings({ threads_default: parseInt(threadsInput.value, 10) || 32 });
   });
-  const bandwidthInput = el("input", { class: "input", type: "number", min: "0", value: String(s.bandwidth_bytes_per_sec) });
+  // 带宽限制：输入框按 KB/s 显示，写回时换算成 bytes/s。
+  //
+  // 存储层（settings.bandwidth_bytes_per_sec）保持 bytes/s 语义——
+  // 改存储单位会破坏已有用户配置，后端 set_speed_limit 的单位含义
+  // 也会跟着变。单位转换只发生在这个边界上。
+  const bandwidthKB = Math.round((s.bandwidth_bytes_per_sec || 0) / 1024);
+  const bandwidthInput = el("input", { class: "input", type: "number", min: "0", value: String(bandwidthKB) });
   bandwidthInput.addEventListener("change", () => {
-    api()?.update_settings({ bandwidth_bytes_per_sec: parseInt(bandwidthInput.value, 10) || 0 });
+    const kb = parseInt(bandwidthInput.value, 10) || 0;
+    api()?.update_settings({ bandwidth_bytes_per_sec: kb * 1024 });
   });
 
   wrap.appendChild(el("div", { class: "setting-section" }, [
@@ -1383,15 +1487,58 @@ function openClipboardDialog(candidate) {
   const dirInput = el("input", { class: "input", value: "" });
   const threadInput = el("input", { class: "input", type: "number", min: "1", max: "128", value: String(candidate.default_threads || 32) });
 
+  // 用户手动改过目录就别再自动覆盖了。
+  //
+  // Swift 对照：App/MainWindow/ClipboardConfirmView.swift 的
+  // useCustomDir 标志——用户手动选过目录，分类切换时就不再动它。
+  let useCustomDir = false;
+
+  // 分类切换时同步默认目录。
+  const syncDefaultDir = async () => {
+    if (useCustomDir) return;
+    const r = await api()?.get_default_dir(catSel.value);
+    dirInput.value = r?.path || "";
+  };
+
+  catSel.addEventListener("change", syncDefaultDir);
+  // 手动改目录 → 标记为自定义
+  dirInput.addEventListener("input", () => { useCustomDir = true; });
+
+  // kill switch：勾上就关掉剪贴板监听。
+  //
+  // Swift 对照：ClipboardConfirmView.swift:136-141 绑的是
+  // store.clipboardCapture。开关立即生效——下一轮轮询就停。
+  //
+  // **默认不勾**——勾上才表示「我不想再监听了」。现在已经关掉的
+  // 情况下弹窗根本不会出现（监听器停了就不会有候选）。
+  const disableToggle = el("input", { type: "checkbox" });
+
   const submit = async (skip) => {
     if (!skip) {
-      await api()?.add_url(candidate.url, null, catSel.value, dirInput.value || null, parseInt(threadInput.value, 10) || null);
+      // 目录不能是空的。空的话后端会按 URL 猜分类，跟用户选的
+      // 分类可能对不上——那就落错目录了。
+      let dir = dirInput.value.trim();
+      if (!dir) {
+        const r = await api()?.get_default_dir(catSel.value);
+        dir = r?.path || "";
+      }
+      await api()?.add_url(candidate.url, null, catSel.value, dir || null, parseInt(threadInput.value, 10) || null);
     } else {
+      // 「跳过」只是关掉弹窗，**不永久禁用剪贴板监听**。
+      // Swift 版也是这个语义（ClipboardConfirmView 的 skip 按钮）。
       await api()?.dismiss_clipboard_candidate();
+    }
+    // kill switch 勾上了才改设置
+    if (disableToggle.checked && State.settings.capture_clipboard !== false) {
+      await api()?.update_settings({ capture_clipboard: false });
+      State.settings.capture_clipboard = false;
     }
     closeModal();
     await refreshTasks();
   };
+
+  // 初始目录：按当前分类算
+  syncDefaultDir();
 
   openModal("clipboardSheetTitle", [
     el("div", { class: "form" }, [
@@ -1413,6 +1560,16 @@ function openClipboardDialog(candidate) {
         el("label", { class: "field-label", text: t("clipboardMaxThreads") }),
         threadInput,
         el("div", { class: "field-hint", text: t("clipboardMaxThreadsHint") }),
+      ]),
+      // kill switch：停止监听剪贴板。
+      //
+      // Swift 对照：ClipboardConfirmView.swift:136-141——弹窗里
+      // 有个复选框，勾上就关掉剪贴板捕获。
+      el("div", { class: "field" }, [
+        el("label", { class: "check-row" }, [
+          disableToggle,
+          el("span", { text: t("clipboardDisableToggle") }),
+        ]),
       ]),
     ]),
   ], [

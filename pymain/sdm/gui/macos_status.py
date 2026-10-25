@@ -55,6 +55,99 @@ def available() -> bool:
     return sys.platform == "darwin"
 
 
+# -- Dock 图标显隐 -------------------------------------------------
+
+#: NSApplicationActivationPolicy。实测 AppKit.NSApplicationActivationPolicyRegular
+#: = 0、Accessory = 1（不是猜的，PyObjC 暴露了这两个常量）。
+POLICY_REGULAR = 0
+POLICY_ACCESSORY = 1
+
+#: 关窗后延迟多久再切 Dock 策略。
+#:
+#: Swift 对照：`App/SDMApp.swift:444-541` 的 updateDockVisibility
+#: ——0.15 秒宽限，避免 cmd-W 再点托盘时 Dock 图标闪一下。
+DOCK_HIDE_GRACE_SECONDS = 0.15
+
+
+def current_activation_policy() -> int:
+    """当前的激活策略。非 macOS 或 AppKit 不可用时返回 -1。"""
+    if sys.platform != "darwin":
+        return -1
+    try:
+        from AppKit import NSApplication
+
+        return int(NSApplication.sharedApplication().activationPolicy())
+    except Exception:
+        return -1
+
+
+def set_dock_visible(visible: bool) -> bool:
+    """显示或隐藏 Dock 图标。
+
+    `visible=True` → `.regular`（正常出现在 Dock 里）
+    `visible=False` → `.accessory`（不占 Dock，只在菜单栏待着）
+
+    Swift 对照：`App/SDMApp.swift:444-541` 的
+    `NSApp.setActivationPolicy(.accessory / .regular)`。
+
+    返回是否真的切了。
+    """
+    if sys.platform != "darwin":
+        return False
+    try:
+        from AppKit import NSApplication
+
+        target = POLICY_REGULAR if visible else POLICY_ACCESSORY
+        app = NSApplication.sharedApplication()
+        if int(app.activationPolicy()) == target:
+            return False
+        app.setActivationPolicy_(target)
+        return True
+    except Exception:
+        return False
+
+
+def has_visible_key_window() -> bool:
+    """现在有没有可见的主窗口。
+
+    **sheet 和 nonactivating panel 不算。** Swift 版
+    `App/SDMApp.swift` 的 willClose 处理里明确忽略这两类临时窗口——
+    选目录的 NSOpenPanel 关闭时不该触发 Dock 策略切换。
+
+    判据：窗口可见 + 是 key window + 不是 sheet 的父窗口 +
+    不是 nonactivating panel。
+    """
+    if sys.platform != "darwin":
+        return False
+    try:
+        from AppKit import NSApplication
+
+        for win in NSApplication.sharedApplication().windows():
+            try:
+                if not win.isVisible():
+                    continue
+                # sheet 的父窗口在 sheet 打开期间不算「主窗口在前」
+                if win.sheetParent() is not None:
+                    continue
+                # nonactivating panel（工具面板之类）不抢焦点
+                style = int(win.styleMask())
+                if style & NS_NONACTIVATING_PANEL_MASK:
+                    continue
+                if win.isKeyWindow():
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        return False
+    return False
+
+
+#: NSNonactivatingPanelWindowMask。AppKit 没在 PyObjC 里暴露这个常量
+#: （实测 NSNonactivatingPanelWindowMask = N/A），但 AppKit 头文件里
+#: 它是 1 << 7 = 128。
+NS_NONACTIVATING_PANEL_MASK = 128
+
+
 class StatusBarController:
     """NSStatusItem 的包装。
 

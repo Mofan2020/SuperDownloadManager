@@ -17,6 +17,14 @@ from ..version import SOCKET_PORT_WINDOWS
 
 log = get_logger()
 
+#: 响应大小上限。1 MB。
+#:
+#: 守护进程是本机进程，正常响应只有几 KB。但 socket 另一端要是
+#: 出了问题（半个 daemon、别的进程占了这个 socket、恶意进程
+#: 抢占路径），没有上限的话客户端会一直往内存里灌，直到把机器
+#: 的内存吃光。Swift 版 CLI/SDMDM.swift:406 也是这个上限。
+MAX_RESPONSE_BYTES = 1024 * 1024
+
 
 class ClientError(Exception):
     pass
@@ -54,15 +62,7 @@ class IPCClient:
         try:
             sock.connect(str(sock_path))
             sock.sendall(payload + b"\n")
-            buffer = b""
-            while not buffer.endswith(b"\n"):
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                buffer += chunk
-            if not buffer:
-                raise ClientError("守护进程没有响应")
-            return buffer.decode("utf-8").strip()
+            return self._read_response(sock)
         except TimeoutError as err:
             raise ClientError("守护进程超时未响应") from err
         except OSError as err:
@@ -87,18 +87,32 @@ class IPCClient:
             # 连上了，接下来是正常请求，用完整超时
             sock.settimeout(self.timeout)
             sock.sendall(payload + b"\n")
-            buffer = b""
-            while not buffer.endswith(b"\n"):
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                buffer += chunk
-            if not buffer:
-                raise ClientError("守护进程没有响应")
-            return buffer.decode("utf-8").strip()
+            return self._read_response(sock)
         except TimeoutError as err:
             raise ClientError("守护进程超时未响应") from err
         except OSError as err:
             raise ClientError(f"连接守护进程失败: {err}") from err
         finally:
             sock.close()
+
+    @staticmethod
+    def _read_response(sock: socket.socket) -> str:
+        """读到换行为止，返回响应正文。
+
+        超过 1 MB 直接报错——不静默截断。截断出来的 JSON 解析会
+        报一个跟真实原因无关的错（"响应解析失败"），排查时容易
+        被带偏。
+        """
+        buffer = b""
+        while not buffer.endswith(b"\n"):
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            buffer += chunk
+            if len(buffer) > MAX_RESPONSE_BYTES:
+                raise ClientError(
+                    f"守护进程响应超过上限（{MAX_RESPONSE_BYTES // 1024} KB）"
+                )
+        if not buffer:
+            raise ClientError("守护进程没有响应")
+        return buffer.decode("utf-8").strip()

@@ -46,6 +46,11 @@ cat > "${LAUNCH_AGENT_PLIST}" <<EOF
     <array>
         <string>${DAEMON_BIN}</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SDM_DAEMON</key>
+        <string>1</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

@@ -346,6 +346,34 @@ body.hide-toolbar-labels .btn { width: 29px; padding: 0; }
   cursor: default; transition: box-shadow .13s ease, background .13s ease;
 }
 .row:hover { background: var(--glass); }
+
+/* 排序表头。列宽跟 .row 的 grid 完全一致，不然对不齐。 */
+.sort-header {
+  display: grid;
+  grid-template-columns:
+    minmax(160px, 1fr)
+    minmax(0, 92px)
+    minmax(110px, 190px)
+    minmax(0, 100px)
+    minmax(0, 86px)
+    minmax(0, 80px)
+    minmax(0, 118px);
+  align-items: center; gap: 12px; padding: 0 12px 6px;
+  font-size: 11px; color: var(--text-tertiary);
+  user-select: none;
+}
+.sort-header .sh {
+  cursor: pointer; display: inline-flex; align-items: center; gap: 3px;
+  white-space: nowrap; border-radius: 5px; padding: 2px 4px; margin: -2px -4px;
+  transition: color .12s ease, background .12s ease;
+}
+.sort-header .sh:hover { color: var(--text-primary); background: var(--glass-thin); }
+.sort-header .sh.active { color: var(--accent); }
+/* 右对齐的表头（大小/速度）跟行内的数字列对齐 */
+.sort-header .sh.right { justify-content: flex-end; }
+/* 排序箭头 */
+.sort-header .sh .arrow { opacity: 0; transition: opacity .12s ease; }
+.sort-header .sh.active .arrow { opacity: 1; }
 .row.selected {
   background: var(--accent-softer);
   box-shadow: inset 0 1px 0 var(--edge-inner),
@@ -472,6 +500,13 @@ body.hide-toolbar-labels .btn { width: 29px; padding: 0; }
 .field-hint { font-size: 11px; color: var(--text-tertiary); }
 .field-row { display: flex; gap: 8px; align-items: center; min-width: 0; }
 .field-row > .field { flex: 1; min-width: 0; }
+
+/* 弹窗里的复选框行（剪贴板 kill switch）。 */
+.check-row {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 13px; color: var(--text-primary); cursor: pointer;
+}
+.check-row input[type="checkbox"] { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
 
 .input, .select, .textarea {
   width: 100%; height: 31px; padding: 0 10px; border: 0; border-radius: var(--radius-md);

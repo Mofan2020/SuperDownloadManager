@@ -100,6 +100,20 @@ CLI_EXTRA_IMPORTS = [
     "sdm.cli.sdmdm",
 ]
 
+# macOS GUI 专用的隐藏导入。
+#
+# UserNotifications 的 PyObjC 绑定是可选依赖（requirements.txt 里
+# 用环境标记限制只在 macOS 装）。PyInstaller 靠静态分析找不到它
+# ——notifications.py 里是 `import UserNotifications` 包在
+# try/except ImportError 里，分析器会跳过。不显式声明的话打包
+# 出来的 .app 里没有这个模块，通知会静默退回 osascript 通道，
+# 少了「点通知回主窗口」。
+#
+# 只给 macOS GUI 加：daemon 和 CLI 不发通知。
+MACOS_GUI_EXTRA_IMPORTS = [
+    "UserNotifications",
+]
+
 
 def common_args(
     name: str = APP_NAME,
@@ -228,7 +242,13 @@ def build_macos() -> bool:
     entry = build_entrypoint(APP_NAME, "sdm.gui.main", "main")
     args = [
         sys.executable, "-m", "PyInstaller",
-        *common_args(APP_NAME, True, GUI_EXTRA_IMPORTS, True, False),
+        *common_args(
+            APP_NAME,
+            True,
+            [*GUI_EXTRA_IMPORTS, *MACOS_GUI_EXTRA_IMPORTS],
+            True,
+            False,
+        ),
         str(entry),
     ]
 
@@ -483,7 +503,9 @@ def _codesign(path: Path) -> bool:
 def _make_dmg(app: Path, version: str, system: str) -> bool:
     """从 .app 生成 DMG，输出到 ~/Downloads/Archives/"""
     out_dir = Path.home() / "Downloads" / "Archives"
-    arch = "arm64" if system == "Darwin" else "x86_64"
+    # 架构名从真实机器读。之前写死「macOS 就是 arm64」——
+    # Intel Mac 上文件名会标错，跟实际产物对不上。
+    arch = _platform.machine() or ("arm64" if system == "Darwin" else "x86_64")
     out_name = f"SuperDownloadManager-{version}-{arch}.dmg"
     out = out_dir / out_name
 
