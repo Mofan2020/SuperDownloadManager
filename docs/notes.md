@@ -834,3 +834,43 @@ PyInstaller 打的 .app 里 `Contents/Resources/` 下已经有 `sdm` 和 `sdmd`
 而 `docs/extension-install.md` 和 `Extensions/native-messaging-host/`
 的模板写的是 `native-host/`。**统一成 `native-host/`**——
 文档是给人看的，模板是给人手抄的，它们指向的路径必须是真实存在的那一个。
+
+## 发版流程：tag 必须在代码定稿之后打
+
+`.github/workflows/release-python.yml` 监听 `v*` tag，tag 一推上去
+就开始构建 macOS + Windows 并发布 Pre-release。**推 tag 之前代码必须
+完全定稿**——tag 指向的 commit 就是这次发布的全部内容。
+
+### 推 tag 之后又改了代码怎么办
+
+能改，但要按这个顺序，顺序错了会出两份 release：
+
+1. 先提交改动、推分支
+2. **取消已经在跑的 workflow run**（`POST /repos/{owner}/{repo}/actions/runs/{id}/cancel`）
+   —— 不取消的话，旧 run 跑完会拿旧 commit 发一份 release
+3. 删远端 tag（`git push origin :refs/tags/v2.1.0`）
+4. 删本地 tag、重新 `git tag -a` 指向新 commit、再推
+
+第 2 步是关键。tag 删掉**不会**自动取消已经排队的 workflow——GitHub
+那边照跑不误，跑完还会把 release 补出来（`softprops/action-gh-release`
+遇到不存在的 tag 会自己建一个）。
+
+### 本地先跑一遍打包
+
+`python scripts/build.py --mac` 要在**干净 venv** 里跑。开发机上
+anaconda 之类的环境里常常同时装着 PyQt5 和 PySide6，PyInstaller 会
+直接报错：
+
+```
+ERROR: Aborting build process due to attempt to collect multiple Qt bindings packages
+```
+
+这不是代码的问题，是环境的问题——`webview.platforms.qt` 在 hidden
+imports 里（Linux 从源码构建要用），它会把环境里的 Qt 绑定一起收进来。
+CI 上是干净的 3.11 环境，没这个问题。
+
+### 打包冒烟会跑冻结包的自检
+
+`build.py` 打完包会跑一次 `.app` 里的 `--self-test`。所以自检里
+import 一次新模块，就等于验证了「这个模块真的进包了」——比看
+PyInstaller 的分析日志可靠。新加模块时记得往自检里加一条。
