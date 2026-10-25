@@ -350,3 +350,57 @@ def test_frontend_has_column_picker() -> None:
     assert ".col-picker" in css, "CSS 里没有列选择器"
     assert "col-picker-btn" in app_js, "app.js 里没有列选择器按钮"
     assert "hidden_columns" in app_js, "app.js 没把列显隐存进设置"
+
+
+def test_bridge_has_lightweight_status_summary() -> None:
+    """菜单栏状态行和 Dock 进度要走轻量摘要（规格 §6.4）。
+
+    **不能用 `get_tasks()` 代替**：那个方法给每个任务建一个字典，
+    1 秒一次、几百个任务时是白烧 CPU，而定时器空闲时也在跑。
+    """
+    assert hasattr(bridge_mod.GuiBridge, "get_status_summary"), (
+        "桥接层没有 get_status_summary——状态行只能退回 get_tasks()"
+    )
+
+
+def test_status_summary_reports_speed_count_and_progress() -> None:
+    """摘要要给出速度、活跃任务数、总体进度。"""
+    from sdm.engine.download_engine import DownloadEngine, TaskSummary
+
+    engine = DownloadEngine()
+    bridge = bridge_mod.GuiBridge(engine)
+    bridge.engine.tasks["a"] = TaskSummary(
+        id="a",
+        url="https://example.com/a.bin",
+        state="downloading",
+        bytes_done=500,
+        total_bytes=1000,
+        speed_bytes_per_sec=1024.0,
+    )
+    bridge.engine.tasks["b"] = TaskSummary(
+        id="b",
+        url="https://example.com/b.bin",
+        state="completed",
+        bytes_done=100,
+        total_bytes=100,
+        speed_bytes_per_sec=0.0,
+    )
+
+    summary = bridge.get_status_summary()
+    assert summary["active_count"] == 1
+    assert summary["speed"] == 1024.0
+    # 已完成的任务不算进总进度——否则进度条会一直停在 99%
+    assert summary["progress"] == 0.5
+
+
+def test_status_summary_ignores_unknown_size_tasks() -> None:
+    """大小未知的任务不进分母——算进来总进度会错。"""
+    from sdm.engine.download_engine import DownloadEngine, TaskSummary
+
+    engine = DownloadEngine()
+    bridge = bridge_mod.GuiBridge(engine)
+    bridge.engine.tasks["a"] = TaskSummary(
+        id="a", url="https://example.com/a", state="downloading", bytes_done=10, total_bytes=None
+    )
+
+    assert bridge.get_status_summary()["progress"] == 0.0

@@ -655,34 +655,18 @@ def main(argv: list[str] | None = None) -> int:
     # **状态行 1.5 秒一次、Dock 进度 1 秒一次**（契约 §5.1）。不是
     # 每帧——每帧刷会把菜单栏点得一顿一顿的。
     #
-    # 两个刷新都**从 bridge.get_tasks() 拿数据**，跟 GUI 看到的是同一份
-    # 任务快照，菜单栏上的数字不会跟主窗口对不上。
-
-    def _collect_status() -> tuple[float, int, float]:
-        """当前的速度、活跃任务数、全局限速。"""
-        from . import macos_status
-
-        try:
-            tasks = bridge.get_tasks()
-        except Exception as err:
-            log.debug(CAT_GUI, f"读任务列表失败: {err}")
-            return 0.0, 0, 0.0
-        active = [
-            task
-            for task in tasks
-            if (task.get("state") or "") in macos_status.ACTIVE_STATES
-        ]
-        speed = sum(float(task.get("speed_bytes_per_sec") or 0.0) for task in active)
-        try:
-            limit = float(SettingsStore.shared().settings.bandwidth_bytes_per_sec or 0)
-        except Exception:
-            limit = 0.0
-        return speed, len(active), limit
+    # 两个刷新都走 `bridge.get_status_summary()`——它直接读引擎的
+    # 任务快照字段，不给每个任务建字典。跟 GUI 看到的是同一份
+    # 任务状态，菜单栏上的数字不会跟主窗口对不上；而 1 秒一次、
+    # 几百个任务时也不会白烧 CPU（规格 §6.4）。
 
     def _refresh_status_line() -> None:
         """刷新菜单栏状态行 / 托盘状态行。"""
         try:
-            speed, count, limit = _collect_status()
+            summary = bridge.get_status_summary()
+            speed = float(summary.get("speed") or 0.0)
+            count = int(summary.get("active_count") or 0)
+            limit = float(summary.get("limit") or 0.0)
             if _status_bar_controller is not None:
                 _status_bar_controller.update_status(speed, count, limit)
             if _tray_controller is not None:
@@ -695,14 +679,18 @@ def main(argv: list[str] | None = None) -> int:
 
         **没有活跃任务时 fraction 是 0**，`set_dock_progress(0)` 会把
         Dock 图标恢复成默认的样子（契约 §4.4）。
+
+        用 `get_status_summary()` 而不是 `get_tasks()`——后者会给
+        每个任务建一个字典，1 秒一次、任务表有几百条时是白烧 CPU
+        （规格 §6.4 要求空闲时 CPU 接近 0）。
         """
         from . import macos_status
 
         if not macos_status.available():
             return
         try:
-            tasks = bridge.get_tasks()
-            macos_status.set_dock_progress(macos_status.compute_overall_progress(tasks))
+            progress = float(bridge.get_status_summary().get("progress") or 0.0)
+            macos_status.set_dock_progress(progress)
         except Exception as err:
             log.debug(CAT_GUI, f"Dock 进度刷新失败: {err}")
 

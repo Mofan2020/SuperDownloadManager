@@ -152,3 +152,85 @@ def test_target_responds_to_every_action():
             continue
         selector = nsselector(f"{spec.action}:")
         assert target.respondsToSelector_(selector), f"{spec.action} 没被 target 响应"
+
+
+def test_dock_progress_skips_redraw_when_unchanged(monkeypatch):
+    """进度没变就不重绘（规格 §6.4：空闲时 CPU 接近 0）。
+
+    Dock 进度是 1 秒刷一次。进度不变的时候每次都重新画一张图再
+    `display()` 一次，等于每秒钟白唤醒一次 AppKit 的绘制管线。
+    """
+    if sys.platform != "darwin":
+        pytest.skip("只在 macOS 上跑")
+
+    drawn: list[float] = []
+
+    class _FakeTile:
+        def setContentView_(self, view):
+            drawn.append(view)
+
+        def display(self):
+            pass
+
+    class _FakeApp:
+        def dockTile(self):
+            return _FakeTile()
+
+    class _FakeNSApplication:
+        @staticmethod
+        def sharedApplication():
+            return _FakeApp()
+
+    import types
+
+    fake_appkit = types.ModuleType("AppKit")
+    fake_appkit.NSApplication = _FakeNSApplication
+    monkeypatch.setitem(sys.modules, "AppKit", fake_appkit)
+    # 画图那步要真 AppKit，这里用假的替掉——本测试只关心
+    # 「要不要画」这件事。
+    monkeypatch.setattr(
+        macos_status, "_render_progress_image", lambda fraction, size=None: fraction
+    )
+    monkeypatch.setattr(macos_status, "_last_dock_fraction", None, raising=False)
+
+    assert macos_status.set_dock_progress(0.5) is True
+    assert drawn == [0.5], "第一次应该画"
+
+    # 同样的进度值：不画
+    assert macos_status.set_dock_progress(0.5) is True
+    assert len(drawn) == 1, "进度没变却重绘了"
+
+    # 变了：画
+    assert macos_status.set_dock_progress(0.6) is True
+    assert len(drawn) == 2
+
+    # **回到 0 必须真的把 Dock 图标恢复默认。**
+    #
+    # 这里锁的是一个顺序坑：先记 0.0 再调清理的话，清理函数里的
+    # 「已经清过了就别再清」会把真正的清理跳掉，Dock 图标上会
+    # 永远留着最后一截进度条。
+    cleared: list[int] = []
+
+    class _FakeTile2:
+        def setContentView_(self, view):
+            if view is None:
+                cleared.append(1)
+
+        def display(self):
+            pass
+
+    class _FakeApp2:
+        def dockTile(self):
+            return _FakeTile2()
+
+    class _FakeNSApplication2:
+        @staticmethod
+        def sharedApplication():
+            return _FakeApp2()
+
+    fake_appkit2 = types.ModuleType("AppKit")
+    fake_appkit2.NSApplication = _FakeNSApplication2
+    monkeypatch.setitem(sys.modules, "AppKit", fake_appkit2)
+
+    assert macos_status.set_dock_progress(0.0) is True
+    assert cleared, "进度归零时没有真正恢复默认 Dock 图标"

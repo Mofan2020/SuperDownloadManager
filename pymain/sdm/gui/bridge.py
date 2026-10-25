@@ -41,6 +41,11 @@ from ..system_integration import reveal_in_finder as sys_reveal
 
 log = get_logger()
 
+#: 算「在下载」的状态名。跟引擎的 `TaskState.is_active` 一致
+#: （queued + downloading）。`awaiting_new_link` 不算——它等的是
+#: 用户换链接，不是在下载。
+_ACTIVE_STATE_NAMES = frozenset({"queued", "downloading"})
+
 
 def _resolve_category(name: str) -> DownloadCategory | None:
     """把一个字符串解析成分类。
@@ -352,6 +357,49 @@ class GuiBridge:
         tasks = [task.to_dict() for task in self.engine.snapshot()]
         self._notify_terminal(tasks)
         return self._filter_tasks(tasks, filter)
+
+    def get_status_summary(self) -> dict:
+        """全局状态摘要——给菜单栏状态行和 Dock 进度用。
+
+        **为什么不能直接用 `get_tasks()`**：那个方法把每个任务都
+        `to_dict()` 一遍——任务表有 1000 条时，每秒调两次（状态行
+        1.5 秒一次、Dock 进度 1 秒一次）就是每秒钟几千次字典构造，
+        而这些定时器在**空闲时也在跑**。规格 §6.4 要求「空闲时
+        CPU 占用接近 0」。
+
+        这里直接读引擎的 `TaskSummary` 字段，不建字典。
+
+        返回：
+        ```python
+        {"speed": 字节/秒, "active_count": 活跃任务数,
+         "limit": 全局限速, "progress": 总体进度 0~1}
+        ```
+        """
+        speed = 0.0
+        active_count = 0
+        done = 0
+        total = 0
+        for task in self.engine.snapshot():
+            if task.state not in _ACTIVE_STATE_NAMES:
+                continue
+            active_count += 1
+            speed += max(0.0, float(task.speed_bytes_per_sec or 0.0))
+            # 大小未知的任务不能进分母——算进来会把总进度算错。
+            size = task.total_bytes
+            if size:
+                total += int(size)
+                done += int(task.bytes_done or 0)
+        progress = min(1.0, max(0.0, done / total)) if total > 0 else 0.0
+        try:
+            limit = float(SettingsStore.shared().settings.bandwidth_bytes_per_sec or 0)
+        except Exception:
+            limit = 0.0
+        return {
+            "speed": speed,
+            "active_count": active_count,
+            "limit": limit,
+            "progress": progress,
+        }
 
     @staticmethod
     def _filter_tasks(tasks: list[dict], filter: dict | None) -> list[dict]:

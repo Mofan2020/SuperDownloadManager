@@ -303,6 +303,16 @@ NS_NONACTIVATING_PANEL_MASK = 128
 DOCK_TILE_SIZE = 128
 
 
+#: 上一次画到 Dock 上的进度值。
+#:
+#: **用来避免重复重绘。** Dock 进度是 1 秒刷一次（契约 §5.1），但
+#: 进度没变的时候没必要重新画一张图再 `display()` 一次——那是白白
+#: 唤醒 AppKit 的绘制管线。规格 §6.4 要求空闲时 CPU 占用接近 0。
+#:
+#: None = 还没画过（第一次一定要画）。
+_last_dock_fraction: float | None = None
+
+
 def set_dock_progress(fraction: float) -> bool:
     """在 Dock 图标上画总体下载进度。
 
@@ -310,6 +320,7 @@ def set_dock_progress(fraction: float) -> bool:
 
     返回是否真的更新了。**非 macOS、或者 AppKit 不可用时是安全的空操作。**
     """
+    global _last_dock_fraction
     if sys.platform != "darwin":
         return False
     try:
@@ -321,10 +332,22 @@ def set_dock_progress(fraction: float) -> bool:
         if tile is None:
             return False
         value = min(1.0, max(0.0, float(fraction or 0.0)))
+        # **没变就不画。** 1 秒一次的刷新里，绝大多数时候进度是
+        # 不变的——每次都重画等于每秒钟做一次无意义的绘制。
+        if _last_dock_fraction is not None and abs(value - _last_dock_fraction) < 0.001:
+            return True
         if value <= 0.0:
-            return clear_dock_progress()
+            # **顺序要紧：先清，再记。**
+            #
+            # 反过来写（先记 0.0 再清）的话，`clear_dock_progress()`
+            # 里的「已经清过了就别再清」会把真正的清理跳掉——
+            # Dock 图标上会永远留着最后一截进度条。
+            ok = clear_dock_progress()
+            _last_dock_fraction = 0.0
+            return ok
         tile.setContentView_(_render_progress_image(value))
         tile.display()
+        _last_dock_fraction = value
         return True
     except Exception as err:
         # **别把异常吞干净。** Dock 进度是锦上添花，画不出来不该
@@ -335,6 +358,7 @@ def set_dock_progress(fraction: float) -> bool:
 
 def clear_dock_progress() -> bool:
     """恢复默认 Dock 图标（去掉进度条）。"""
+    global _last_dock_fraction
     if sys.platform != "darwin":
         return False
     try:
@@ -343,10 +367,15 @@ def clear_dock_progress() -> bool:
         tile = NSApplication.sharedApplication().dockTile()
         if tile is None:
             return False
+        # **已经清过了就别再清一次。** 每次清都要 `display()` 一次，
+        # 空闲时每秒清一次是白烧 CPU。
+        if _last_dock_fraction == 0.0:
+            return True
         # **置回 None 才是「恢复默认」。** 留着上一次画的 contentView，
         # 图标就会一直带着上次的进度条。
         tile.setContentView_(None)
         tile.display()
+        _last_dock_fraction = 0.0
         return True
     except Exception as err:
         log.debug(CAT_GUI, f"Dock 进度清除失败: {err}")

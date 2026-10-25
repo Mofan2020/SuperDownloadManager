@@ -246,9 +246,49 @@ def test_tray_module_imports_without_pystray() -> None:
 
     **托盘是常驻入口，不该挡住应用启动。** 没装 pystray 时
     `available()` 返回 False，托盘不出现，应用照常跑。
+
+    **这里不能靠「当前环境恰好没装 pystray」来验。** pystray 是
+    Windows 的正式依赖（requirements.txt 里 `sys_platform == "win32"`），
+    Windows CI 上它一定是装着的——照着环境写断言，在 Windows 上
+    必红，在 macOS 上必绿。
+
+    所以这里**真的把 import 挡掉**，重新 import 一次模块：
+    `pystray` 变成 None、`available()` 变成 False，才算验过。
     """
-    assert tray.pystray is None or tray.available() is False
-    assert tray.available() is False or sys.platform == "win32"
+    import builtins
+    import importlib
+
+    real_import = builtins.__import__
+
+    def _blocked_import(name, *args, **kwargs):
+        if name == "pystray" or name.startswith("pystray."):
+            raise ImportError("模拟：没装 pystray")
+        return real_import(name, *args, **kwargs)
+
+    saved = {k: v for k, v in sys.modules.items() if k == "pystray" or k.startswith("pystray.")}
+    for key in saved:
+        sys.modules.pop(key, None)
+
+    builtins.__import__ = _blocked_import
+    try:
+        reloaded = importlib.reload(tray)
+        assert reloaded.pystray is None, "pystray 挡住了但模块里还留着它"
+        assert reloaded.available() is False, "没装 pystray 时 available() 必须返回 False"
+    finally:
+        builtins.__import__ = real_import
+        sys.modules.update(saved)
+        # 把模块恢复成「环境里真实的样子」，别让这次 reload
+        # 污染后面用 pystray 的用例。
+        importlib.reload(tray)
+
+
+def test_tray_available_matches_environment() -> None:
+    """`available()` 要跟环境对得上。
+
+    Windows + 装了 pystray → True；其它情况 → False。
+    """
+    expected = sys.platform == "win32" and tray.pystray is not None
+    assert tray.available() is expected
 
 
 def test_tray_is_unavailable_off_windows() -> None:
