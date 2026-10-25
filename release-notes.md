@@ -15,5 +15,6 @@ Python 重写版。跨 macOS、Windows、Linux，界面换成液态玻璃。
 - 后台 daemon，开机自启
 - 窗口自由缩放，布局重排不裁切
 - 详情页显示真实分片状态
+- macOS DMG 生成（`build.py --mac`）
 
 Windows 22H2 与 macOS 12+。
