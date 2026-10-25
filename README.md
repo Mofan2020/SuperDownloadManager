@@ -21,6 +21,7 @@ IDM does it on Windows. macOS had no good equivalent. This is the cross-platform
 - **`sdm` CLI.** Every command returns JSON, built to be called from shell scripts and AI agents.
 - **Background daemon with auto-start.** Survives logout and reboot.
 - **Liquid glass interface.** The window resizes freely and the layout reflows instead of clipping.
+- **macOS menu bar icon.** Add a URL, open the downloads folder, jump to settings — without switching to the window.
 
 ## Requirements
 

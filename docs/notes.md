@@ -140,7 +140,7 @@ GUI 首次启动时在后台线程里做安装（`sdm/gui/bootstrap.py`）：
 
 || # | 项 | 原因 |
 |---|---|---|
-| 1 | 菜单栏常驻模式 | Swift 版用 `MenuBarExtra` 做常驻入口。pywebview 没有等价 API，要在 macOS 上做需要原生辅助进程。窗口 + 剪贴板监听 + 扩展派单覆盖了主要入口。**PyObjC 可实现 NSStatusItem，但工程量不小** |
+| 1 | 菜单栏常驻模式 | **v2.0.3 部分实现**：用 PyObjC 做了 NSStatusItem，菜单项和快捷键跟 Swift 版一致。**但「关窗口后 app 继续活着」没做**——pywebview 的 closing 事件有竞态不可靠，窗口一关 `webview.start()` 就返回，进程退出。细节见上面「关窗口后 app 常驻：pywebview 做不到」 |
 | 2 | 应用内自动更新 | Swift 版用 Sparkle，Python 版没有等价物。发版走 GitHub Releases。**Sparkle 需要 Developer ID 签名 + appcast 服务器**，用户的 ad-hoc 签名方案本来就跑不了 |
 | 3 | DMG 封装 | **已实现**（本地 `build.py --mac` 生成 `~/Downloads/Archives/SuperDownloadManager-<version>-<arch>.dmg`，优先用 create-dmg，回退到 hdiutil） |
 | 4 | 传输中的动态 split/merge | 只在传输**前**重规划。传输中切分要重开在途工作单元并重算 `bytesDone`，数据损坏风险高。Swift 版的 `RangePlanner.rearrange()` 从来没有调用方，属于同源问题。**Python 版的传输前重规划比 Swift 版更完整** |
