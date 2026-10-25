@@ -15,11 +15,47 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from sdm.gui import url_scheme
+
+# -- 假的 PyObjC ----------------------------------------------------
+#
+# handler 的构造函数要 `import objc` 和 `from Foundation import NSObject`。
+# **Linux 上没有 PyObjC**——真 Foundation 根本 import 不了。
+# 之前的测试在 macOS 上因为真 PyObjC 兜住了才没暴露，Linux runner
+# 上直接 ImportError。
+#
+# handler 用 `type(name, (NSObject,), {...})` 建子类，再 `cls.alloc().init()`，
+# 所以假的 NSObject 得有两样：能当基类用，自带 alloc()/init()。
+
+
+class _FakeNSObject:
+    @classmethod
+    def alloc(cls):
+        return cls()
+
+    def init(self):
+        return self
+
+
+@pytest.fixture(autouse=True)
+def _fake_pyobjc(monkeypatch):
+    """装上假的 objc 和 Foundation。"""
+    import types
+
+    objc = types.ModuleType("objc")
+    foundation = types.ModuleType("Foundation")
+    foundation.NSObject = _FakeNSObject
+
+    monkeypatch.setitem(sys.modules, "objc", objc)
+    monkeypatch.setitem(sys.modules, "Foundation", foundation)
+    yield
+
 
 # -- 解析 ----------------------------------------------------------
 

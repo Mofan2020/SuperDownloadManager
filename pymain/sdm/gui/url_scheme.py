@@ -185,7 +185,19 @@ def install(on_url: Callable[[str], None]) -> bool:
 
     返回是否注册成功。
     """
-    handler = _URLSchemeHandler(on_url)
+    # **平台检查得在构造 handler 之前。**
+    # _URLSchemeHandler 的构造函数要 import objc——非 macOS 上
+    # 没装 PyObjC，直接抛 ImportError。类里的 install() 虽然也
+    # 有平台检查，但那时候 handler 早建好了，压根轮不到它。
+    if sys.platform != "darwin":
+        return False
+
+    try:
+        handler = _URLSchemeHandler(on_url)
+    except ImportError as err:
+        log.debug(CAT_GUI, f"URL scheme 不可用: {err}")
+        return False
+
     ok = handler.install()
     if ok:
         # handler 必须保持强引用——局部变量被回收后系统回调就找

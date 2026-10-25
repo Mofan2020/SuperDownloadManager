@@ -82,6 +82,8 @@ def test_config_dir_respects_xdg_data_home(tmp_path, monkeypatch):
     if paths.is_macos() or paths.is_windows():
         pytest.skip("只 Linux 用 XDG_DATA_HOME")
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    # 沙箱的配置目录覆盖优先级更高——这里测的就是平台默认。
+    monkeypatch.delenv("SDM_CONFIG_DIR", raising=False)
     assert paths.config_dir() == tmp_path / "xdg" / "SuperDownloadManager"
 
 
@@ -106,6 +108,10 @@ def test_ensure_dirs_creates_everything(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    # 沙箱的覆盖优先级更高——这里要测的就是平台默认路径，
+    # 不清掉的话实际建的是沙箱目录，这个测试等于没测。
+    monkeypatch.delenv("SDM_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("SDM_LOG_DIR", raising=False)
     paths.ensure_dirs()
     assert paths.config_dir().is_dir()
     assert paths.log_dir().is_dir()

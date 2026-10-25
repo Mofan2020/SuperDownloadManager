@@ -131,6 +131,42 @@ def fake_un(monkeypatch):
     module.UNNotificationPresentationOptionSound = 2
 
     monkeypatch.setitem(sys.modules, "UserNotifications", module)
+
+    # 假的 Foundation —— 生产代码要从这儿拿 NSObject。
+    #
+    # **Linux 上没有 PyObjC**，真 Foundation 根本 import 不了。
+    # 之前的 fake 只注入了 UserNotifications，在 macOS 上因为真
+    # PyObjC 兜住了 Foundation 才没暴露，Linux runner 上直接
+    # ImportError。
+    #
+    # 生产代码用 `type(name, (NSObject,), {...})` 建 delegate 类，
+    # 不用 objc.registerClass——PyObjC 自己会注册。所以这里的
+    # NSObject 只需要是个能当基类用的东西。
+    class _FakeNSObject:
+        """假的 NSObject。
+
+        PyObjC 的 NSObject 子类自带 `alloc()` / `init()`——生产代码
+        里是 `_delegate_class.alloc().init()`。这里得还原，否则
+        装 delegate 那步会 AttributeError。
+
+        真的 NSObject 还能 `type(name, (NSObject,), {...})` 建子类，
+        Python 的普通类也能，所以直接用普通类。
+        """
+
+        @classmethod
+        def alloc(cls):
+            return cls()
+
+        def init(self):
+            return self
+
+    foundation = types.ModuleType("Foundation")
+    foundation.NSObject = _FakeNSObject
+    foundation.NSBundle = types.SimpleNamespace(
+        mainBundle=lambda: types.SimpleNamespace(bundleIdentifier=lambda: "com.test.app")
+    )
+    monkeypatch.setitem(sys.modules, "Foundation", foundation)
+
     # 让 _un_available() 认为有 bundle identity、框架也装了
     monkeypatch.setattr(notifications, "_bundle_identifier", lambda: "com.test.app")
     # 清掉 delegate 类缓存——否则第二个测试用的是上一个测试建的
