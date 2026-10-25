@@ -19,6 +19,7 @@ const State = {
   filter: "all",
   categoryFilter: null,
   selectedTaskId: null,
+  expandedChunks: null,
   clipboardCandidate: null,
   showToolbarLabels: true,
   booted: false,
@@ -536,6 +537,8 @@ function renderBanner() {
 
 function selectTask(taskId) {
   State.selectedTaskId = State.selectedTaskId === taskId ? null : taskId;
+  // 换任务时收起分片表——展开状态是按任务记的，别带过去
+  State.expandedChunks = null;
   render();
   // 分片明细单独取——列表接口不带它（省内存 + 省序列化）
   if (State.selectedTaskId) loadTaskChunks(State.selectedTaskId);
@@ -601,9 +604,12 @@ function renderDetail() {
 
   // 分片
   if (task.chunks && task.chunks.length) {
-    // 分片最多 128 个，全渲染会让 DOM 很大。只显示前 64 个，
-    // 其余用一行汇总——用户要的是「看分片状态」，不是逐个核对。
+    // 分片最多 128 个，全渲染 DOM 会偏大。默认显示前 64 个，
+    // 底下给一个「展开全部分片」的按钮——想看全的时候能看全，
+    // 不想看的时候不占地方。
     const CHUNK_VIEW_LIMIT = 64;
+    const expanded = State.expandedChunks === task.id;
+    const visible = expanded ? task.chunks : task.chunks.slice(0, CHUNK_VIEW_LIMIT);
     body.appendChild(el("div", { class: "section-title" }, [
       icon("layers", "icon-sm"),
       el("span", { text: `${t("detailShowChunks")} (${task.completed_chunks}/${task.chunk_count})` }),
@@ -617,7 +623,7 @@ function renderDetail() {
       ])]),
     ]);
     const tbody = el("tbody");
-    task.chunks.slice(0, CHUNK_VIEW_LIMIT).forEach((c) => {
+    visible.forEach((c) => {
       const st = c.bytes_done >= c.size ? "done" : (c.bytes_done > 0 ? "downloading" : "pending");
       tbody.appendChild(el("tr", {}, [
         el("td", { class: "mono", text: `#${c.id}` }),
@@ -630,14 +636,24 @@ function renderDetail() {
                    text: c.idle_seconds != null ? fmtChunkElapsed(c.idle_seconds) : "—" }),
       ]));
     });
-    if (task.chunks.length > CHUNK_VIEW_LIMIT) {
-      tbody.appendChild(el("tr", {}, [
-        el("td", { colspan: "3", class: "cell-muted",
-          text: `… 另有 ${task.chunks.length - CHUNK_VIEW_LIMIT} 个分片` }),
-      ]));
-    }
     table.appendChild(tbody);
     body.appendChild(table);
+
+    // 展开 / 收起
+    if (task.chunks.length > CHUNK_VIEW_LIMIT) {
+      body.appendChild(el("button", {
+        class: "btn btn-sm", style: "margin-top:10px",
+        onclick: () => {
+          State.expandedChunks = expanded ? null : task.id;
+          renderDetail();
+        },
+      }, [
+        icon("chevron", "icon-sm " + (expanded ? "icon-chevron-up" : "icon-chevron-down")),
+        el("span", { text: expanded
+          ? t("taskDetailChunksCollapse")
+          : `${t("taskDetailChunksExpandMore")} (${task.chunks.length})` }),
+      ]));
+    }
 
     body.appendChild(el("button", {
       class: "btn btn-sm", style: "margin-top:12px",

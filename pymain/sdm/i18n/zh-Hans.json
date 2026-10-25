@@ -208,6 +208,8 @@
   "taskDetailChunkHeader": "块",
   "taskDetailChunkPending": "排队中",
   "taskDetailChunkStatus": "状态",
+  "taskDetailChunksCollapse": "收起分片",
+  "taskDetailChunksExpandMore": "展开全部分片",
   "taskDetailLiveChunks": "实时分块",
   "toolbarAddURL": "添加 URL…",
   "toolbarClearCompleted": "清除已完成",

@@ -163,6 +163,9 @@ body {
 .icon-lg { width: 19px; height: 19px; }
 .icon-xl { width: 30px; height: 30px; stroke-width: 1.6; }
 .icon-sm { width: 14px; height: 14px; }
+/* sprite 里的 chevron 指向右，展开/收起要转到下和上 */
+.icon-chevron-down { transform: rotate(90deg); }
+.icon-chevron-up { transform: rotate(-90deg); }
 
 .mono { font-family: var(--font-mono); font-size: 12px; }
 .num  { font-variant-numeric: tabular-nums; }

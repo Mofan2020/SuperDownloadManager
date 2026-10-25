@@ -208,6 +208,8 @@
   "taskDetailChunkHeader": "Chunk",
   "taskDetailChunkPending": "queued",
   "taskDetailChunkStatus": "Status",
+  "taskDetailChunksCollapse": "Collapse chunks",
+  "taskDetailChunksExpandMore": "Show all chunks",
   "taskDetailLiveChunks": "Live chunks",
   "toolbarAddURL": "Add URL…",
   "toolbarClearCompleted": "Clear Completed",
