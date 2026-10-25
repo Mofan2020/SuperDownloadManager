@@ -37,6 +37,15 @@ open /Applications/SuperDownloadManager.app
 
 Windows：解压后运行 `SuperDownloadManager.exe`。
 
+命令行和后台 daemon 是单独的两个包，解压到同一个目录，然后跑一次安装脚本：
+
+```powershell
+.\install.ps1
+sdm ping
+```
+
+脚本做两件事：把 `sdm` 命令加进 PATH（用 .cmd shim，Windows 没软链），注册一个登录时启动的计划任务跑 daemon。
+
 ## 从源码运行
 
 ```sh
@@ -54,6 +63,8 @@ python -m sdm.gui.main
 sh /Applications/SuperDownloadManager.app/Contents/Resources/install.sh
 sdm ping
 ```
+
+Windows 用 `install.ps1`（见上面的安装一节）。
 
 ```
 sdm add <url> [--referer R] [--filename F] [--category C] [--threads N]

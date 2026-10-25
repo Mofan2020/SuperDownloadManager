@@ -111,14 +111,36 @@ jobs:
           if (-not (Test-Path $exe)) { throw "exe 没生成：$exe" }
           Write-Host "exe size: $((Get-Item $exe).Length) bytes"
 
+      - name: Check install scripts parse
+        shell: pwsh
+        run: |
+          # PowerShell 脚本语法错了要等到用户手里才炸。这里先过一遍解析器。
+          foreach ($ps1 in @("pymain/scripts/install.ps1", "pymain/scripts/uninstall.ps1")) {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $ps1), [ref]$null, [ref]$errors)
+            if ($errors) {
+              $errors | ForEach-Object { Write-Error "$ps1 : $_" }
+              throw "PowerShell 脚本语法错误：$ps1"
+            }
+            Write-Host "OK: $ps1"
+          }
+
       - name: Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path build/release | Out-Null
           # GUI 单文件
           Compress-Archive -Path pymain/dist/windows/SuperDownloadManager.exe -DestinationPath build/release/SuperDownloadManager-Windows.zip
-          # CLI 是 onedir（onefile 每次启动要解包，实测慢十几秒）
-          Compress-Archive -Path pymain/dist/windows/sdm/* -DestinationPath build/release/sdm-Windows.zip
+          # CLI 是 onedir（onefile 每次启动要解包，实测慢十几秒）。
+          # 连目录一起压，解压后是 sdm/ 目录（sdm.exe + _internal/），
+          # 而不是一堆散文件摊在根目录。
+          Compress-Archive -Path pymain/dist/windows/sdm -DestinationPath build/release/sdm-Windows.zip
+          # daemon 同样
+          Compress-Archive -Path pymain/dist/windows/sdmd -DestinationPath build/release/sdmd-Windows.zip
+          # 安装脚本单独一份（Windows 没有 .app 包可挂，脚本跟着 zip 走）
+          Copy-Item pymain/scripts/install.ps1 build/release/
+          Copy-Item pymain/scripts/uninstall.ps1 build/release/
           $hash = (Get-FileHash build/release/SuperDownloadManager-Windows.zip -Algorithm SHA256).Hash.ToLower()
           "$hash  SuperDownloadManager-Windows.zip" | Out-File -Encoding ascii build/release/SuperDownloadManager-Windows.zip.sha256
 
@@ -188,6 +210,7 @@ jobs:
             build/release/SuperDownloadManager-Windows.zip
             build/release/SuperDownloadManager-Windows.zip.sha256
             build/release/sdm-Windows.zip
+            build/release/sdmd-Windows.zip
             build/release/sdm-macOS.zip
             build/release/sdm-macOS.zip.sha256
           draft: false

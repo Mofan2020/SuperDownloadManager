@@ -40,6 +40,17 @@ open /Applications/SuperDownloadManager.app
 
 Windows: extract the zip and run `SuperDownloadManager.exe`.
 
+The CLI and the background daemon ship as two separate archives. Extract them
+into the same directory, then run the installer once:
+
+```powershell
+.\install.ps1
+sdm ping
+```
+
+It puts `sdm` on your PATH (via a .cmd shim — Windows has no symlinks) and
+registers a logon task that keeps the daemon running.
+
 ## Run from source
 
 ```sh
@@ -58,6 +69,8 @@ put it on your PATH and register the daemon:
 sh /Applications/SuperDownloadManager.app/Contents/Resources/install.sh
 sdm ping
 ```
+
+On Windows, use `install.ps1` instead (see Install above).
 
 ```
 sdm add <url> [--referer R] [--filename F] [--category C] [--threads N]

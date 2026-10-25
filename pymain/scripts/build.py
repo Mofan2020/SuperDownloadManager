@@ -381,9 +381,15 @@ def build_windows() -> bool:
     t0 = time.time()
     for name, module, func, imports, with_assets, onefile in TARGETS:
         entry = build_entrypoint(name, module, func)
+        # GUI 用 onefile：Windows 用户的预期是「一个 exe，双击就能用」。
+        # onedir 的 GUI 是个目录，得连着 _internal 一起拷，发出去不直观。
+        #
+        # CLI 和 daemon 保持 onedir：onefile 每次启动要解包重签名，
+        # 实测慢十几秒。命令行工具让人等几秒是不能接受的。
+        use_onefile = onefile or name == APP_NAME
         args = [
             sys.executable, "-m", "PyInstaller",
-            *common_args(name, name == APP_NAME, imports, with_assets, onefile),
+            *common_args(name, name == APP_NAME, imports, with_assets, use_onefile),
             str(entry),
         ]
         if run(args) != 0:
@@ -418,14 +424,20 @@ def smoke_test(bin_dir: Path, darwin: bool, helpers: Path | None = None) -> bool
     """
     ok = True
 
-    gui = bin_dir / ("SuperDownloadManager" if darwin else "SuperDownloadManager.exe")
+    gui_name = "SuperDownloadManager" if darwin else "SuperDownloadManager.exe"
+    gui = bin_dir / gui_name
+    if not gui.is_file():
+        # onedir 形态：可执行文件在 <name>/ 目录里
+        nested = bin_dir / gui_name / gui_name
+        if nested.is_file():
+            gui = nested
     if gui.is_file():
         result = subprocess.run(
             [str(gui), "--self-test"],
             capture_output=True,
             errors="replace",
             text=True,
-            timeout=120,
+            timeout=180,
         )
         if result.returncode == 0:
             print("  冒烟：SuperDownloadManager --self-test 通过")
