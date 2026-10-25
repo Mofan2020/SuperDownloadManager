@@ -37,6 +37,39 @@ jobs:
         working-directory: pymain
         run: python -m pytest tests -v
 
+  no-pyobjc:
+    name: Test (no PyObjC)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r pymain/requirements.txt
+          python -m pip install pytest
+
+      # 在 macOS 上屏蔽掉 PyObjC，跑一遍全量。
+      #
+      # matrix 里的 ubuntu-latest 本来就没有 PyObjC，那边红了这步
+      # 也会红——但要等 CI 跑完才知道。这步在本机就把问题暴露出来：
+      # 写 macOS 专属的测试时很容易只顾着当前平台能跑通（比如
+      # fake 只注入了 UserNotifications，忘了 Foundation 也得注入），
+      # macOS 上真 PyObjC 兜住了，测试绿，Linux runner 上才炸。
+      #
+      # 挡掉的模块和抛出的异常类型跟真 Linux 一致，见
+      # tests/no_pyobjc.py 的说明。
+      - name: Test without PyObjC
+        working-directory: pymain
+        env:
+          PYTHONPATH: tests
+        run: python -m pytest tests -v -p no_pyobjc
+
   self-test:
     name: GUI self-test
     runs-on: ${{ matrix.os }}

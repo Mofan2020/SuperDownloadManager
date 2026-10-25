@@ -116,12 +116,15 @@ def test_target_responds_to_every_action():
     PyObjC 把 Python 的 `addURL_` 转成 ObjC 的 `addURL:`。名字写错
     的话菜单点了没反应，而且不报错——只能靠 respondsToSelector 查。
     """
-    from Foundation import NSSelectorFromString
+    # importorskip 而不是硬 import——没有 PyObjC 的环境（Linux、
+    # Windows、CI 的「屏蔽 PyObjC」那步）要跳过，而不是报错。
+    foundation = pytest.importorskip("Foundation")
+    nsselector = foundation.NSSelectorFromString
 
     controller = macos_status.StatusBarController(bridge=None, window=None)
     target = macos_status._make_target(controller)
     for spec in macos_status.MENU_SPEC:
         if spec.separator:
             continue
-        selector = NSSelectorFromString(f"{spec.action}:")
+        selector = nsselector(f"{spec.action}:")
         assert target.respondsToSelector_(selector), f"{spec.action} 没被 target 响应"
