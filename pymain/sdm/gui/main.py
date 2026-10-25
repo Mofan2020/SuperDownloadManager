@@ -138,6 +138,74 @@ def _install_cli_async(bridge) -> None:
         pass
 
 
+def _install_status_bar(bridge, window) -> None:
+    """装 macOS 菜单栏图标。
+
+    Swift 版有（AppDelegate 手写的 NSStatusItem，MenuBarExtra 在
+    macOS 26 上不可靠）。菜单项和快捷键跟 Swift 版一致。
+
+    装不上就当没有——菜单栏入口是加分项，不该挡住 app 启动。
+    """
+    from . import macos_status
+
+    if not macos_status.available():
+        return
+
+    controller = macos_status.StatusBarController(bridge, window)
+
+    def open_main_window() -> None:
+        try:
+            window.show()
+            window.restore()
+        except Exception as err:
+            log.debug(CAT_GUI, f"唤起主窗口失败: {err}")
+
+    def add_url() -> None:
+        bridge._call_js("openAddDialog", None)
+
+    def reveal_downloads() -> None:
+        try:
+            from .. import paths
+
+            bridge.reveal_in_finder(str(paths.download_dir()))
+        except Exception as err:
+            log.debug(CAT_GUI, f"打开下载目录失败: {err}")
+
+    def show_about() -> None:
+        try:
+            from AppKit import NSAlert
+
+            from ..version import __version__
+
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("Super Download Manager")
+            alert.setInformativeText_(f"版本 {__version__}\n开源的跨平台下载管理器")
+            alert.runModal()
+        except Exception as err:
+            log.debug(CAT_GUI, f"关于对话框失败: {err}")
+
+    def open_settings() -> None:
+        bridge._call_js("setView", "settings")
+
+    def quit_app() -> None:
+        try:
+            window.destroy()
+        except Exception as err:
+            log.debug(CAT_GUI, f"退出失败: {err}")
+
+    controller.on("openMainWindow", open_main_window)
+    controller.on("addURL", add_url)
+    controller.on("revealDownloads", reveal_downloads)
+    controller.on("showAbout", show_about)
+    controller.on("openSettings", open_settings)
+    controller.on("quitApp", quit_app)
+
+    if controller.install():
+        log.info(CAT_GUI, "菜单栏图标已装上")
+    else:
+        log.warning(CAT_GUI, "菜单栏图标没装上")
+
+
 def main(argv: list[str] | None = None) -> int:
     force_utf8_stdio()
     args = parse_args(argv)
@@ -210,6 +278,9 @@ def main(argv: list[str] | None = None) -> int:
             name="sdm-install-cli",
             daemon=True,
         ).start()
+        # 菜单栏图标必须在主线程装（NSStatusItem 的要求），这里正好
+        # 是主线程。
+        _install_status_bar(bridge, window)
 
     def on_url_request() -> None:
         """处理 `superdownloadmanager://` URL scheme。

@@ -137,6 +137,20 @@ def common_args(
         # 前端资源
         args.extend(["--add-data", f"{ROOT / 'sdm' / 'gui' / 'assets'}{SEP}sdm/gui/assets"])
 
+    # 应用图标。
+    #
+    # 不传 --icon 的话 PyInstaller 会用它自己那个默认图标，用户在
+    # 访达和 Dock 里看到的是一把扳手。
+    #
+    # macOS 要 .icns，Windows 要 .ico，平台不一样不能混用——传错
+    # 格式 PyInstaller 会直接报错退出。
+    if windowed:
+        icon = ROOT / "resources" / (
+            "AppIcon.icns" if platform_dir() == "macos" else "AppIcon.ico"
+        )
+        if icon.is_file():
+            args.extend(["--icon", str(icon)])
+
     for src, dest in extra_data or []:
         args.extend(["--add-data", f"{src}{SEP}{dest}"])
 

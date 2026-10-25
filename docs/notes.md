@@ -51,6 +51,54 @@ Python 重写版。Swift 实现保留在仓库根目录的 `Engine/` `App/` `CLI
 
 `docs/functional-inventory.md` 记录了 Swift 版的 191 个功能点与 35 项重构风险，是功能完整性的验收基准。`docs/ui-spec.md` 是 UI 规范。
 
+## v2.0.3 应用图标
+
+打包时没传 `--icon`，PyInstaller 就用它自己那个默认图标。用户看到的
+是访达和 Dock 里一把扳手。
+
+图标资源本来就在仓库里（Swift 版留下的）：
+
+- `Resources/AppIcon.icns` —— macOS 用，509 KB，ic12 格式
+- `App/Assets.xcassets/AppIcon.appiconset/` —— 全套 PNG
+
+Windows 那边没有 .ico，用 `pymain/resources/AppIcon.ico`——从
+appiconset 的 PNG 手写 ICO 容器（Vista 以后支持 PNG 压缩的 ICO：
+6 字节头 + 16 字节目录项 + PNG 数据）。7 个尺寸，16 到 256。
+
+两个都复制到 `pymain/resources/`，让 Python 子项目自包含。
+
+**PyInstaller 的 `--icon` 平台相关**：macOS 收 .icns，Windows 收 .ico，
+传错格式直接报错退出。
+
+## PyObjC 踩的坑
+
+macOS 菜单栏图标（NSStatusItem）用 PyObjC 实现，几个不查文档就会卡
+住的地方：
+
+| 坑 | 现象 | 解法 |
+|---|---|---|
+| `variableLength` 拿不到 | Swift 里是 `NSStatusItem.variableLength` 类属性，ObjC 里是宏 `#define variableLength -1`，PyObjC 不暴露 | 用常量 `NSVariableStatusItemLength`（-1） |
+| 类里的内部方法被当成 selector | `_run` 不是 ObjC 方法名，PyObjC 照样转换，签名对不上就 `BadPrototypeError` | 内部辅助函数放到类外面 |
+| selector 字符串怎么变 SEL | `objc.selectorFromString` / `objc.namedSelector` 都不对（前者不存在，后者返回 Python 函数不能脱 Python 化） | `Foundation.NSSelectorFromString("addURL:")` |
+| 方法名到 selector 的映射 | Python 的 `addURL_` 对应 ObjC 的 `addURL:` | 用 `respondsToSelector_` 验证，不报错但点了没反应 |
+
+NSStatusItem 必须在主线程创建——GUI 的 `on_loaded` 回调正好在主线程。
+
+## 关窗口后 app 常驻：pywebview 做不到
+
+Swift 版关闭窗口后 app 还活着（SwiftUI App + 状态栏图标），能从菜单
+栏唤回。Python 版做不到，两个原因：
+
+1. **closing 事件不可靠**。pywebview 的 `Event.set()` 在非锁模式下把
+   handler 扔到另一个线程跑，然后**立刻**检查返回值——几乎必然读到
+   空的 `return_values`，所以「返回 False 取消关闭」基本不生效。
+2. **窗口关掉 `webview.start()` 就返回**，main 结束，进程退出。
+
+菜单栏图标本身能用（打开主窗口、加 URL、Finder、设置、关于、退出），
+但「关窗口后常驻」没做。设置页那个「关闭窗口时隐藏 Dock 图标」开关
+（Swift 版的 `sdm.hideDockWhenWindowClosed`）在 Python 版是死的——字段
+在、UI 在、功能没接。
+
 ## v2.0.2 分发：为什么只有一个包
 
 早先 macOS 发两个包（`SuperDownloadManager-macOS.zip` 和 `sdm-macOS.zip`），
