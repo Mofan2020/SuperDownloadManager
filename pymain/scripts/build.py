@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,14 @@ VERSION_FILE = ROOT / "sdm" / "version.py"
 
 def run(cmd: list[str], **kw) -> int:
     print(f"$ {' '.join(cmd)}", flush=True)
+    # 子进程（PyInstaller）也要用 UTF-8 输出。
+    #
+    # Windows 上子进程默认用 locale 编码（GBK）写 stdout，父进程
+    # 按 UTF-8 解就会乱码。PYTHONIOENCODING 是子进程读得懂的
+    # 环境变量，PyInstaller 是 Python 程序，会认。
+    env = dict(os.environ)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    kw.setdefault("env", env)
     return subprocess.call(cmd, **kw)
 
 
@@ -350,6 +359,7 @@ def build_macos() -> bool:
     verify = subprocess.run(
         ["codesign", "--verify", "--deep", "--strict", str(app)],
         capture_output=True,
+        errors="replace",
         text=True,
     )
     if verify.returncode != 0:
@@ -389,6 +399,7 @@ def _codesign(path: Path) -> bool:
     result = subprocess.run(
         ["codesign", "--force", "--sign", "-", str(path)],
         capture_output=True,
+        errors="replace",
         text=True,
     )
     if result.returncode != 0:
@@ -412,6 +423,7 @@ def smoke_test(bin_dir: Path, darwin: bool, helpers: Path | None = None) -> bool
         result = subprocess.run(
             [str(gui), "--self-test"],
             capture_output=True,
+            errors="replace",
             text=True,
             timeout=120,
         )
@@ -454,6 +466,7 @@ def smoke_test(bin_dir: Path, darwin: bool, helpers: Path | None = None) -> bool
         result = subprocess.run(
             [str(cli), "ping"],
             capture_output=True,
+            errors="replace",
             text=True,
             timeout=120,
         )
@@ -479,7 +492,25 @@ def smoke_test(bin_dir: Path, darwin: bool, helpers: Path | None = None) -> bool
     return ok
 
 
+def _force_utf8_stdio() -> None:
+    """把 stdout/stderr 切到 UTF-8。
+
+    Windows 控制台默认用 locale 编码（简体中文系统是 GBK）。
+    这个脚本打印中文，编码对不上会抛 UnicodeEncodeError——
+    打包跑到一半崩掉，比打包失败更难查。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
 def main() -> int:
+    _force_utf8_stdio()
     ap = argparse.ArgumentParser()
     ap.add_argument("--mac", action="store_true")
     ap.add_argument("--windows", action="store_true")
