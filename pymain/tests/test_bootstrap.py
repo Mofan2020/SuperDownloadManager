@@ -6,11 +6,20 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
+import sys
 from pathlib import Path
 
+import pytest
+
 from sdm.gui import bootstrap
+
+# launchd 是 macOS 专属的。register_daemon 在别的平台压根不会被
+# ensure_installed 调到，直接测它只会撞上 os.getuid 不存在。
+macos_only = pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="launchd 只在 macOS 上有",
+)
 
 
 def _fake_resources(tmp_path: Path) -> Path:
@@ -46,7 +55,9 @@ def test_install_cli_creates_symlink(tmp_path, monkeypatch):
     assert result["in_path"] is True
     link = target / "sdm"
     assert link.is_symlink()
-    assert os.readlink(link) == str(resources / "sdm-cli" / "sdm")
+    # 比 resolve 后的路径：Windows 上 os.readlink 返回带 \\?\ 前缀的
+    # 规范化路径，跟建的时候用的字符串永远不相等。
+    assert link.resolve() == (resources / "sdm-cli" / "sdm").resolve()
 
 
 def test_install_cli_is_idempotent(tmp_path, monkeypatch):
@@ -85,7 +96,7 @@ def test_install_cli_repoints_after_app_moved(tmp_path, monkeypatch):
 
     assert result["ok"] is True
     assert result["reason"] == "installed"
-    assert os.readlink(target / "sdm") == str(new_cli)
+    assert (target / "sdm").resolve() == new_cli.resolve()
 
 
 def test_install_cli_does_not_touch_foreign_command(tmp_path, monkeypatch):
@@ -105,6 +116,30 @@ def test_install_cli_does_not_touch_foreign_command(tmp_path, monkeypatch):
     assert result["reason"] == "conflict"
     assert result["path"] == str(foreign)
     assert not (target / "sdm").exists()
+
+
+def test_install_cli_does_not_delete_plain_file(tmp_path, monkeypatch):
+    """那个位置已经有普通文件时，不能删——可能是用户自己放的同名工具。
+
+    之前的实现是 `if link.is_symlink() or link.exists(): link.unlink()`，
+    普通文件会被直接删掉。
+    """
+    resources = _fake_resources(tmp_path)
+    target = tmp_path / "bin"
+    target.mkdir()
+    plain = target / "sdm"
+    plain.write_text("#!/bin/sh\n# 用户自己放的\n", encoding="utf-8")
+
+    monkeypatch.setattr(bootstrap, "_pick_cli_dir", lambda: (target, True))
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
+
+    result = bootstrap.install_cli(resources)
+
+    assert result["ok"] is False
+    assert result["reason"] == "conflict"
+    assert plain.exists(), "用户的文件被删了"
+    assert not plain.is_symlink()
+    assert plain.read_text(encoding="utf-8") == "#!/bin/sh\n# 用户自己放的\n"
 
 
 def test_install_cli_missing_binary(tmp_path, monkeypatch):
@@ -138,6 +173,7 @@ class _FakeRun:
         return code
 
 
+@macos_only
 def test_register_daemon_writes_plist_and_loads(tmp_path, monkeypatch):
     resources = _fake_resources(tmp_path)
     home = tmp_path / "home"
@@ -168,6 +204,7 @@ def test_register_daemon_writes_plist_and_loads(tmp_path, monkeypatch):
             assert any("gui/501" in part for part in call), call
 
 
+@macos_only
 def test_register_daemon_does_not_restart_when_loaded(tmp_path, monkeypatch):
     """daemon 已经在跑就别 kickstart——那会打断正在传的文件。"""
     resources = _fake_resources(tmp_path)
@@ -188,6 +225,7 @@ def test_register_daemon_does_not_restart_when_loaded(tmp_path, monkeypatch):
     assert "bootstrap" not in verbs
 
 
+@macos_only
 def test_register_daemon_missing_binary(tmp_path, monkeypatch):
     resources = tmp_path / "Resources"
     resources.mkdir()

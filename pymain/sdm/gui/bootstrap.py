@@ -109,11 +109,29 @@ def install_cli(resources: Path) -> dict:
 
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
-        if link.is_symlink() or link.exists():
-            current = os.readlink(link) if link.is_symlink() else ""
-            if current == str(cli_bin):
+        if link.is_symlink():
+            # 比 resolve 后的路径，不比原始字符串。
+            #
+            # Windows 上 os.readlink 返回的是带 \\?\ 前缀的规范化路径
+            # （\\?\C:\...），跟建的时候用的字符串永远不相等——直接比
+            # 字符串的话幂等判断在 Windows 上恒为假，每次启动都重装。
+            # macOS 上 /tmp 之类的路径也可能有 symlink 差异。
+            try:
+                same = link.resolve() == cli_bin.resolve()
+            except OSError:
+                same = False
+            if same:
                 return {"ok": True, "reason": "already", "path": str(link), "in_path": in_path}
             link.unlink()
+        elif link.exists():
+            # 那个位置已经有个普通文件——可能是用户自己放的同名工具。
+            # 不删它，报告冲突让用户自己决定。
+            return {
+                "ok": False,
+                "reason": "conflict",
+                "path": str(link),
+                "in_path": in_path,
+            }
         link.symlink_to(cli_bin)
     except OSError as err:
         return {"ok": False, "reason": f"symlink_failed: {err}", "path": str(link), "in_path": in_path}

@@ -51,6 +51,43 @@ Python 重写版。Swift 实现保留在仓库根目录的 `Engine/` `App/` `CLI
 
 `docs/functional-inventory.md` 记录了 Swift 版的 191 个功能点与 35 项重构风险，是功能完整性的验收基准。`docs/ui-spec.md` 是 UI 规范。
 
+## v2.0.2 分发：为什么只有一个包
+
+早先 macOS 发两个包（`SuperDownloadManager-macOS.zip` 和 `sdm-macOS.zip`），
+Windows 发三个（GUI / CLI / daemon）。理由是「用户可能只想拿命令行工具，
+不装整个 app」。
+
+这个理由站不住：CLI 需要的 daemon、站点规则、计划任务、历史都在 app 里，
+只装 CLI 等于装了个残废的。而且用户还得手动跑 `install.sh` 才能用。
+
+现在的分发：
+
+| 平台 | 包 | CLI 和 daemon 在哪 |
+|---|---|---|
+| macOS | `SuperDownloadManager-macOS.zip` | `.app/Contents/Resources/sdm-cli/` 和 `sdmd-daemon/` |
+| Windows | `SuperDownloadManager-Windows.zip` | GUI exe 内的 zip，首次运行时解到 `%LOCALAPPDATA%` |
+
+GUI 首次启动时在后台线程里做安装（`sdm/gui/bootstrap.py`）：
+
+- macOS：软链 `sdm` 到 `/usr/local/bin`（装不进去退回 `~/.local/bin`），
+  写并加载 daemon 的 LaunchAgent
+- Windows：解出 CLI/daemon，写 `.cmd` shim，用 `winreg` 改用户 PATH，
+  `schtasks` 注册登录计划任务
+
+几个刻意的取舍：
+
+- **不改用户的 shell 配置文件**。往 `~/.zshrc` 里塞 PATH 是侵入式行为。
+  装不到 PATH 上的目录时，界面提示用户，不擅自改配置。
+- **PATH 里已有同名命令不动**。可能是用户自己装的别的工具，覆盖掉会让人
+  怀疑人生。报告冲突，让用户自己决定。
+- **daemon 已加载时不 kickstart**。kickstart 会把正在传的文件打断。
+  只有 plist 内容变了才重启。
+- **Windows 用 winreg 而不是 setx**。setx 有 1024 字符截断，老机器的 PATH
+  经常超。
+
+`install.sh` 和 `install.ps1` 仍然保留在仓库里——用户想重装或换安装位置
+时用得上，只是不再随 release 分发。
+
 ## v2.0 暂不做
 
 || # | 项 | 原因 |
