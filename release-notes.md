@@ -1,4 +1,4 @@
-## v2.0.0
+## v2.0.1
 
 Python 重写版。跨 macOS、Windows、Linux，界面换成液态玻璃。
 

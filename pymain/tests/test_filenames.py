@@ -113,7 +113,7 @@ class TestEdgeCases:
 
     def test_realistic_github_name(self) -> None:
         # GitHub release 上带冒号和斜杠的名字很常见
-        out = sanitize_filename("SuperDownloadManager-v2.0.0:beta/1.zip")
+        out = sanitize_filename("SuperDownloadManager-v2.0.1:beta/1.zip")
         for ch in '\\/:*?"<>|':
             assert ch not in out
 

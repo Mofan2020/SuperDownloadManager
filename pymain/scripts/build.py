@@ -54,7 +54,7 @@ def read_version() -> tuple[str, int]:
     version = build = "0.0.0"
     for line in text.splitlines():
         line = line.strip()
-        # version.py 里是 `__version__ = "2.0.0"`，不是 `VERSION = ...`
+        # version.py 里是 `__version__ = "2.0.1"`，不是 `VERSION = ...`
         if line.startswith("__version__"):
             version = line.split("=", 1)[1].strip().strip('"').strip("'")
         elif line.startswith("BUILD_NUMBER"):
