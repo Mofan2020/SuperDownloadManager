@@ -13,6 +13,7 @@ bootloader/images/icon-windowed.icns，不报错、不警告——用户装上
 from __future__ import annotations
 
 import struct
+import sys
 from pathlib import Path
 
 import pytest
@@ -98,7 +99,10 @@ def test_build_args_include_icon():
 
     icon_path = Path(args[args.index("--icon") + 1])
     assert icon_path.is_file(), f"--icon 指向的文件不存在：{icon_path}"
-    assert icon_path.suffix == ".icns", f"macOS 的图标应该是 .icns：{icon_path}"
+    # 图标格式跟平台走：macOS 收 .icns，Windows 收 .ico。
+    # 传错格式 PyInstaller 会直接报错退出。
+    expected = ".ico" if sys.platform == "win32" else ".icns"
+    assert icon_path.suffix == expected, f"当前平台的图标应该是 {expected}：{icon_path}"
 
 
 def test_cli_build_has_no_icon():

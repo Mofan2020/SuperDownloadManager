@@ -83,12 +83,22 @@ def test_config_dir_respects_xdg_data_home(tmp_path, monkeypatch):
 
 
 def test_download_dir_is_home_downloads(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    assert paths.download_dir() == tmp_path / "Downloads"
+    # Path.home() 在 Windows 上读 USERPROFILE，POSIX 上读 HOME——
+    # 改错环境变量的话测试在 Windows 上必然失败。
+    home = tmp_path / "home"
+    if paths.is_windows():
+        monkeypatch.setenv("USERPROFILE", str(home))
+    else:
+        monkeypatch.setenv("HOME", str(home))
+    assert paths.download_dir() == home / "Downloads"
 
 
 def test_ensure_dirs_creates_everything(tmp_path, monkeypatch):
+    # 每个平台用的环境变量不一样，全设上——漏一个就会在真机上
+    # 往真实目录里建文件夹。
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     paths.ensure_dirs()

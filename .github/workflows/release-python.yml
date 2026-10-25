@@ -75,9 +75,18 @@ jobs:
             echo "::error::图标文件不存在：$ICON_PATH"
             exit 1
           fi
-          # PyInstaller 的默认图标是这个文件。撞上了就说明 --icon 没生效。
-          PYI_DEFAULT="/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/site-packages/PyInstaller/bootloader/images/icon-windowed.icns"
-          if [ -f "$PYI_DEFAULT" ] && cmp -s "$ICON_PATH" "$PYI_DEFAULT"; then
+          # PyInstaller 的默认图标是 bootloader/images/icon-windowed.icns。
+          # 撞上了就说明 --icon 没生效，PyInstaller 静默退回了它自带的。
+          #
+          # 路径用 python 查，不写死——写死的路径在 python 安装位置
+          # 变了的时候会让这个检查静默跳过，等于没有检查。
+          PYI_DEFAULT=$(python -c "import PyInstaller, os; print(os.path.join(os.path.dirname(PyInstaller.__file__), 'bootloader', 'images', 'icon-windowed.icns'))")
+          echo "PyInstaller 默认图标：$PYI_DEFAULT"
+          if [ ! -f "$PYI_DEFAULT" ]; then
+            echo "::error::找不到 PyInstaller 的默认图标，无法判断 --icon 是否生效：$PYI_DEFAULT"
+            exit 1
+          fi
+          if cmp -s "$ICON_PATH" "$PYI_DEFAULT"; then
             echo "::error::用的是 PyInstaller 默认图标，--icon 没生效"
             exit 1
           fi
