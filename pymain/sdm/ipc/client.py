@@ -71,10 +71,21 @@ class IPCClient:
             sock.close()
 
     def _exchange_tcp(self, payload: bytes) -> str:
+        target = ("127.0.0.1", self.port or SOCKET_PORT_WINDOWS)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(self.timeout)
+        # 建连用短超时，守护进程没跑时要立刻报，而不是干等
+        # 30 秒。Windows 上连没人监听的端口不一定会立刻拒绝，
+        # 有防火墙时会一路等到超时。
+        sock.settimeout(min(self.timeout, 3.0))
         try:
-            sock.connect(("127.0.0.1", self.port or SOCKET_PORT_WINDOWS))
+            try:
+                sock.connect(target)
+            except TimeoutError as err:
+                raise ClientError(
+                    f"连接守护进程超时（127.0.0.1:{target[1]}）：sdmd 在运行吗？"
+                ) from err
+            # 连上了，接下来是正常请求，用完整超时
+            sock.settimeout(self.timeout)
             sock.sendall(payload + b"\n")
             buffer = b""
             while not buffer.endswith(b"\n"):
