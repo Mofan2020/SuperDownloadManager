@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform as _platform
 import shutil
 import subprocess
 import sys
@@ -368,6 +369,20 @@ def build_macos() -> bool:
     print("签名验证通过")
 
     print(f"macOS 打包完成（{time.time() - t0:.0f}s）：{app}")
+
+    # 生成 DMG。
+    #
+    # 参考了 Swift 版的 make-dmg.sh，但直接在 build.py 里做更简单：
+    # - 不需要额外的脚本文件
+    # - build.py 一次打包完成所有产物（.app + dmg）
+    # - 输出目录和版本号与 .app 一致
+    #
+    # 输出路径：~/Downloads/Archives/SuperDownloadManager-<version>-<arch>.dmg
+    # 优先用 create-dmg（可选工具），回退到 hdiutil。
+    if not _make_dmg(app, version, _platform.system()):
+        print("DMG 生成失败")
+        return False
+
     return smoke_test(app / "Contents" / "MacOS", darwin=True, helpers=resources)
 
 
@@ -412,6 +427,88 @@ def _codesign(path: Path) -> bool:
         print(f"  codesign 失败 {path.name}: {result.stderr.strip()[:200]}")
         return False
     return True
+
+
+def _make_dmg(app: Path, version: str, system: str) -> bool:
+    """从 .app 生成 DMG，输出到 ~/Downloads/Archives/"""
+    out_dir = Path.home() / "Downloads" / "Archives"
+    arch = "arm64" if system == "Darwin" else "x86_64"
+    out_name = f"SuperDownloadManager-{version}-{arch}.dmg"
+    out = out_dir / out_name
+
+    # 检查 .app 是否存在
+    if not app.exists():
+        print(f"[make-dmg] .app 不存在：{app}")
+        return False
+
+    # 创建输出目录
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 临时目录
+    tmp_dir = Path("/tmp/sdm-dmg-tmp") / str(os.getpid())
+    try:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(app, tmp_dir / app.name)
+    except Exception as e:
+        print(f"[make-dmg] 临时目录操作失败：{e}")
+        return False
+
+    # 优先用 create-dmg（可选工具）
+    if shutil.which("create-dmg") is not None:
+        try:
+            subprocess.run(
+                [
+                    "create-dmg",
+                    "--volname", "Super Download Manager",
+                    "--window-pos", "200", "120",
+                    "--window-size", "600", "400",
+                    "--icon-size", "100",
+                    "--icon", f"{app.name}", "175", "190",
+                    "--hide-extension", app.name,
+                    "--app-drop-link", "425", "190",
+                    str(out),
+                    str(tmp_dir),
+                ],
+                capture_output=True,
+                errors="replace",
+            )
+            # create-dmg 遇到 ad-hoc 签名问题会非零退出，但 dmg 仍然可能生成
+            if out.exists():
+                print(f"[make-dmg] create-dmg 生成成功：{out}")
+                print(f"[make-dmg] shasum: {subprocess.run(['shasum', '-a', '256', str(out)], capture_output=True, text=True).stdout.strip()}")
+                return True
+        except Exception as e:
+            print(f"[make-dmg] create-dmg 失败，回退到 hdiutil：{e}")
+
+    # 回退到 hdiutil
+    try:
+        subprocess.run(
+            [
+                "hdiutil", "create",
+                "-ov",
+                "-volname", "Super Download Manager",
+                "-fs", "HFS+",
+                "-srcfolder", str(tmp_dir),
+                "-format", "UDZO",
+                str(out),
+            ],
+            capture_output=True,
+            errors="replace",
+            check=True,
+        )
+        print(f"[make-dmg] hdiutil 生成成功：{out}")
+        print(f"[make-dmg] shasum: {subprocess.run(['shasum', '-a', '256', str(out)], capture_output=True, text=True).stdout.strip()}")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"[make-dmg] hdiutil 失败：{e.stderr.strip()[:200] if e.stderr else str(e)}")
+        return False
+    finally:
+        # 清理临时目录
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 def smoke_test(bin_dir: Path, darwin: bool, helpers: Path | None = None) -> bool:

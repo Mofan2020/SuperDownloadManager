@@ -53,20 +53,20 @@ Python 重写版。Swift 实现保留在仓库根目录的 `Engine/` `App/` `CLI
 
 ## v2.0 暂不做
 
-| # | 项 | 原因 |
+|| # | 项 | 原因 |
 |---|---|---|
-| 1 | 菜单栏常驻模式 | Swift 版用 `MenuBarExtra` 做常驻入口。pywebview 没有等价 API，要在 macOS 上做需要原生辅助进程。窗口 + 剪贴板监听 + 扩展派单覆盖了主要入口 |
-| 2 | 应用内自动更新 | Swift 版用 Sparkle，Python 版没有等价物。发版走 GitHub Releases |
-| 3 | DMG 封装 | 当前分发是 zip。`ditto` 解压拖进 `/Applications` 够用 |
-| 4 | 传输中的动态 split/merge | 只在传输**前**重规划。传输中切分要重开在途工作单元并重算 `bytesDone`，数据损坏风险高。Swift 版的 `RangePlanner.rearrange()` 从来没有调用方，属于同源问题 |
+| 1 | 菜单栏常驻模式 | Swift 版用 `MenuBarExtra` 做常驻入口。pywebview 没有等价 API，要在 macOS 上做需要原生辅助进程。窗口 + 剪贴板监听 + 扩展派单覆盖了主要入口。**PyObjC 可实现 NSStatusItem，但工程量不小** |
+| 2 | 应用内自动更新 | Swift 版用 Sparkle，Python 版没有等价物。发版走 GitHub Releases。**Sparkle 需要 Developer ID 签名 + appcast 服务器**，用户的 ad-hoc 签名方案本来就跑不了 |
+| 3 | DMG 封装 | **已实现**（本地 `build.py --mac` 生成 `~/Downloads/Archives/SuperDownloadManager-<version>-<arch>.dmg`，优先用 create-dmg，回退到 hdiutil） |
+| 4 | 传输中的动态 split/merge | 只在传输**前**重规划。传输中切分要重开在途工作单元并重算 `bytesDone`，数据损坏风险高。Swift 版的 `RangePlanner.rearrange()` 从来没有调用方，属于同源问题。**Python 版的传输前重规划比 Swift 版更完整** |
 
 ## v2.0 已知的妥协
 
-| # | 项 | 妥协 vs 影响 |
+|| # | 项 | 妥协 vs 影响 |
 |---|---|---|
-| 1 | **Windows 只在 CI runner 上编译过** | 打包脚本的 Windows 分支（`--add-data` 用 `;` 分隔、onedir 多目标、`--console`）按平台差异逐条核对过，但没有在 Windows 真机上跑过打包产物。真机验证留给 Windows 用户 |
+| 1 | **Windows 只在 CI runner 上编译过** | 打包脚本的 Windows 分支按平台差异逐条核对过，但没有在 Windows 真机上跑过打包产物。真机验证留给 Windows 用户 |
 | 2 | **分片布局在传输开始后固定** | 传输前会按文件大小和期望片大小重规划一次。传输中不再调整 |
-| 3 | **详情页分片表最多显示 64 行** | 分片数上限 128，全渲染 DOM 太大。超出部分用一行汇总 |
+| 3 | **详情页分片表最多显示 64 行** | 分片数上限 128，全渲染 DOM 太大。超出部分用一行汇总。**可优化为可滚动/可展开，让用户看到全部 128 个** |
 | 4 | **站点规则密码存系统钥匙串** | JSON 里不存密码。钥匙串不可用时规则退化为无认证 |
 | 5 | **扩展派单端口 7955 未做鉴权** | 只监听 loopback。跟 Swift 版一致 |
 
