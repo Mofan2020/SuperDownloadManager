@@ -864,12 +864,24 @@ def test_probe_error_retryability_rules():
 
 
 def test_probe_url_error_category_uses_the_status_taxonomy():
-    """探测失败要归到规格 §5.1 的类别里，不能一律算 network。"""
-    engine = DownloadEngine()
-    result = run_async(engine.probe_url, "https://example.com/definitely-missing-xyz.bin")
-    assert result["ok"] is False
-    # 404 → not_found（不是 network）
-    assert result["error_category"] in ("not_found", "client_error", "network")
+    """探测失败要归到规格 §5.1 的类别里，不能一律算 network。
+
+    **不打真网络。** 用本地的 RangeServer 逼一个 404 出来。
+    真去请求 example.com 有两个问题：一是 CI 依赖外网，二是
+    example.com 哪天对子路径改成返回 200，这条测试就会红——
+    而它红了没人知道是为什么。断言也松到 `in (...)`，
+    网不通时是 network 错误、网通了是 404，两种都能过，
+    等于没测。
+    """
+    srv = RangeServer(total_bytes=64 * 1024, force_status=404)
+    try:
+        engine = DownloadEngine()
+        result = run_async(engine.probe_url, srv.url)
+        assert result["ok"] is False
+        # 404 → not_found（不是 network）
+        assert result["error_category"] == "not_found"
+    finally:
+        srv.stop()
 
 
 def test_probe_error_category_rules():
