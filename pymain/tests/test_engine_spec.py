@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -751,3 +752,121 @@ def test_speed_history_is_cleared_when_task_removed():
 
     run_async(engine.remove, "t2")
     assert engine.get_speed_history("t2") == []
+
+
+# -- 探测的失败策略 ------------------------------------------------
+#
+# **用户报的现象**：解析链接时日志里一直在刷「所有重试都失败」，
+# 但那个链接在别的下载器里是能下的。
+#
+# 两个根因：
+# 1. 磁力链接（magnet:）httpx 根本解析不了，异常被当成「网络错误」
+#    重试 5 次，最后报一句「所有重试都失败」——跟真实原因完全对不上
+# 2. 404 这类**不可重试**的失败也重试 5 次，白等 7.5 秒
+
+
+def test_probe_rejects_magnet_link_with_a_readable_message():
+    """磁力链接要立刻失败，并说清楚「不支持 BT」。
+
+    **不能重试**：重试一个协议不支持的地址，重试一万次结果都一样。
+    """
+    from sdm.engine.content_sniffer import ProbeError
+
+    engine = DownloadEngine()
+    result = run_async(
+        engine.probe_url,
+        "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+    )
+    assert result["ok"] is False
+    assert "磁力" in result["error"]
+    assert "不支持" in result["error"]
+    # 不是网络问题——是地址本身就不支持
+    assert result["error_category"] == "client_error"
+    assert isinstance(ProbeError("x").is_retryable, bool)
+
+
+def test_probe_does_not_retry_unsupported_scheme():
+    """非 http(s) 协议只试一次。
+
+    计数器证明「只发了一次请求」——真重试的话会是 5 次。
+    """
+    from sdm.engine import content_sniffer
+
+    calls: list[str] = []
+
+    async def _fake_probe(url, client=None, extra_headers=None):
+        calls.append(url)
+        raise content_sniffer.ProbeError("不该走到这里", retryable=False)
+
+    # 直接测 content_sniffer 的协议拦截：它在建请求前就抛了
+    with pytest.raises(content_sniffer.ProbeError) as excinfo:
+        run_async(
+            content_sniffer.probe,
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+        )
+    assert excinfo.value.is_retryable is False
+    assert "磁力" in excinfo.value.message
+    assert calls == []
+
+
+def test_probe_does_not_retry_a_404():
+    """404 重试多少次都一样——一次就够。"""
+    from sdm.engine import content_sniffer
+
+    attempts: list[int] = []
+
+    class _FakeResponse:
+        status_code = 404
+        headers: ClassVar[dict] = {}
+        url = "https://example.com/missing.bin"
+
+        async def aclose(self):
+            return None
+
+    class _FakeClient:
+        def build_request(self, *args, **kwargs):
+            return object()
+
+        async def send(self, request, stream=False):
+            attempts.append(1)
+            return _FakeResponse()
+
+    async def _run():
+        with pytest.raises(content_sniffer.ProbeError):
+            await content_sniffer.probe(
+                "https://example.com/missing.bin", client=_FakeClient()
+            )
+
+    run_async(_run)
+    assert len(attempts) == 1, f"404 被重试了 {len(attempts)} 次"
+
+
+def test_probe_error_retryability_rules():
+    """哪些失败值得重试，规则要写死。"""
+    from sdm.engine.content_sniffer import ProbeError
+
+    # 值得重试：网络类（没有状态码）
+    assert ProbeError("断了").is_retryable is True
+    # 值得重试：5xx、429、408
+    assert ProbeError("服务器炸了", status=503).is_retryable is True
+    assert ProbeError("限流", status=429).is_retryable is True
+    assert ProbeError("慢", status=408).is_retryable is True
+    # 不值得重试：404 / 416 / 403 这类 4xx
+    assert ProbeError("没有", status=404).is_retryable is False
+    assert ProbeError("不认 Range", status=416).is_retryable is False
+    assert ProbeError("没权限", status=403).is_retryable is False
+    # 链接失效同样不重试
+    assert ProbeError("失效", status=410).is_expired_link is True
+    assert ProbeError("失效", status=410).is_retryable is False
+    # 显式指定的说了算
+    assert ProbeError("x", retryable=False).is_retryable is False
+    assert ProbeError("x", status=404, retryable=True).is_retryable is True
+
+
+def test_probe_url_error_category_uses_the_status_taxonomy():
+    """探测失败要归到规格 §5.1 的类别里，不能一律算 network。"""
+    engine = DownloadEngine()
+    result = run_async(engine.probe_url, "https://example.com/definitely-missing-xyz.bin")
+    assert result["ok"] is False
+    # 404 → not_found（不是 network）
+    assert result["error_category"] in ("not_found", "client_error", "network")

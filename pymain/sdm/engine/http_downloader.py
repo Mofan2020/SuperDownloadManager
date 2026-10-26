@@ -347,7 +347,17 @@ class HTTPDownloader:
                     extra_headers=request_headers,
                 )
             except ProbeError as err:
-                if err.is_expired_link:
+                # **不可重试的失败直接抛出去。**
+                #
+                # 404（文件不存在）、416（服务器不认这个 Range）、
+                # 磁力链接这类地址——重试多少次结果都一样。硬重试
+                # 只会让用户多等 7.5 秒，并在日志里刷一串「第 N 次
+                # 失败」，看起来像「所有重试都失败」，其实一次都
+                # 不会成功。
+                #
+                # 403/410/451（链接失效）也走这条路——它们本来就不
+                # 重试，交给上层进「等待新链接」状态。
+                if not err.is_retryable:
                     raise
                 last_error = err
             except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPError) as err:

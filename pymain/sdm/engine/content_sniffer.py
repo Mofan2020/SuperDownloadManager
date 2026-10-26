@@ -19,7 +19,7 @@ from __future__ import annotations
 import enum
 import re
 from dataclasses import dataclass
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 import httpx
 
@@ -30,17 +30,67 @@ log = get_logger()
 USER_AGENT = "SDM/2.0 (+https://github.com/Mofan2020/SuperDownloadManager)"
 
 
+#: 已知「不是 HTTP 文件下载」的协议。
+#:
+#: SDM 只做 HTTP(S) 的普通文件下载。磁力 / BT / ed2k / 迅雷这些
+#: 协议**一个都不支持**——要支持磁力得整个塞一个 BT 客户端进来
+#: （tracker 协议 + DHT + peer 连接 + piece 校验），那是另一个量级的
+#: 工程，不在当前范围内（见 `docs/notes.md` 的「v2.1.0 暂不做」）。
+#:
+#: 列在这里是为了**给用户一句人话**。没有这张表的话，磁力链接会
+#: 在 httpx 里炸成 `unknown url type: '/?xt=urn:btih:...'`，再被
+#: 重试 5 次，最后报一句「所有重试都失败」——用户完全看不出
+#: 「哦原来这是磁力链接，我们不支持」。
+UNSUPPORTED_SCHEMES: dict[str, str] = {
+    "magnet": "磁力链接（BT）",
+    "bt": "BitTorrent 链接",
+    "ed2k": "电驴（eDonkey）链接",
+    "thunder": "迅雷链接",
+    "flash": "快播（Flash）链接",
+    "mms": "MMS 媒体链接",
+    "rtmp": "RTMP 直播流",
+}
+
+
 class ProbeError(Exception):
     """探测失败。带 HTTP 状态码，方便上层区分「链接失效」和「探测出错」。"""
 
-    def __init__(self, message: str, status: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status: int | None = None,
+        *,
+        retryable: bool | None = None,
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.status = status
+        #: `None` = 按状态码自己判断。
+        self._retryable = retryable
 
     @property
     def is_expired_link(self) -> bool:
         return self.status in (403, 410, 451)
+
+    @property
+    def is_retryable(self) -> bool:
+        """这个失败值得重试吗？
+
+        **4xx（408/429 除外）重试多少次都一样**：404 是文件不存在，
+        416 是服务器不认这个 Range，403 是权限/防盗链。重试只是让
+        用户多等好几秒，还会在日志里刷一串「第 N 次失败」——
+        看起来就像「所有重试都失败」，其实一次都不会成功。
+
+        值得重试的是：网络断了、超时了、5xx（服务端抽风）、429
+        （被限流，等一会儿再来）、408（服务端让重试）。
+        """
+        if self._retryable is not None:
+            return self._retryable
+        if self.status is None:
+            return True
+        if self.status in (408, 429):
+            return True
+        return self.status >= 500
 
 
 @dataclass
@@ -318,6 +368,28 @@ async def probe(
             timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=None),
         )
     try:
+        # **先看协议，再发请求。**
+        #
+        # 磁力链接（magnet:）这类地址 httpx 根本解析不了，会炸成
+        # `unknown url type: '/?xt=urn:btih:...'`。不拦住的话这个
+        # 异常会被当成「网络错误」重试 5 次，最后报一句「所有重试
+        # 都失败」——用户看到的是一句完全对不上号的话。
+        #
+        # 这里在发请求之前拦下来，直接给一句「这是磁力链接，我们不
+        # 支持 BT」——用户看了就知道该换工具，而不是以为网络坏了。
+        scheme = urlparse(url).scheme.lower()
+        if scheme not in ("http", "https"):
+            label = UNSUPPORTED_SCHEMES.get(scheme)
+            if label:
+                raise ProbeError(
+                    f"这是{label}，SDM 只下载 HTTP(S) 的普通文件，不支持 BT/磁力",
+                    retryable=False,
+                )
+            raise ProbeError(
+                f"不支持的地址协议：{scheme or '（没有协议）'}。请用 http:// 或 https:// 开头的地址",
+                retryable=False,
+            )
+
         request_headers = merge_headers(
             {"User-Agent": USER_AGENT},
             extra_headers,
