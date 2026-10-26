@@ -356,7 +356,10 @@ class DownloadFlow:
             self.progress_channel.report(pre_existing)
 
         # 4. 并发跑分片
-        chunk_progress = ChunkProgress(self.progress_channel)
+        #
+        # `base=pre_existing`：续传时盘上已有的字节要算进汇总基数，
+        # 否则第一次上报比盘上已有的还小，进度条会倒退一次。
+        chunk_progress = ChunkProgress(self.progress_channel, base=pre_existing)
         session_task = asyncio.create_task(self._persist_session_loop())
         try:
             await self._run_chunks(download_url, planner, assembler, chunk_progress, use_range)

@@ -41,7 +41,19 @@ class ProgressChannel:
         self._loop = loop
 
     def report(self, total_bytes: int) -> None:
-        """上报文件级总字节数。"""
+        """上报文件级总字节数。
+
+        **窗口到期时必须送「这次」的值，不能送 `_pending`。**
+
+        `_pending` 是上一个窗口攒下来的旧值，一定比这次的
+        `total_bytes` 小。送旧值等于把这次的增量直接丢掉——
+        而且丢的是**最后一段**：下载末尾那次上报正好撞上窗口到期，
+        它的值就被 `_pending = None` 抹了，之后 `flush()` 也没东西可发。
+
+        实测后果：2 MB 的文件最终报成 2031616，正好少一个 64 KB
+        块（进度条停在 98.97% 再也不动），而且是概率性的——
+        看最后一个数据块落在窗口的哪一侧。
+        """
         with self._lock:
             now = time.monotonic()
             if now - self._last_reported_at < self._coalesce:
@@ -49,9 +61,8 @@ class ProgressChannel:
                 self._pending = total_bytes
                 return
             self._last_reported_at = now
-            to_send = self._pending if self._pending is not None else total_bytes
             self._pending = None
-        self._deliver(to_send)
+        self._deliver(total_bytes)
 
     def flush(self) -> None:
         """把待发值立即送出去，忽略合并窗口。"""
@@ -93,10 +104,17 @@ class ProgressChannel:
 class ChunkProgress:
     """分片进度汇总器：把所有分片的上报求和。"""
 
-    def __init__(self, channel: ProgressChannel) -> None:
+    def __init__(self, channel: ProgressChannel, base: int = 0) -> None:
+        """`base` 是续传时盘上已经有的字节数。
+
+        **必须把它算进来。** 汇总器从 0 起算的话，续传后第一次
+        上报报的是「本次下载的字节数」，比盘上已有的少——进度条
+        会**倒退**（引擎的 `summary.bytes_done` 直接被这个值覆盖），
+        紧接着算出来的速度也是个巨大的假值。
+        """
         self._channel = channel
         self._lock = threading.Lock()
-        self._aggregate = 0
+        self._aggregate = max(0, base)
 
     def report(self, per_chunk_bytes: int) -> None:
         """上报某个分片本次写入了多少字节（相对该分片自己的区间）。
