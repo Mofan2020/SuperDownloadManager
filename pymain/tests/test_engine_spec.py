@@ -870,3 +870,60 @@ def test_probe_url_error_category_uses_the_status_taxonomy():
     assert result["ok"] is False
     # 404 → not_found（不是 network）
     assert result["error_category"] in ("not_found", "client_error", "network")
+
+
+def test_probe_error_category_rules():
+    """`ProbeError.category` 的规则表。
+
+    **这个类别决定重试策略**（规格 §5.1），所以规则要写死：
+    链接失效 → auth；404 → not_found；416 → range_error；
+    磁力链接这种地址不支持 → client_error；网络断了 → network。
+    """
+    from sdm.engine.content_sniffer import ProbeError
+
+    # 链接失效（403/410/451）→ auth
+    assert ProbeError("失效", status=410).category is ErrorCategory.AUTH
+    # 状态码归类
+    assert ProbeError("没有", status=404).category is ErrorCategory.NOT_FOUND
+    assert ProbeError("不认 Range", status=416).category is ErrorCategory.RANGE_ERROR
+    assert ProbeError("炸了", status=503).category is ErrorCategory.SERVER_ERROR
+    # 磁力链接：地址本身不支持，不是网络问题
+    assert ProbeError("磁力", retryable=False).category is ErrorCategory.CLIENT_ERROR
+    # 其余（网络断了、超时）→ network
+    assert ProbeError("断了").category is ErrorCategory.NETWORK
+
+
+def test_downloading_a_magnet_link_fails_as_client_error(tmp_path):
+    """**下载路径**上磁力链接也要归成 client_error，且不可重试。
+
+    之前下载那侧一律按 network 算：任务列表里显示成「网络连接
+    中断，将自动重试」，还标着可重试——用户点了重试还是同样的
+    结果。而新建任务对话框那边已经归成 client_error 了，两边
+    说法不一致。
+    """
+    flow = DownloadFlow(
+        url="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+        destination=tmp_path / "magnet.bin",
+    )
+    with pytest.raises(FlowError) as excinfo:
+        run_async(flow.run)
+
+    assert excinfo.value.category is ErrorCategory.CLIENT_ERROR
+    assert excinfo.value.to_task_error().retryable is False
+    assert "磁力" in excinfo.value.detail
+
+
+def test_rate_limited_probe_failure_stays_retryable():
+    """429 是限流，等一会儿就好——必须判成可重试。
+
+    之前 `FlowError.to_task_error()` 自己写了一份类别列表，漏了
+    `rate_limited`，429 被判成不可重试。可限流等几分钟就好，
+    不该让用户手动重来。
+    """
+    err = FlowError(
+        FlowFailure.PROBE_FAILED.value,
+        "慢点",
+        category=ErrorCategory.RATE_LIMITED,
+        status=429,
+    )
+    assert err.to_task_error().retryable is True

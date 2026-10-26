@@ -31,7 +31,7 @@ from ..logging_setup import CAT_ENGINE, CAT_QUEUE, CAT_STORE, get_logger
 from .categories import category_from_url
 from .content_sniffer import ProbeError
 from .download_flow import DownloadFlow, FlowError, FlowFailure
-from .errors import ErrorCategory, TaskError, classify_status
+from .errors import ErrorCategory, TaskError
 from .file_assembler import _unlink_with_retry
 from .filenames import sanitize_filename
 from .http_downloader import DownloadError, HTTPDownloader
@@ -74,25 +74,6 @@ def _is_terminal_state(state: str) -> bool:
         return TaskState(state).is_terminal
     except ValueError:
         return False
-
-
-def _probe_error_category(err: ProbeError) -> ErrorCategory:
-    """探测失败该归到哪一类错误（规格 §5.1）。
-
-    - **链接失效**（403/410/451）→ `auth`。
-    - **有状态码的** → 按状态码归类（404 → `not_found`，
-      416 → `range_error`，5xx → `server_error`）。
-    - **磁力链接这类地址本身就不支持** → `client_error`。
-      它不是网络问题——网络好着呢，是这个地址压根不走 HTTP。
-    - 剩下的（网络断了、超时）→ `network`。
-    """
-    if err.is_expired_link:
-        return ErrorCategory.AUTH
-    if err.status is not None:
-        return classify_status(err.status)
-    if not err.is_retryable:
-        return ErrorCategory.CLIENT_ERROR
-    return ErrorCategory.NETWORK
 
 
 @dataclass
@@ -444,7 +425,7 @@ class DownloadEngine:
                 "final_url": None,
                 "accepts_ranges": False,
                 "error": err.message,
-                "error_category": str(_probe_error_category(err)),
+                "error_category": str(err.category),
             }
         except Exception as err:
             return {

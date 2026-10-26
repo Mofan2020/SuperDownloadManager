@@ -29,7 +29,7 @@ from pathlib import Path
 
 from ..logging_setup import CAT_ENGINE, CAT_STORE, get_logger
 from .content_sniffer import ContentProbe, ProbeError
-from .errors import ErrorCategory, TaskError, error_for_status
+from .errors import RETRYABLE_BY_DEFAULT, ErrorCategory, TaskError
 from .file_assembler import FileAssembler
 from .http_downloader import DownloadError, HTTPDownloader
 from .progress_channel import ChunkProgress, ProgressChannel
@@ -73,8 +73,10 @@ class FlowError(Exception):
             category=self.category,
             detail=self.detail or str(self),
             status=self.status,
-            retryable=self.category
-            in (ErrorCategory.NETWORK, ErrorCategory.TIMEOUT, ErrorCategory.SERVER_ERROR),
+            # 用共享的默认可重试表，别自己写一份——之前这里漏了
+            # `rate_limited`，429（被限流）被判成不可重试，可限流
+            # 等一会儿就好，不该让用户手动重来。
+            retryable=self.category in RETRYABLE_BY_DEFAULT,
         )
 
 
@@ -311,18 +313,18 @@ class DownloadFlow:
             # 「等待新链接」状态，已下载的字节要留着。
             if err.is_expired_link:
                 raise FlowError(FlowFailure.EXPIRED_LINK.value, err.message) from err
-            if err.status:
-                # 状态码能定类别就按状态码定（规格 §5.1）：
-                # 404 是「文件不存在」，不该重试；503 是「服务器错误」，
-                # 该重试。两者在 probe_failed 这一个 kind 下分不开。
-                status_error = error_for_status(err.status, err.message)
-                raise FlowError(
-                    FlowFailure.PROBE_FAILED.value,
-                    err.message,
-                    category=status_error.category,
-                    status=err.status,
-                ) from err
-            raise FlowError(FlowFailure.PROBE_FAILED.value, err.message) from err
+            # 类别由 `ProbeError` 自己给（规格 §5.1）。
+            #
+            # **不能一律按 `network` 算**：404 是「文件不存在」，
+            # 503 是「服务器错误」，磁力链接是「这个地址压根不走
+            # HTTP」——三者的重试策略完全不同。`ProbeError.category`
+            # 跟新建任务对话框用的是同一份，不会出现两边说法不一。
+            raise FlowError(
+                FlowFailure.PROBE_FAILED.value,
+                err.message,
+                category=err.category,
+                status=err.status,
+            ) from err
         except Exception as err:
             raise FlowError(FlowFailure.PROBE_FAILED.value, str(err)) from err
 

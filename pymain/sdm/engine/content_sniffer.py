@@ -24,6 +24,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from ..logging_setup import CAT_NET, get_logger
+from .errors import ErrorCategory, classify_status
 
 log = get_logger()
 
@@ -91,6 +92,25 @@ class ProbeError(Exception):
         if self.status in (408, 429):
             return True
         return self.status >= 500
+
+    @property
+    def category(self) -> ErrorCategory:
+        """这个探测失败该归到哪一类错误（规格 §5.1）。
+
+        **放在 `ProbeError` 上，而不是散在各个调用方**，是为了让
+        「新建任务对话框」和「真的开跑」两条路径给出**同一个类别**。
+        之前只有对话框那侧分类，下载那侧一律按 `network` 算——
+        磁力链接在任务列表里显示成「网络连接中断，将自动重试」，
+        还标着可重试，跟真实原因完全对不上号。
+        """
+        if self.is_expired_link:
+            return ErrorCategory.AUTH
+        if self.status is not None:
+            return classify_status(self.status)
+        if not self.is_retryable:
+            # 磁力链接这类：地址本身就不支持，不是网络问题。
+            return ErrorCategory.CLIENT_ERROR
+        return ErrorCategory.NETWORK
 
 
 @dataclass
