@@ -402,3 +402,61 @@ def test_url_scheme_name_matches_the_gui_module() -> None:
 
     assert system_integration.URL_SCHEME == url_scheme.URL_SCHEME
     assert system_integration.URL_SCHEME == "superdownloadmanager"
+
+
+# -- 开机自启：开启时不能当场拉起进程 ------------------------------
+#
+# **用户报的现象**：点一下「开机自启」开关，立刻多出一个 SDM 进程。
+#
+# 根因在 macOS 的实现里：开启自启时跑了 `launchctl load`。
+# `launchctl load` 不只是「注册」，它**当场把 job 跑起来**——所以
+# 用户点一下开关就多一个进程。
+#
+# 正确做法是只写 plist：launchd 每次登录都会扫 `~/Library/LaunchAgents/`，
+# 里面的 plist 会被装进 launchd 域，`RunAtLoad` 为真就启动。
+
+
+def test_enabling_open_at_login_does_not_launch_anything(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """开启自启时**不能**跑 launchctl（那会当场把 app 拉起来）。"""
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        return None
+
+    monkeypatch.setattr(system_integration.subprocess, "run", _fake_run)
+    monkeypatch.setattr(system_integration.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(system_integration, "get_app_executable", lambda: "/Applications/SDM.app/Contents/MacOS/SDM")
+    # plist 写到临时目录，别碰用户真实的 ~/Library/LaunchAgents
+    tmp_agents = tmp_path_factory.mktemp("agents")
+    monkeypatch.setattr(system_integration.Path, "home", staticmethod(lambda: tmp_agents))
+
+    ok = system_integration.set_open_at_login(True)
+
+    assert ok is True
+    for cmd in calls:
+        assert "launchctl" not in cmd, f"开启自启不该跑 launchctl，却跑了 {cmd}"
+
+
+def test_enabling_open_at_login_writes_the_launch_agent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """自启还是要真写 plist 的——只是不启动它。"""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(system_integration.subprocess, "run", lambda cmd, *a, **k: calls.append(list(cmd)))
+    monkeypatch.setattr(system_integration.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(system_integration, "get_app_executable", lambda: "/Applications/SDM.app/Contents/MacOS/SDM")
+    tmp_agents = tmp_path_factory.mktemp("agents2")
+    monkeypatch.setattr(system_integration.Path, "home", staticmethod(lambda: tmp_agents))
+
+    assert system_integration.set_open_at_login(True) is True
+
+    from sdm.version import BUNDLE_ID
+
+    plist = tmp_agents / "Library" / "LaunchAgents" / f"{BUNDLE_ID}.autostart.plist"
+    assert plist.is_file(), f"plist 没写出来：{plist}"
+    content = plist.read_text(encoding="utf-8")
+    assert "RunAtLoad" in content
+    assert "/Applications/SDM.app/Contents/MacOS/SDM" in content

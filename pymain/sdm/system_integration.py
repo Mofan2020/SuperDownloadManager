@@ -151,7 +151,6 @@ def _set_open_at_login_macos(enabled: bool) -> bool:
     label = f"{BUNDLE_ID}.autostart"
     agents = Path.home() / "Library" / "LaunchAgents"
     plist = agents / f"{label}.plist"
-    launchctl = ["launchctl", "load"]
 
     if not enabled:
         try:
@@ -194,12 +193,19 @@ def _set_open_at_login_macos(enabled: bool) -> bool:
 """
     try:
         plist.write_text(content, encoding="utf-8")
-        subprocess.run(
-            [*launchctl, str(plist)],
-            check=False,
-            capture_output=True,
-            timeout=10,
-        )
+        # **不要在这里 `launchctl load`。**
+        #
+        # `launchctl load` 不只是「注册」，它**当场把 job 跑起来**。
+        # 用户点一下「开机自启」就多出一个 SDM 进程——这正是要修的
+        # 那个 bug。自启的意思是「下次登录时启动」，不是「现在启动」。
+        #
+        # 不用 load 也能生效：launchd 每次登录都会扫
+        # `~/Library/LaunchAgents/`，把里面的 plist 装进 launchd
+        # 域，`RunAtLoad` 为真就启动。所以写完 plist 就完事了。
+        #
+        # 反过来看 launchd 的语义：登录时是「读 plist → 注册 →
+        # 启动」，「注册」和「启动」是同一个流程里的一步，不需要我们
+        # 在设置的时候手动去触发它。
         return True
     except (OSError, subprocess.SubprocessError) as err:
         log.warning(CAT_GUI, f"开机自启设置失败: {err}")
