@@ -29,7 +29,7 @@ from pathlib import Path
 from ..history_store import HistoryEntry, HistoryStore
 from ..logging_setup import CAT_ENGINE, CAT_QUEUE, CAT_STORE, get_logger
 from .categories import category_from_url
-from .content_sniffer import ProbeError
+from .content_sniffer import ContentProbe, ProbeError
 from .download_flow import DownloadFlow, FlowError, FlowFailure
 from .errors import ErrorCategory, TaskError
 from .file_assembler import _unlink_with_retry
@@ -116,6 +116,14 @@ class TaskSummary:
     server_supports_ranges: bool = True
     #: 队列里的位置。0 = 下一个就跑。
     queued_position: int = 0
+    #: 是不是还在「连接中」。
+    #:
+    #: **从任务开跑到收到第一个字节之间，界面不能说「0 KB/s」。**
+    #: 探测 + 建连 + 等第一个字节这段，下载器确实一个字节都没
+    #: 拿到，但用户看到「0 KB/s」会以为卡死了——实测用户报的
+    #: 「下载一直卡在 0 KB/s」就是这段。这里的 0 是**还没开始**，
+    #: 不是**下了 0 字节还很快**，两者必须区分。
+    connecting: bool = False
     #: 完成后行为（规格 §1.7）：none / open_file / open_folder / run_script / sleep。
     on_complete: str = "none"
     #: 任务级代理覆盖（规格 §1.6）。None = 走全局代理。
@@ -155,6 +163,7 @@ class TaskSummary:
             "queued_position": self.queued_position,
             "on_complete": self.on_complete,
             "proxy": self.proxy,
+            "connecting": self.connecting,
         }
         if with_chunks:
             payload["chunks"] = self.chunks
@@ -677,6 +686,8 @@ class DownloadEngine:
         if summary is None:
             return
         summary.state = TaskState.DOWNLOADING.value
+        # 从这一刻起还没收到字节——界面显示「连接中」而不是 0 KB/s。
+        summary.connecting = True
 
         # 任务级的请求头（规格 §1.6）。浏览器接管带过来的 Cookie /
         # UA 在这里生效——拿不到登录态就下不动。
@@ -689,17 +700,26 @@ class DownloadEngine:
         # 用共享的 downloader——Swift v1.1.8 在这里另建了一个
         # HTTPDownloader()，那个实例没有 SSL 绕过开关，
         # CDN 拒证书时探测静默失败，任务就永远卡在「下载中」。
+        #
+        # **探到的结果直接交给下面的流程层**，流程层不再探第二次
+        # （早先两边各探一次 = 两个 RTT，用户看到的是 5 秒以上的
+        # 纯等待，还没有任何提示）。
+        probe: ContentProbe | None = None
+        probe_error: ProbeError | None = None
         try:
             probe = await self.downloader.probe(
                 spec.url,
                 # 任务级的头——探测阶段有些站点就 403。
                 extra_headers=headers or None,
             )
-        except Exception:
-            # 探测失败不直接判死——下面的正式流程会再探一次，
-            # 那时才会带着真实错误信息回来（403 会在那里被
-            # 正确归类成「等待新链接」）。
-            probe = None
+        except ProbeError as err:
+            # 探测失败**不直接判死**：把错误带下去，让流程层统一
+            # 分类（403 进「等待新链接」，404 进「文件不存在」…）。
+            # 流程层拿到这个错误不会再探一次——探测本身已经带
+            # 重试和预算了，再探一遍只是让用户等两倍时间。
+            probe_error = err
+        except Exception as err:
+            probe_error = ProbeError(str(err) or type(err).__name__)
 
         if probe is not None:
             summary.total_bytes = probe.content_length
@@ -759,6 +779,9 @@ class DownloadEngine:
             initial_connections=self.strategy.initial_chunks,
             chunk_count=spec.chunk_count_override,
             checksum_algorithm=spec.checksum_algorithm,
+            # 探测结果复用：流程层不再探第二次。
+            probe=probe,
+            probe_error=probe_error,
         )
 
         # 记录分片布局，供详情面板展示。
@@ -828,6 +851,8 @@ class DownloadEngine:
             self._record_history(summary)
         finally:
             progress_task.cancel()
+            # 任务结束（成功/失败/取消/暂停）——不再「连接中」。
+            summary.connecting = False
             self.live.pop(task_id, None)
             # 任务结束：分片明细留一份最终状态，详情面板还能查。
             # 超过保留上限就丢最老的。
@@ -985,6 +1010,9 @@ class DownloadEngine:
             if summary is None:
                 return
             summary.bytes_done = total
+            # 收到字节了——不再是「连接中」。从这一刻起速度才有意义。
+            if total > 0 and summary.connecting:
+                summary.connecting = False
             # 分片状态跟着进度一起更新（节流：每次进度都算一次
             # 32~128 个分片的状态有点浪费，但进度本身也是节流过的，
             # 频率不高，可以接受）
@@ -1130,6 +1158,8 @@ class DownloadEngine:
             if live.task is not None and not live.task.done():
                 live.task.cancel()
         summary.state = TaskState.PAUSED.value
+        # 暂停了就不是「连接中」了。
+        summary.connecting = False
         # 暂停也要清 EMA 缓存——恢复后第一帧不该带着暂停前的
         # 旧速度往下衰减（Swift v1.0.7 的 bug 就是这个）。
         self._zero_speed(summary)
@@ -1194,6 +1224,7 @@ class DownloadEngine:
             if summary.state != TaskState.COMPLETED.value:
                 summary.state = TaskState.CANCELLED.value
                 summary.finished_at = time.time()
+            summary.connecting = False
             self._zero_speed(summary)
             # 取消是终态，落历史。幂等——引擎里其他路径也可能
             # 写过同一条，INSERT OR REPLACE 不会多出第二行。

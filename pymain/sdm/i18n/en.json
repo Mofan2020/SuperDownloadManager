@@ -193,6 +193,7 @@
   "stateAwaitingLink": "Awaiting link",
   "stateCancelled": "Cancelled",
   "stateCompleted": "Completed",
+  "stateConnecting": "Connecting",
   "stateDownloading": "Downloading",
   "stateFailed": "Failed",
   "statePaused": "Paused",

@@ -265,6 +265,9 @@ class GuiBridge:
             "active_connections",
             "uploaded_bytes",
             "queued_position",
+            # 「连接中」也要进指纹——它一变，界面上的 0 KB/s
+            # 就该换成「连接中」了。不进指纹的话这一帧推不出去。
+            "connecting",
         )
         return "|".join(str(task.get(key)) for key in volatile)
 

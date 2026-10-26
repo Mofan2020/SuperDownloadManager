@@ -156,6 +156,8 @@ class DownloadFlow:
         initial_connections: int | None = None,
         chunk_count: int | None = None,
         checksum_algorithm: str | None = None,
+        probe: ContentProbe | None = None,
+        probe_error: ProbeError | None = None,
     ) -> None:
         self.url = url
         self.destination = Path(destination)
@@ -176,6 +178,18 @@ class DownloadFlow:
         #: 目标分片数。None = 用策略里的 `default_chunks`。
         self.chunk_count = chunk_count
         self.checksum_algorithm = checksum_algorithm
+        #: 调用方已经探好的结果。有就直接用，**不再探第二次**。
+        #:
+        #: 引擎层为了拿真实文件名和总长度会先探一次，流程层
+        #: 原先又探一次——两次探测 = 两个 RTT。用户看到的是
+        #: 「下载卡在 0 KB/s」，实测这条链路上服务器光建连就
+        #: 要 2.5 秒，两次探测就是 5 秒纯等待，还没有任何提示。
+        self._probe_hint = probe
+        #: 调用方探测时拿到的错误。有就直接抛，**不再探第二次**。
+        #:
+        #: 探测本身已经带重试和预算了，重复探一次只是把同一个
+        #: 错误再等一遍（用户等的是两倍时间，看到的是同一个错）。
+        self._probe_error = probe_error
         self._cancelled = False
         self._chunk_tasks: set[asyncio.Task] = set()
         self._assembler: FileAssembler | None = None
@@ -301,32 +315,49 @@ class DownloadFlow:
         started = time.monotonic()
 
         # 1. 探测
-        try:
-            probe = await self.downloader.probe(
-                self.url,
-                # 任务级的头（Referer 等）也要带上——探测阶段
-                # 有些站点就 403，不带头根本起不来。
-                extra_headers=dict(self.headers) or None,
-            )
-        except ProbeError as err:
-            # 403/410/451 是链接失效，不是探测出错——任务要进
-            # 「等待新链接」状态，已下载的字节要留着。
+        #
+        # 调用方探过了就直接用——探测是整个下载里最贵的一步
+        # （一次完整 RTT），重复探等于让用户白等一次。
+        probe = self._probe_hint
+        if probe is None and self._probe_error is not None:
+            # 调用方探过了，但失败了。错误直接用它的——
+            # 分类、状态码都在里面，再探一次只会让用户等两倍时间。
+            err = self._probe_error
             if err.is_expired_link:
                 raise FlowError(FlowFailure.EXPIRED_LINK.value, err.message) from err
-            # 类别由 `ProbeError` 自己给（规格 §5.1）。
-            #
-            # **不能一律按 `network` 算**：404 是「文件不存在」，
-            # 503 是「服务器错误」，磁力链接是「这个地址压根不走
-            # HTTP」——三者的重试策略完全不同。`ProbeError.category`
-            # 跟新建任务对话框用的是同一份，不会出现两边说法不一。
             raise FlowError(
                 FlowFailure.PROBE_FAILED.value,
                 err.message,
                 category=err.category,
                 status=err.status,
             ) from err
-        except Exception as err:
-            raise FlowError(FlowFailure.PROBE_FAILED.value, str(err)) from err
+        if probe is None:
+            try:
+                probe = await self.downloader.probe(
+                    self.url,
+                    # 任务级的头（Referer 等）也要带上——探测阶段
+                    # 有些站点就 403，不带头根本起不来。
+                    extra_headers=dict(self.headers) or None,
+                )
+            except ProbeError as err:
+                # 403/410/451 是链接失效，不是探测出错——任务要进
+                # 「等待新链接」状态，已下载的字节要留着。
+                if err.is_expired_link:
+                    raise FlowError(FlowFailure.EXPIRED_LINK.value, err.message) from err
+                # 类别由 `ProbeError` 自己给（规格 §5.1）。
+                #
+                # **不能一律按 `network` 算**：404 是「文件不存在」，
+                # 503 是「服务器错误」，磁力链接是「这个地址压根不走
+                # HTTP」——三者的重试策略完全不同。`ProbeError.category`
+                # 跟新建任务对话框用的是同一份，不会出现两边说法不一。
+                raise FlowError(
+                    FlowFailure.PROBE_FAILED.value,
+                    err.message,
+                    category=err.category,
+                    status=err.status,
+                ) from err
+            except Exception as err:
+                raise FlowError(FlowFailure.PROBE_FAILED.value, str(err)) from err
 
         self._probe = probe
         content_length = probe.content_length

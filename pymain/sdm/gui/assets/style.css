@@ -438,9 +438,28 @@ body.hide-toolbar-labels .btn { width: 29px; padding: 0; }
 }
 .list { display: flex; flex-direction: column; gap: 7px; }
 
-/* 列表头：表头 + 列选择器并排。表头本身是 grid，列模板跟 .row 一致。 */
-.list-head { display: flex; align-items: center; gap: 10px; }
-.list-head .sort-header { flex: 1; min-width: 0; }
+/* 列表头：表头 + 列选择器并排。表头本身是 grid，列模板跟 .row 一致。
+ *
+ * **列选择器按钮必须绝对定位。**
+ *
+ * 原来这里是 flex：`.sort-header{flex:1}` + `.col-picker-btn{flex:none;width:26px}`
+ * + `gap:10px` —— 表头因此比数据行**窄 36px**。表头和数据行用的是
+ * 同一套 grid 模板（`--row-cols`，name 列是 1fr），宽度不一样
+ * 就意味着 name 之后每一列都整体错开 36px：表头和行对不上，
+ * 排序按钮点到的列也不是它下面那一列。
+ *
+ * 改绝对定位后表头拿回满宽（跟 .row 一样宽），按钮压在最右边
+ * ——「actions」列表头本来就是空 div，压在它上面正合适。
+ */
+.list-head { position: relative; }
+.list-head .sort-header { width: 100%; }
+
+/* 「操作」列被用户关掉时，列选择器按钮会浮到表头最右端——那时候
+   它压着的是最后一列（通常是「剩余时间」）。让最后一列改成左对齐：
+   表头标签贴着列首、数字也贴着列首，按钮那一头就空出来了。
+   表头和数据行一起改，两边还是对齐的。 */
+.list-wrap.no-actions .sort-header > *:last-child { justify-content: flex-start; }
+.list-wrap.no-actions .row > *:last-child { text-align: left; }
 
 /* 列模板由 JS 算好写在 --row-cols 上（哪几列可见由用户决定）。
    每一列的宽度用 --w-<列名> 表达：窄屏时容器查询改这些变量，
@@ -484,9 +503,16 @@ body.hide-toolbar-labels .btn { width: 29px; padding: 0; }
 .sort-header .sh.active { color: var(--accent); }
 /* 右对齐的表头（大小/速度）跟行内的数字列对齐 */
 .sort-header .sh.right { justify-content: flex-end; }
-/* 排序箭头 */
-.sort-header .sh .arrow { opacity: 0; transition: opacity .12s ease; }
-.sort-header .sh.active .arrow { opacity: 1; }
+/* 排序箭头
+ *
+ * **没选中时不占位。** 箭头是透明的（opacity:0），但它在 flex 里
+ * 照样占宽度 + 一个 3px 的 gap——右对齐的表头文字会整体左移，
+ * 跟行里右对齐的数字对不上（差 3px，量得出来）。
+ * 所以默认 width:0，选中时才展开。
+ */
+.sort-header .sh { gap: 0; }
+.sort-header .sh .arrow { opacity: 0; width: 0; overflow: hidden; transition: opacity .12s ease; }
+.sort-header .sh.active .arrow { opacity: 1; width: auto; margin-left: 3px; overflow: visible; }
 .row.selected {
   background: var(--accent-softer);
   box-shadow: inset 0 1px 0 var(--edge-inner),
@@ -513,6 +539,14 @@ body.hide-toolbar-labels .btn { width: 29px; padding: 0; }
 .badge .icon { width: 10px; height: 10px; stroke-width: 2.6; }
 .badge-queued      { color: var(--neutral);       background: var(--neutral-soft); }
 .badge-downloading { color: var(--accent);        background: var(--accent-soft); }
+/* 「连接中」：任务已经开跑但一个字节都还没拿到。
+   用中性色 + 旋转图标——它不是错误，也不是「排队」，是「正在连」。 */
+.badge-connecting  { color: var(--neutral);       background: var(--neutral-soft); }
+.badge-connecting .icon { animation: badge-spin 1.6s linear infinite; }
+@keyframes badge-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .badge-connecting .icon { animation: none; }
+}
 .badge-paused      { color: var(--warning);       background: var(--warning-soft); }
 .badge-completed   { color: var(--success);       background: var(--success-soft); }
 .badge-failed      { color: var(--danger);        background: var(--danger-soft); }
@@ -530,7 +564,12 @@ body.hide-toolbar-labels .btn { width: 29px; padding: 0; }
 .progress-text { font-size: 10.5px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 
 .cell-num { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums;
-            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            /* **数字列右对齐。** 表头的「大小/速度/剩余时间」是右对齐的
+               （`.sh.right`），行里的数字不右对齐的话，标签在轨道右边、
+               数字在轨道左边，看着就是错位的——表头注释里写的
+               「跟行内的数字列对齐」这句话，一直没兑现。 */
+            text-align: right; }
 .cell-muted { color: var(--text-tertiary); }
 
 /* 分类列：图标 + 分类名。分类名走 i18n，不显示原始的英文枚举值。 */
@@ -539,9 +578,13 @@ body.hide-toolbar-labels .btn { width: 29px; padding: 0; }
 .cell-category .icon { width: 12px; height: 12px; flex: none; }
 .cell-category span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* 列选择器：表头右上角的小按钮 + 弹出面板 */
+/* 列选择器：表头右上角的小按钮 + 弹出面板
+ *
+ * 按钮绝对定位在表头容器里（见 .list-head 的注释）——它**不能**
+ * 参与表头的宽度分配，否则表头就比数据行窄。
+ */
 .col-picker-btn {
-  flex: none; width: 26px; height: 26px; padding: 0;
+  position: absolute; right: 0; top: 0; height: 100%; width: 26px; padding: 0;
   display: grid; place-items: center;
   border: 0; border-radius: var(--radius-md);
   background: transparent; color: var(--text-tertiary); cursor: pointer;

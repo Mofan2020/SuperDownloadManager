@@ -185,6 +185,7 @@ class HTTPDownloader:
         retry_jitter: float = 0.2,
         probe_retry_budget: float = 8.0,
         chunk_retry_budget: float = 30.0,
+        probe_timeout: float = 15.0,
         proxy: str | None = None,
     ) -> None:
         self.user_agent = user_agent
@@ -206,6 +207,17 @@ class HTTPDownloader:
         #: 用户看到的是「下载中」卡半分钟然后失败。
         #: 超过预算就直接失败——再等下去也不会成功。
         self.chunk_retry_budget = chunk_retry_budget
+        #: 探测请求自己的超时（秒）。
+        #:
+        #: **不能用客户端的 read 超时**——那个是 60 秒的空闲看门狗，
+        #: 给分片用是对的（慢而健康的连接不能被误杀），给探测用是
+        #: 灾难：服务器不回响应头时一次探测就挂 60 秒，重试几轮
+        #: 下来就是三四分钟静默。用户看到的正是「下载卡在 0 KB/s，
+        #: 还没有报错」——实测撞过（用户 2026-10-25 报的）。
+        #:
+        #: 探测只取 1 个字节，服务器正常情况下秒回。15 秒还不行，
+        #: 就是这个地址有问题，重试也没意义。
+        self.probe_timeout = probe_timeout
         #: 全局代理（规格 §1.6）。空 = 直连。
         self.proxy = proxy or None
         self._client: httpx.AsyncClient | None = None
@@ -330,6 +342,13 @@ class HTTPDownloader:
 
         403/410/451 不重试——那是链接本身失效，重试没意义，
         要交给上层进「等待新链接」状态。
+
+        **预算是总时间预算，请求本身耗的时间也算在里面。**
+        早先只统计退避的 sleep，服务器不响应时每次请求都要
+        等满 60 秒（客户端的 read 超时），5 次重试 = 5 分钟
+        静默——预算形同虚设。现在每个请求用独立的短超时
+        （`probe_timeout`），并且把请求耗时累加进预算，
+        预算到了就停，最长也就二十几秒。
         """
         rule_headers = await asyncio.to_thread(self.apply_site_rule, url, {})
         request_headers = merge_headers(
@@ -337,14 +356,24 @@ class HTTPDownloader:
             extra_headers or {},
             rule_headers,
         )
+        # 探测专用超时。写在请求上，不动共享客户端——
+        # 客户端的 read 超时是分片的空闲看门狗。
+        probe_timeout = httpx.Timeout(
+            connect=10.0,
+            read=self.probe_timeout,
+            write=10.0,
+            pool=None,
+        )
         last_error: Exception | None = None
         elapsed = 0.0
         for attempt in range(self.max_retries + 1):
+            attempt_started = time.monotonic()
             try:
                 return await sniffer_probe(
                     url,
                     client=self.client,
                     extra_headers=request_headers,
+                    timeout=probe_timeout,
                 )
             except ProbeError as err:
                 # **不可重试的失败直接抛出去。**
@@ -365,6 +394,11 @@ class HTTPDownloader:
             except Exception as err:
                 last_error = err
 
+            # **请求本身耗掉的时间也算预算。** 只算退避 sleep 的
+            # 时候，服务器不响应的情况下预算永远花不完，
+            # 一次探测能静默好几分钟。
+            elapsed += time.monotonic() - attempt_started
+
             if attempt >= self.max_retries:
                 break
             # 线性退避，且不超过总预算。
@@ -378,7 +412,9 @@ class HTTPDownloader:
             await asyncio.sleep(delay)
             elapsed += delay
 
-        raise last_error if last_error else ProbeError("probe failed")
+        if isinstance(last_error, ProbeError):
+            raise last_error
+        raise _describe_probe_failure(last_error) if last_error else ProbeError("probe failed")
 
     # -- 分片传输 ----------------------------------------------------
 
@@ -706,3 +742,22 @@ class HTTPDownloader:
         # apply_to_headers 会就地改 headers，所以给它一份副本。
         rule_headers = store.apply_to_headers(rule, {})
         return merge_headers(headers, rule_headers)
+
+
+def _describe_probe_failure(err: Exception) -> ProbeError:
+    """把传输层的异常翻译成一句用户看得懂的话。
+
+    原来直接把 httpx 的异常往上抛，界面上显示的是
+    `ReadTimeout` 这种英文类名——用户看不出是超时还是断网。
+    归一成 `ProbeError` 之后，分类（网络）、可重试性和文案
+    跟 HTTP 状态码那条路径是同一套。
+    """
+    if isinstance(err, httpx.TimeoutException):
+        return ProbeError("连接服务器超时")
+    if isinstance(err, httpx.ConnectError):
+        return ProbeError("连不上服务器")
+    if isinstance(err, httpx.NetworkError):
+        return ProbeError("网络错误")
+    if isinstance(err, httpx.HTTPError):
+        return ProbeError("HTTP 请求失败")
+    return ProbeError(str(err) or type(err).__name__)

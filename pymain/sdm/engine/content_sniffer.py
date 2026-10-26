@@ -364,6 +364,7 @@ async def probe(
     url: str,
     client: httpx.AsyncClient | None = None,
     extra_headers: dict[str, str] | None = None,
+    timeout: httpx.Timeout | None = None,
 ) -> ContentProbe:
     """发一个 `Range: bytes=0-0` 的 GET 探测目标。
 
@@ -380,12 +381,19 @@ async def probe(
       指定的 UA 必须**替换**默认 UA，不是叠加在后面）。
     - `Range: bytes=0-0` 最后写死。探测语义就是「只要第一个字节」，
       外部传进来的头不能改它——改了探测拿到的长度就不是全长了。
+
+    `timeout` 覆盖客户端自己的超时。**探测必须有独立的短超时**：
+    客户端的 read 超时是给分片用的（60 秒的空闲看门狗），
+    拿它来探测的话，服务器不回响应头时一次探测就能挂 60 秒，
+    重试几轮就是好几分钟静默——用户看到的就是「下载一直卡在
+    0 KB/s，还没有报错」。
     """
     owns_client = client is None
     if owns_client:
         client = httpx.AsyncClient(
             follow_redirects=True,
-            timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=None),
+            timeout=timeout
+            or httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=None),
         )
     try:
         # **先看协议，再发请求。**
@@ -415,7 +423,17 @@ async def probe(
             extra_headers,
             {"Range": "bytes=0-0"},
         )
-        request = client.build_request("GET", url, headers=request_headers)
+        # 超时写在**请求**上而不是客户端上：客户端是共享的，
+        # 改它的超时会把分片的空闲看门狗一起改掉。
+        # `build_request` 接受 timeout，覆盖客户端默认值。
+        #
+        # **只有传了才写进请求**——httpx 里 `timeout=None` 的意思是
+        # 「完全不超时」，不是「用客户端的」。直接把 None 塞进去
+        # 会把超时彻底关掉，比不传还糟。
+        request_kwargs: dict = {"headers": request_headers}
+        if timeout is not None:
+            request_kwargs["timeout"] = timeout
+        request = client.build_request("GET", url, **request_kwargs)
         response = await client.send(request, stream=True)
         try:
             headers = dict(response.headers)

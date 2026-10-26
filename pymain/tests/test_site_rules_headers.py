@@ -207,7 +207,7 @@ def test_probe_sends_rule_headers(downloader, monkeypatch):
     """
     sent: list[dict] = []
 
-    async def fake_probe(url, client=None, extra_headers=None):
+    async def fake_probe(url, client=None, extra_headers=None, timeout=None):
         sent.append(dict(extra_headers or {}))
         return _make_probe(url)
 
@@ -233,7 +233,7 @@ def test_probe_task_headers_are_lower_priority_than_rule(downloader, monkeypatch
     """
     sent: list[dict] = []
 
-    async def fake_probe(url, client=None, extra_headers=None):
+    async def fake_probe(url, client=None, extra_headers=None, timeout=None):
         sent.append(dict(extra_headers or {}))
         return _make_probe(url)
 
@@ -255,7 +255,7 @@ def test_probe_default_ua_used_when_no_rule(downloader, monkeypatch):
     """没有规则时用下载器自己的默认 UA。"""
     sent: list[dict] = []
 
-    async def fake_probe(url, client=None, extra_headers=None):
+    async def fake_probe(url, client=None, extra_headers=None, timeout=None):
         sent.append(dict(extra_headers or {}))
         return _make_probe(url)
 

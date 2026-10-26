@@ -185,6 +185,30 @@ const STATE_META = {
   awaiting_new_link:{ key: "stateAwaitingLink",     cls: "badge-awaiting_new_link",icon: "refresh" },
 };
 
+// 「连接中」——任务已经开跑，但一个字节都还没收到。
+//
+// **为什么单独一个状态**：探测、建连、等第一个字节这段时间里，
+// 速度确实是 0，但界面写「0 KB/s」会让人以为卡死了——用户报的
+// 「下载一直卡在 0 KB/s」就是这段。写「连接中」说的是事实：
+// 现在还没开始下，不是下了 0 字节还很快。
+const CONNECTING_META = { key: "stateConnecting", cls: "badge-connecting", icon: "refresh" };
+
+// 一个任务的展示元数据。连接中优先于普通状态。
+function stateMetaFor(task) {
+  if (task && task.connecting && task.state === "downloading") {
+    return CONNECTING_META;
+  }
+  return STATE_META[task && task.state] || STATE_META.queued;
+}
+
+// 速度格显示什么。连接中显示「连接中」，别的照旧。
+function speedCellText(task) {
+  if (task && task.connecting && task.state === "downloading") {
+    return t("stateConnecting");
+  }
+  return fmtRate(task ? task.speed_bytes_per_sec : 0);
+}
+
 // 分类的显示元数据。
 //
 // **分类名走 i18n**（key 字段）——原来直接把英文枚举值首字母大写
@@ -749,11 +773,16 @@ function currentTask(id) {
 
 // 只更新变化的内容，不重建节点。
 function updateRow(refs, task) {
-  const meta = STATE_META[task.state] || STATE_META.queued;
+  const meta = stateMetaFor(task);
   const catMeta = CATEGORY_META[task.category] || CATEGORY_META.other;
 
-  if (refs.state !== task.state) {
-    refs.state = task.state;
+  // 徽标的变化条件：**状态或连接中标志**变了才重建。
+  //
+  // 只看 state 是不够的——「下载中 → 连接中」的转变 state 没变，
+  // 徽标却必须换（0 KB/s 那格也要换成「连接中」）。
+  const badgeKey = task.state + "|" + (task.connecting ? "1" : "0");
+  if (refs.state !== badgeKey) {
+    refs.state = badgeKey;
     refs.badge.className = "badge " + meta.cls;
     refs.badgeIcon.replaceWith(icon(meta.icon));
     refs.badgeText.textContent = t(meta.key);
@@ -784,7 +813,7 @@ function updateRow(refs, task) {
   refs.pctText.textContent = done ? "100%" : pct.toFixed(1) + "%";
 
   refs.sizeCell.textContent = fmtSize(task.total_bytes);
-  refs.speedCell.textContent = fmtRate(task.speed_bytes_per_sec);
+  refs.speedCell.textContent = speedCellText(task);
 
   const eta = task.total_bytes && task.speed_bytes_per_sec > 0 && !done
     ? (task.total_bytes - task.bytes_done) / task.speed_bytes_per_sec
@@ -894,10 +923,32 @@ function renderDownloads() {
   renderColumnPicker(wrap);
 
   // 列模板：表头和行必须用同一个，否则对不齐。
-  wrap.style.setProperty("--row-cols", columnTemplate(columns));
+  //
+  // **这个变量必须写在「用它的元素」上——表头和每一行。**
+  //
+  // 不能写在容器（.list-wrap）上：CSS 自定义属性里的 var() 是在
+  // **声明它的那个元素**上做替换的。--row-cols 的值是
+  // 「var(--w-name) var(--w-category) …」，而 --w-* 只定义在
+  // .row / .sort-header 上。写在 .list-wrap 上时，替换时找不到
+  // --w-name → 整个 --row-cols 变成「无效值」→
+  // grid-template-columns 退回 none → **所有列竖着叠起来**，
+  // 下载列表的表格布局全废（Chromium 和 WebKit 都实测过：
+  // 一行 281px 高，八个格子竖排）。
+  //
+  // 写在各自元素上之后，替换用的是元素自己的 --w-*，
+  // 容器查询（窄屏收窄列）也跟着生效。
+  const template = columnTemplate(columns);
+  const header = wrap.querySelector(".sort-header");
+  if (header) header.style.setProperty("--row-cols", template);
 
+  // 「操作」列被关掉时，列选择器按钮会压到最后一列表头上。
+  // 打个标记，让 CSS 给最后一格（表头和数据行都算）让出按钮的宽度。
+  wrap.classList.toggle(
+    "no-actions",
+    !columns.some((c) => c.id === "actions"),
+  );
   // 表头每次重绘——排序状态（哪一列、升降序）会变。
-  updateSortHeader(wrap.querySelector(".sort-header"));
+  updateSortHeader(header);
   const list = wrap.querySelector(".list");
   const emptyEl = view.querySelector(".empty");
   if (emptyEl) emptyEl.remove();
@@ -914,6 +965,9 @@ function renderDownloads() {
     } else {
       updateRow(entry, task);
     }
+    // 列模板写在行自己身上（理由见上面）。表头和行拿的是同一份
+    // 模板字符串，替换出来的轨道才会一模一样。
+    entry.node.style.setProperty("--row-cols", template);
     // 保证顺序
     const next = prev ? prev.nextSibling : list.firstChild;
     if (next !== entry.node) list.insertBefore(entry.node, next);
@@ -1156,7 +1210,7 @@ function renderDetail() {
   app.classList.add("with-detail");
   clear(detail);
 
-  const meta = STATE_META[task.state] || STATE_META.queued;
+  const meta = stateMetaFor(task);
   const pct = task.total_bytes > 0 ? (task.bytes_done / task.total_bytes) * 100 : 0;
 
   detail.appendChild(el("div", { class: "detail-head" }, [

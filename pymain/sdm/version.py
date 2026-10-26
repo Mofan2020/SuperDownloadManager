@@ -2,8 +2,8 @@
 
 APP_NAME = "SuperDownloadManager"
 APP_DISPLAY_NAME = "Super Download Manager"
-__version__ = "2.1.1"
-BUILD_NUMBER = 2
+__version__ = "2.1.2"
+BUILD_NUMBER = 3
 
 BUNDLE_ID = "com.skyc8266.superdownloadmanager"
 AUTHOR = "Skyc8266"
