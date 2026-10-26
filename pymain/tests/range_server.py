@@ -174,8 +174,65 @@ class QuietErrorMixin:
         super().handle_error(request, client_address)  # type: ignore[misc]
 
 
-class ThreadedRangeServer(QuietErrorMixin, socketserver.ThreadingMixIn, http.server.HTTPServer):
+class BoundedThreadJoinMixin:
+    """关服务器时，**带超时**地等处理线程退出。
+
+    标准库的 `ThreadingMixIn` 在这件事上有个坑：它只把**非守护**
+    线程记进 `_threads`（`_Threads.append` 里 `if thread.daemon:
+    return`），而这里的处理线程是守护线程（`daemon_threads = True`，
+    不然进程退不出来）。所以 `block_on_close` 对我们等于没开，
+    `_threads` 永远是空的。只能自己记一份。
+
+    **为什么要等它们退出**：处理线程持有 payload 文件的句柄。
+    Windows 上文件被打开时删不掉——处理线程没退就删临时目录，
+    `PermissionError: [WinError 32]`，整条测试被判失败。macOS 上
+    删打开的文件是允许的（POSIX 语义），所以这个坑**只在 Windows CI
+    上炸**，而且时序随机：第一轮绿、第二轮红，极难查。
+
+    不用标准库那个**无限期**的 join：处理线程正给一个已经没人读的
+    连接发数据时，它要等自己发现写不出去才退出——那可能好几秒，
+    测试不该被这个卡住。所以自己 join，带个超时。
+    """
+
     daemon_threads = True
+    #: 处理线程最多等这么久（秒）。
+    #:
+    #: 给 3 秒是权衡出来的：正常情况下处理线程在最后一个数据块写完
+    #: 之后还会睡一个 `chunk_delay` 才退出（几十毫秒），等一下就好；
+    #: 客户端已经跑掉、连接被取消时，处理器写出去会立刻报错退出，
+    #: 也是很快。真正会卡住的是「内核发送缓冲区满了、write 阻塞」
+    #: ——那种情况等再久也没用，超时放弃即可。
+    close_join_timeout = 3.0
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        #: 处理线程。标准库的 `_threads` 收不到守护线程，自己记。
+        self._handler_threads: list[threading.Thread] = []
+
+    def process_request(self, request, client_address) -> None:
+        """起线程处理请求，并记下来。"""
+        thread = threading.Thread(
+            target=self.process_request_thread,
+            args=(request, client_address),
+        )
+        thread.daemon = self.daemon_threads
+        self._handler_threads.append(thread)
+        thread.start()
+
+    def server_close(self) -> None:
+        # 显式调 HTTPServer 的，跳过 ThreadingMixIn 那个（对守护
+        # 线程来说等于没有的）join。
+        http.server.HTTPServer.server_close(self)
+        for thread in list(self._handler_threads):
+            thread.join(timeout=self.close_join_timeout)
+
+
+class ThreadedRangeServer(
+    BoundedThreadJoinMixin,
+    QuietErrorMixin,
+    socketserver.ThreadingMixIn,
+    http.server.HTTPServer,
+):
     allow_reuse_address = True
     #: listen backlog。socketserver 的默认是 5——8 个分片同时建连接
     #: 就会溢出，连接被瞬时 RST，表现为「并发变成了串行 + 莫名重试」。
@@ -266,7 +323,26 @@ class RangeServer:
             self._server.server_close()
         except OSError:
             pass
-        self._tmpdir.cleanup()
+        self._cleanup_tmpdir()
+
+    def _cleanup_tmpdir(self) -> None:
+        """删临时目录。
+
+        Windows 上句柄的释放有延迟：处理线程退出后，文件句柄可能还
+        要过几毫秒才真正关掉，这时候删目录会抛 PermissionError。
+        所以重试几次。还不行就算了——残留一个临时目录不该把测试
+        判成失败。
+        """
+        for attempt in range(20):
+            try:
+                self._tmpdir.cleanup()
+                return
+            except PermissionError:
+                if attempt == 19:
+                    return
+                time.sleep(0.05)
+            except OSError:
+                return
 
     def __enter__(self) -> RangeServer:
         return self

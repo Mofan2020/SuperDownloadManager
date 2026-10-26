@@ -22,7 +22,7 @@ from sdm.engine.http_downloader import HTTPDownloader
 from sdm.engine.range_planner import RangeStrategy
 from sdm.engine.speed_display import SpeedInput, compute
 
-from .range_server import QuietErrorMixin, RangeServer
+from .range_server import BoundedThreadJoinMixin, QuietErrorMixin, RangeServer
 
 
 def _run(coro):
@@ -83,8 +83,12 @@ class _SlowBodyHandler(http.server.BaseHTTPRequestHandler):
                     return
 
 
-class _Srv(QuietErrorMixin, socketserver.ThreadingMixIn, http.server.HTTPServer):
-    daemon_threads = True
+class _Srv(
+    BoundedThreadJoinMixin,
+    QuietErrorMixin,
+    socketserver.ThreadingMixIn,
+    http.server.HTTPServer,
+):
     allow_reuse_address = True
     request_queue_size = 128
 

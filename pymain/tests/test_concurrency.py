@@ -24,7 +24,7 @@ import pytest
 from sdm.engine.download_flow import DownloadFlow
 from sdm.engine.range_planner import RangeStrategy
 
-from .range_server import QuietErrorMixin, RangeFileHandler
+from .range_server import BoundedThreadJoinMixin, QuietErrorMixin, RangeFileHandler
 
 
 class FlakyRangeHandler(RangeFileHandler):
@@ -55,8 +55,12 @@ class FlakyRangeHandler(RangeFileHandler):
         super().do_GET()
 
 
-class ThreadedServer(QuietErrorMixin, socketserver.ThreadingMixIn, http.server.HTTPServer):
-    daemon_threads = True
+class ThreadedServer(
+    BoundedThreadJoinMixin,
+    QuietErrorMixin,
+    socketserver.ThreadingMixIn,
+    http.server.HTTPServer,
+):
     allow_reuse_address = True
     request_queue_size = 128
 
