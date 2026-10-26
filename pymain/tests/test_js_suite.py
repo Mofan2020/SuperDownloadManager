@@ -1,6 +1,8 @@
 """把 Node 侧的 JS 测试拉进 pytest。
 
-`tests/test_sort_js.mjs` 测的是 `app.js` 里 F076 的排序实现。
+- `tests/test_sort_js.mjs` 测的是 `app.js` 里 F076 的排序实现。
+- `tests/test_settings_scroll_js.mjs` 测的是设置页重画时保持滚动位置。
+
 app.js 是浏览器脚本，pytest 跑不了，所以用 Node 跑独立的
 .mjs 脚本，这里只负责调用 + 转发输出。
 
@@ -16,20 +18,21 @@ from pathlib import Path
 import pytest
 
 HERE = Path(__file__).resolve().parent
-MJS = HERE / "test_sort_js.mjs"
+MJS_SUITES = [HERE / "test_sort_js.mjs", HERE / "test_settings_scroll_js.mjs"]
 
 node = shutil.which("node")
 pytestmark = pytest.mark.skipif(node is None, reason="没装 node，跳过 JS 侧测试")
 
 
-def test_sort_js_suite_passes():
-    """跑完整的 JS 排序测试套。
+@pytest.mark.parametrize("mjs", MJS_SUITES, ids=lambda p: p.stem)
+def test_js_suite_passes(mjs: Path):
+    """跑完整的 JS 测试套。
 
     失败时把 Node 的输出带进 pytest 报告——不然只看到
     "exit code 1"，看不到哪个用例坏了。
     """
     result = subprocess.run(
-        [node, str(MJS)],
+        [node, str(mjs)],
         capture_output=True,
         text=True,
         # Windows 控制台默认 GBK，解码 UTF-8 输出会 UnicodeDecodeError。
@@ -42,7 +45,7 @@ def test_sort_js_suite_passes():
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     assert result.returncode == 0, (
-        "JS 排序测试失败：\n"
+        f"JS 测试失败（{mjs.name}）：\n"
         f"--- stdout ---\n{stdout}\n"
         f"--- stderr ---\n{stderr}"
     )

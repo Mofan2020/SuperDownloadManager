@@ -1426,8 +1426,31 @@ function renderSchedule() {
 
 // ============ 设置 ============
 
+// 记下滚动位置，重画之后放回去。
+//
+// **为什么需要它**：改设置会重画整个设置页（后端推 settings_updated
+// → render() → renderSettings()）。重画等于把滚动容器 `.list-wrap`
+// 整个换掉，**新容器的 scrollTop 是 0**——用户改个设置就被弹回
+// 页面顶部。任务被删掉（task_removed 推送）也会走同一条重画路径，
+// 症状一样。
+//
+// 拆成两个独立函数是为了能测：它们只碰 `.list-wrap` 的 scrollTop，
+// 不依赖整个设置页的 DOM。
+function captureScrollTop(container) {
+  return container?.querySelector?.(".list-wrap")?.scrollTop || 0;
+}
+
+function restoreScrollTop(container, top) {
+  if (!container || !(top > 0)) return;
+  container.scrollTop = top;
+  // **下一帧再设一次。** 设置区里有站点规则表这种会自己撑高的块，
+  // 首帧算出来的可滚动高度可能比最终值小，同步设的位置会被截短。
+  requestAnimationFrame(() => { container.scrollTop = top; });
+}
+
 function renderSettings() {
   const view = document.getElementById("viewSettings");
+  const prevScrollTop = captureScrollTop(view);
   clear(view);
   const s = State.settings;
 
@@ -1600,6 +1623,8 @@ function renderSettings() {
   ]));
 
   view.appendChild(wrap);
+  // 把滚动位置放回去（见函数开头）。
+  restoreScrollTop(wrap, prevScrollTop);
 }
 
 function toggleRow(label, hint, key, options, value) {
