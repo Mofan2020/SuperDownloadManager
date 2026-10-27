@@ -422,6 +422,35 @@ def build_macos() -> bool:
     else:
         print("警告：找不到 AppleScript 字典，跳过")
 
+    # 浏览器扩展放进 Resources/extensions/。
+    #
+    # **用户得能拿到扩展文件。** 扩展在源码仓库的 Extensions/ 下，
+    # 只装应用的用户永远看不到它——而浏览器的「加载已解压的扩展
+    # 程序」要选的就是这个目录。放进 Resources/ 之后，应用的
+    # 「设置 → 浏览器接管」板块可以直接把目录在访达里打开，
+    # 用户选一下就装好了。
+    #
+    # 目录名用 extensions（小写）——Resources/ 下已经有 sdm / sdmd
+    # 这些软链了，名字别撞。
+    #
+    # `native-messaging-host/` 不是浏览器扩展（是宿主清单模板和启动
+    # 脚本模板），不复制过去——用户打开这个目录时看到四个浏览器就够，
+    # 混一个不是扩展的文件夹只会让人以为装错了。
+    ext_src = ROOT.parent / "Extensions"
+    if ext_src.is_dir():
+        ext_dest = resources / "extensions"
+        if ext_dest.exists():
+            shutil.rmtree(ext_dest)
+        shutil.copytree(
+            ext_src,
+            ext_dest,
+            ignore=shutil.ignore_patterns("native-messaging-host"),
+        )
+        names = sorted(p.name for p in ext_dest.iterdir() if p.is_dir())
+        print(f"浏览器扩展已放进 Resources/extensions：{', '.join(names)}")
+    else:
+        print("警告：找不到 Extensions 目录，浏览器接管没有扩展可装")
+
     # ad-hoc 签名。
     #
     # 不带 --deep。--deep 会递归进 Contents/ 下的每个目录，把含
@@ -512,6 +541,28 @@ def build_windows() -> bool:
         shutil.make_archive(str(archive.with_suffix("")), "zip", root_dir=str(src))
         zips.append((archive, "."))
         print(f"  {archive_name} 完成（{archive.stat().st_size // 1024} KB）")
+
+    # 浏览器扩展也塞进 GUI（onefile 会解到临时目录）。
+    #
+    # 用户得能拿到扩展文件——浏览器的「加载已解压的扩展程序」要选
+    # 的就是这个目录。应用的「设置 → 浏览器接管」板块直接从
+    # `sys._MEIPASS/extensions` 里找。
+    #
+    # 先拷一份到暂存目录，把 `native-messaging-host` 剔掉——那是宿主
+    # 清单模板，不是浏览器扩展。`--add-data` 没有「排除子目录」的参数，
+    # 只能先自己拷干净。
+    ext_src = ROOT.parent / "Extensions"
+    if ext_src.is_dir():
+        staging = ROOT / "build" / "extensions-staging"
+        if staging.exists():
+            shutil.rmtree(staging)
+        shutil.copytree(
+            ext_src,
+            staging,
+            ignore=shutil.ignore_patterns("native-messaging-host"),
+        )
+        zips.append((staging, "extensions"))
+        print("  浏览器扩展已打包进 GUI")
 
     # GUI（onefile），带上三个 zip
     entry = build_entrypoint(APP_NAME, "sdm.gui.main", "main")

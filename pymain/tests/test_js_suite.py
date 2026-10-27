@@ -29,6 +29,7 @@ MJS_SUITES = [
     HERE / "test_settings_scroll_js.mjs",
     HERE / "test_connecting_js.mjs",
     HERE / "test_category_auto_js.mjs",
+    HERE / "test_browser_capture_js.mjs",
 ]
 
 node = shutil.which("node")

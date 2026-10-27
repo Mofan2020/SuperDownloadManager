@@ -1,4 +1,4 @@
-# 浏览器扩展安装
+# 浏览器接管：安装与使用
 
 浏览器接管有两条通道（契约 §4）：
 
@@ -18,26 +18,27 @@
 
 ---
 
+## 0. 应用里的「浏览器接管」板块
+
+**用户不需要看这份文档也能装**：应用「设置 → 浏览器接管」板块里有
+
+- **配对 token**（可复制、可重新生成）
+- **每个浏览器的扩展目录**（点「打开扩展目录」会在访达/资源管理器里打开）
+- **每个浏览器装没装**（应用自己扫扩展目录 + 查 `pluginkit` 得到的真实状态）
+- **每个浏览器的安装入口**（点「打开扩展管理页」直接跳到浏览器的扩展页）
+
+这个板块是**唯一**的安装入口文档来源——下面的步骤只是它内容的展开说明。
+
+---
+
 ## 1. 装原生宿主（Chrome / Edge / Firefox）
 
-原生宿主是应用的一部分。装好之后，扩展第一次连接会自动配对。
+原生宿主是应用的一部分。**应用启动时会自动装好**，不需要用户操作：
+`bootstrap.py` 会把清单写进各浏览器的 `NativeMessagingHosts` 目录
+（用户级目录，不需要管理员权限）。装不上也不影响下载功能——扩展还有
+回环 HTTP 那条通道（走手动粘 token）。
 
-### 命令行装（调试用）
-
-```python
-from sdm.ipc import native_host
-
-# 1) 写启动脚本 + 各浏览器的宿主清单
-native_host.install_native_host(
-    "/Applications/SuperDownloadManager.app/Contents/Resources/native-host/sdmd-native-host",
-    extension_ids=["<Chrome 扩展 ID>"],   # 从 chrome://extensions 里复制
-)
-
-# 2) 看装到哪儿了
-native_host.host_manifest_dirs()
-```
-
-`install_native_host()` 是幂等的，重复调用结果一样。清单写进这些目录：
+清单写进这些目录：
 
 **macOS**
 
@@ -55,7 +56,7 @@ native_host.host_manifest_dirs()
 每个目录里放一个 `com.skyc8266.superdownloadmanager.json`。**`path` 指向的是启动
 脚本，不是宿主可执行文件本身**——`install_native_host()` 会在
 `~/Library/Application Support/SuperDownloadManager/native-host/` 写一个
-`sdm-native-host` 脚本，清单指向它，脚本再 `exec` 打包好的宿主：
+`sdmd-native-host` 脚本，清单指向它，脚本再 `exec` 打包好的宿主：
 
 ```json
 {
@@ -63,7 +64,7 @@ native_host.host_manifest_dirs()
   "description": "Super Download Manager 浏览器接管宿主",
   "path": "/Users/<你的用户名>/Library/Application Support/SuperDownloadManager/native-host/sdmd-native-host",
   "type": "stdio",
-  "allowed_origins": ["chrome-extension://<扩展 ID>/"]
+  "allowed_origins": ["chrome-extension://bangcjehjdodcpfekmnkfmbeffcclpih/"]
 }
 ```
 
@@ -71,65 +72,106 @@ native_host.host_manifest_dirs()
 > 工作目录解释，多半找不到。Windows 上是
 > `%LOCALAPPDATA%\SuperDownloadManager\native-host\sdmd-native-host.cmd`。
 
-Firefox 的清单多一个 `allowed_extensions`（写 gecko id `sdm-firefox@mofan2020.dev`）——
-Firefox 的运行时 origin 是随机的 `moz-extension://<uuid>/`，写不死，只能按扩展 ID 授权。
+Firefox 的清单多一个 `allowed_extensions`（写 gecko id `sdm-firefox@mofan2020.dev`），
+**而且没有** `allowed_origins`——Firefox 的运行时 origin 是随机的
+`moz-extension://<uuid>/`，写不死，只能按扩展 ID 授权。
 
-> **Chrome / Edge 的扩展 ID 必须换成真的。** 商店安装的扩展 ID 是商店给的；
-> 「加载已解压」的话在 `chrome://extensions` 里能看到。写错了浏览器的表现是
-> 一句含糊的 "Specified native messaging host not found"。
+### Chrome / Edge 的扩展 ID 是固定的
 
-### 图形界面装
+`allowed_origins` 里的扩展 ID **必须跟扩展实际的 origin 精确一致**，
+否则 Chrome 直接拒绝拉起宿主（表现是一句含糊的
+"Access to the specified native messaging host is forbidden"）。
 
-应用里的「浏览器扩展」页面有按钮，走的是同一个 `install_native_host()`。
+所以 Chrome / Edge 的 manifest 里写死了一把公钥（`key` 字段）：本地加载的
+扩展，ID 由这把公钥算出来，**跟装在哪台机器、哪个目录都无关**。
+
+```
+扩展 ID = SHA256(公钥 DER 字节) 的前 32 个十六进制位，每个位 0-f 映射成 a-p
+```
+
+当前值：`bangcjehjdodcpfekmnkfmbeffcclpih`（Chrome 和 Edge 同一个）。
+
+> **升级扩展时不要换这把公钥。** 一换 ID 就变了，所有机器上装好的宿主
+> 清单全部失效。`tests/test_extensions_manifests.py` 里有一条测试专门盯着
+> 「manifest 里的 key 算出来的 ID」和「代码里写死的 ID」是否一致。
 
 ---
 
 ## 2. 装扩展
 
+扩展文件跟着应用一起打包：
+
+- macOS：`SuperDownloadManager.app/Contents/Resources/extensions/<浏览器>/`
+- Windows：GUI 是 onefile，解包到临时目录，路径由 `sys._MEIPASS/extensions/`
+
+**别去源码仓库里找**——应用「设置 → 浏览器接管 → 打开扩展目录」直接
+在访达/资源管理器里打开正确的那个目录，从那儿选。
+
 ### Chrome / Edge
 
 1. 打开 `chrome://extensions`（Edge 是 `edge://extensions`）
+   ——应用里点「打开扩展管理页」会直接跳过去
 2. 右上角打开**开发者模式**
-3. **加载已解压的扩展程序** → 选 `Extensions/Chrome/`（Edge 选 `Extensions/Edge/`）
-4. 记下扩展 ID，安装原生宿主时要用（见上一节）
+3. **加载已解压的扩展程序** → 选应用给的那个 **Chrome**（Edge 选 **Edge**）目录
+4. 装完扩展 ID 应该是 `bangcjehjdodcpfekmnkfmbeffcclpih`。**不是这个值就说明
+   装错目录了**（装了 Edge 的目录，或者 manifest 里的 `key` 被改过）
+
+装完就能用：扩展第一次连接会通过原生宿主自动 `{"op":"pair"}` 配对。
 
 ### Firefox
 
 1. `about:debugging#/runtime/this-firefox`
-2. **临时载入附加组件...** → 选 `Extensions/Firefox/manifest.json`
+2. **临时载入附加组件...** → 选应用给的那个 **Firefox** 目录里的 `manifest.json`
 
 > 临时附加组件在 Firefox 重启后会消失，要重新载入。
 > 正式分发要签名 XPI（需要 addons.mozilla.org 账号）。
+
+Firefox 的扩展 ID 是 manifest 里写死的 gecko id
+（`sdm-firefox@mofan2020.dev`），跟 Chromium 系那把公钥没关系。
 
 ### Safari（试验性）
 
 Safari 的 WebExtension **没有自动接管下载的能力**（契约 §4.4.5），
 只能手动发：右键菜单「发送到下载器」或工具栏按钮。界面上标了**试验性**。
 
-1. Safari → 设置 → 高级 → 打开**显示网页开发者功能**
-2. 开发菜单 → **允许未签名的扩展**（部分 macOS 版本要按 Option）
-3. 开发 → **载入未签名的扩展...** → 选 `Extensions/Safari/`
-4. Safari → 设置 → 扩展 → 启用 **Super Download Manager**
+**本项目不提供签名**（没有 Apple Developer Program 账号），走 Apple 官方的
+「未签名的临时扩展」路径。macOS 17 / Safari 17 起：
 
-> **Safari 的原生消息不是 Chrome 那种宿主。** Safari 的
-> `browser.runtime.sendNativeMessage(appId, msg)` 是发给应用包里的
-> **Safari Web Extension Handler**（macOS App Extension，实现
-> `beginRequest(with:)`）。本仓库 `sdm/ipc/native_host.py` 是 Chrome 协议的
-> 宿主，Safari 用不上——Handler 没实现时，Safari 扩展退回回环 HTTP 通道
-> （需要手动填配对 token，见下一节）。
+1. **Safari → 设置 → 高级** → 勾选 **「显示网页开发者功能」**
+2. **Safari → 设置 → 开发者** → 勾选 **「允许未签名的扩展」**
+3. **Safari → 设置 → 开发者** → 点 **「添加临时扩展…」**
+   → 选应用给的那个 **Safari** 扩展目录（选目录，不是选 manifest.json）
+4. **Safari → 设置 → 扩展** → 勾选启用 **Super Download Manager**
+5. 点扩展图标展开 **「配对设置」**，把应用「设置 → 浏览器接管」里的
+   **配对 token** 粘进去 → 「保存 token」
+   （也可以在扩展的选项页里填，路径：Safari → 设置 → 扩展 → 选中该扩展 → 齿轮/选项）
+
+**不需要** Xcode，**不需要** Apple 开发者账号。
+
+> **平台的硬限制，改不掉：**
+>
+> - 「允许未签名的扩展」**退出 Safari 就重置**，下次要重新勾
+> - 临时扩展**最长 24 小时**，过期或退出 Safari 就被移除，要重新「添加临时扩展…」
+> - Safari 没有 Chrome 那种原生消息宿主（`browser.runtime.sendNativeMessage`
+>   发给的是 Safari Web Extension Handler，本仓库没实现），所以 **Safari 必须
+>   手动粘一次 token**
+> - Safari 没有「下载开始前拦一道」的钩子，**只能手动派单**。强行自动接管
+>   只能等下载开始后再取消——那时候文件已经在路上，用户会丢文件
 
 ---
 
 ## 3. 配对
 
-- **装了原生宿主**：扩展启动时自动 `{"op":"pair"}`，应用把 token 交给它，
-  扩展存进 `browser.storage.local`。用户不用管。
-- **只能走 HTTP 通道**（Safari 没装 Handler、Firefox 没装宿主）：
-  扩展的选项页（Chrome/Edge/Firefox）里可以手动填 token。
-  token 在应用的设置里（`browser_pair_token`），也可以用
-  `sdm.ipc.native_host.load_pair_token()` 读。
+- **Chrome / Edge / Firefox（装了原生宿主）**：扩展启动时自动 `{"op":"pair"}`，
+  应用把 token 交给它，扩展存进 `browser.storage.local`。用户不用管。
+- **Safari**：必须手动把 token 粘进扩展（弹窗里的「配对设置」折叠区，
+  或扩展的选项页）。token 在应用的「设置 → 浏览器接管」里，
+  也可以用 `sdm.ipc.native_host.load_pair_token()` 读。
+- **任何浏览器**：原生宿主没装起来时，都可以在扩展的选项页里手动填 token
+  （Chrome/Edge/Firefox 扩展详情页 → 「扩展选项」，或者右键扩展图标 → 选项）。
 
-选项页：扩展详情页 → 「扩展选项」，或者右键扩展图标 → 选项。
+应用里点「重新生成」会立刻作废旧 token（设置文件和 token 存档两边都写，
+`load_pair_token()` 是「设置文件优先」——只写一边下次读回来的还是旧的）。
 
 ---
 
@@ -209,8 +251,9 @@ print(handle_message({"op": "add", "token": ensure_pair_token(),
 
 - **Safari 只能手动派单**，而且整个扩展是试验性的：Safari 的扩展 API
   不提供「下载开始前拦一道」的钩子，硬做会丢文件。
-- **Firefox 的原生宿主要单独装**。Firefox 的宿主清单按 gecko id 授权，
-  不用管运行时随机 origin。
+- **Safari 的临时扩展 24 小时失效**，退出 Safari 就被移除，「允许未签名的
+  扩展」也会重置。这是平台设计，不是工程问题。
+- **Firefox 的临时附加组件重启后消失**，要重新载入。
 - **MV3 拿不到 `webRequestBlocking`**，所以扩展改不了请求头——
   我们本来也不需要改，只要读。
 - **POST 体靠内容脚本截获**，页面用了 `sendBeacon` 之类不经过
@@ -230,6 +273,6 @@ print(handle_message({"op": "add", "token": ensure_pair_token(),
      `%APPDATA%\Mozilla\NativeMessagingHosts\` 下的同名文件
 3. 启动脚本在 `~/Library/Application Support/SuperDownloadManager/native-host/`
    （Windows 在 `%LOCALAPPDATA%\SuperDownloadManager\native-host\`）
-4. 想让旧 token 失效：删掉 `~/.local/share/SuperDownloadManager/browser_pair_token`
-   （macOS 是 `~/Library/Application Support/SuperDownloadManager/browser_pair_token`）
-   或在应用里重置配对
+4. 想让旧 token 失效：在应用里点「重新生成」，或者删掉
+   `~/Library/Application Support/SuperDownloadManager/browser_pair_token`
+   （Windows 在 `%LOCALAPPDATA%\SuperDownloadManager\browser_pair_token`）

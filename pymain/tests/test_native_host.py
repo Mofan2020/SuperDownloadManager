@@ -368,6 +368,31 @@ def test_host_manifest_expands_extension_ids():
     assert manifest["allowed_origins"] == ["chrome-extension://abcdef/"]
 
 
+def test_host_manifest_defaults_to_our_real_extension_id():
+    """**默认就得写真 ID，不能留占位符。**
+
+    宿主清单里的 `allowed_origins` 跟扩展的 origin 对不上时，
+    Chrome 直接拒绝拉起宿主——症状只是「扩展说应用没响应」，
+    根本看不出是清单写错了。
+    """
+    manifest = nh.host_manifest(nh.APP_ID, "/tmp/host.sh")
+    assert manifest["allowed_origins"] == [
+        f"chrome-extension://{nh.CHROMIUM_EXTENSION_ID}/"
+    ]
+    assert not any("REPLACE_WITH" in origin for origin in manifest["allowed_origins"])
+
+
+def test_firefox_manifest_has_no_allowed_origins():
+    """Firefox 的清单只留 `allowed_extensions`。
+
+    它的运行时 origin 是随机的 `moz-extension://<uuid>/`，写
+    `allowed_origins` 只会多一份永远对不上的垃圾。
+    """
+    manifest = nh.host_manifest(nh.APP_ID, "/tmp/host.sh", browser="firefox")
+    assert "allowed_origins" not in manifest
+    assert manifest["allowed_extensions"] == [nh.FIREFOX_EXTENSION_ID]
+
+
 def test_install_host_manifests_writes_and_is_idempotent(tmp_path, monkeypatch):
     """写进各浏览器的 NativeMessagingHosts 目录，重复调用结果一样。"""
     chrome_dir = tmp_path / "chrome"

@@ -1211,6 +1211,58 @@ class GuiBridge:
         log.info(CAT_GUI, f"开机自启已同步为 {target}")
         return {"ok": True, "changed": True, "enabled": target}
 
+    # -- 浏览器接管 --------------------------------------------------
+
+    def get_browser_capture_info(self) -> dict:
+        """浏览器接管的现状：配对 token、扩展目录、各浏览器装没装。
+
+        设置页「浏览器接管」板块的数据源。
+        """
+        try:
+            from ..ipc.browser_capture import capture_info
+
+            return capture_info()
+        except Exception as err:
+            log.warning(CAT_GUI, f"读取浏览器接管状态失败: {err}")
+            return {"ok": False, "error": str(err), "token": "", "browsers": []}
+
+    def reset_pair_token(self) -> dict:
+        """重新生成配对 token（旧 token 立刻作废）。"""
+        try:
+            from ..ipc.native_host import reset_pair_token
+
+            token = reset_pair_token()
+            return {"ok": True, "token": token}
+        except Exception as err:
+            log.warning(CAT_GUI, f"重置配对 token 失败: {err}")
+            return {"ok": False, "error": str(err)}
+
+    def open_browser_extension_folder(self, browser_id: str) -> dict:
+        """在文件管理器里打开某个浏览器的扩展目录。
+
+        用户要在浏览器的「加载已解压的扩展程序」里**选这个目录**，
+        所以直接把目录打开到眼前是最省事的一步。
+        """
+        from ..ipc.browser_capture import extension_dir
+
+        directory = extension_dir(browser_id)
+        if directory is None:
+            return {"ok": False, "error": "找不到这个浏览器的扩展目录"}
+        if not sys_open_file(directory):
+            return {"ok": False, "error": "打不开目录"}
+        return {"ok": True, "path": str(directory)}
+
+    def open_browser_extensions_page(self, browser_id: str) -> dict:
+        """打开浏览器的扩展管理页。"""
+        from ..ipc.browser_capture import browser_spec
+
+        spec = browser_spec(browser_id)
+        if spec is None or not spec.extensions_url:
+            return {"ok": False, "error": "这个浏览器没有扩展管理页"}
+        if not sys_open_url(spec.extensions_url):
+            return {"ok": False, "error": "打不开扩展管理页"}
+        return {"ok": True, "url": spec.extensions_url}
+
     # -- 站点规则 ----------------------------------------------------
 
     def get_site_rules(self) -> list[dict]:

@@ -42,6 +42,19 @@
         margin-top: 10px;
         font-size: 12px;
       }
+      details {
+        margin-top: 12px;
+        font-size: 12px;
+      }
+      summary {
+        cursor: pointer;
+        color: #6b7280;
+      }
+      #saveToken {
+        margin-top: 8px;
+        background: #e5e7eb;
+        color: #111827;
+      }
     </style>
   </head>
   <body>
@@ -53,6 +66,18 @@
     <input id="url" type="text" placeholder="https://..." />
     <button id="send">发送到下载器</button>
     <div id="status"></div>
+
+    <!-- 配对 token：Safari 没有原生消息宿主，只能走回环 HTTP 通道，
+         所以必须手动粘一次。放在折叠区里，不碍事。 -->
+    <details id="pairing">
+      <summary>配对设置</summary>
+      <p class="muted">
+        Safari 没有 Chrome 那种原生消息宿主，扩展只能走本机回环通道。
+        把应用「设置 → 浏览器接管」里的配对 token 粘进来，一次就够。
+      </p>
+      <input id="token" type="text" placeholder="粘贴配对 token" />
+      <button id="saveToken">保存 token</button>
+    </details>
     <script src="popup.js"></script>
   </body>
 </html>

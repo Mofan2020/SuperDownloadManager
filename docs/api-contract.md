@@ -284,6 +284,61 @@ window.sdmEvent(kind, payload)
    不做自动拦截。UI 里必须标注**试验性**，首次启用时说明「可能不适用于
    所有网站，需要在 Safari 设置里手动启用扩展」。
 
+### 4.4.1 Chrome / Edge 的扩展 ID 必须固定
+
+宿主清单里的 `allowed_origins` 要跟扩展的 origin **精确一致**，否则
+Chrome 直接拒绝拉起宿主。而「加载已解压的扩展程序」装出来的扩展，
+ID 默认是按**目录路径**算的哈希——换个机器、换个目录就变了。
+
+所以 Chrome / Edge 的 manifest 里写死一把公钥（`key` 字段），
+扩展 ID 由公钥算出来，恒定：
+
+```
+扩展 ID = SHA256(公钥 DER 字节) 的前 32 个十六进制位，每个位 0-f 映射成 a-p
+```
+
+当前值 `bangcjehjdodcpfekmnkfmbeffcclpih`，定义在
+`sdm/ipc/native_host.py:CHROMIUM_EXTENSION_ID`。**换公钥 = 所有装好的
+宿主清单全部失效**，有一条测试盯着两边是否一致。
+
+Firefox 不需要这一步：它的扩展 ID 是 manifest 里
+`browser_specific_settings.gecko.id` 自己定的，宿主清单用
+`allowed_extensions` 授权。
+
+### 4.5 用户界面：设置页的「浏览器接管」板块
+
+**扩展不能只躺在源码仓库里。** 用户得能拿到扩展文件、知道装没装、
+知道 Safari 为什么要手动粘 token。设置页新增板块：
+
+| 元素 | 数据来源 | 说明 |
+|---|---|---|
+| 配对 token | `browser_pair_token` | 可复制、可**重新生成**（重新生成 = 旧 token 立刻作废） |
+| 扩展目录 | 打包版 `Resources/extensions/<浏览器>`；源码版仓库根 `Extensions/` | 可在访达/资源管理器里打开 |
+| 装没装 | 扫各浏览器的扩展目录读 manifest 名字；Safari 走 `pluginkit` | 按 manifest 的**名字**认，不按扩展 ID |
+| 安装入口 | 浏览器自己的扩展管理页 | Safari 没有这一项 |
+
+桥接层接口（`GuiBridge`）：
+
+- `get_browser_capture_info()` → `{token, extension_root, browsers[], host_browsers[]}`
+- `reset_pair_token()` → 新 token（旧 token 立刻作废）
+- `open_browser_extension_folder(browser_id)` → 在文件管理器里打开扩展目录
+- `open_browser_extensions_page(browser_id)` → 打开浏览器的扩展管理页
+
+判定「装没装」的逻辑在 `sdm/ipc/browser_capture.py`，**只读**：
+它只回答「现在是什么状态」，安装动作全在 GUI 层（用户点了才做）。
+
+**Safari 必须手动配对**：Safari 没有 Chrome 那种原生消息宿主，只能走
+回环 HTTP 通道——而回环通道**不开 `/pair`**（那个端口带着
+`Access-Control-Allow-Origin: *`，把 token 暴露给网页等于打开
+「谁都能往下载器塞任务」的门）。所以 Safari 的扩展选项页和弹窗里
+都要有 token 输入框。
+
+**Safari 不签名**：本项目没有 Apple Developer Program 账号，走 Apple 官方的
+「未签名的临时扩展」路径（设置 → 高级 → 显示网页开发者功能；
+设置 → 开发者 → 允许未签名的扩展；设置 → 开发者 → 添加临时扩展…）。
+平台限制必须在 UI 和文档里如实标注：退出 Safari 重置、临时扩展最长
+24 小时、Safari 只能手动派单。
+
 ---
 
 ## 5. 系统集成

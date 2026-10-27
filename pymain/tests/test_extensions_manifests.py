@@ -255,6 +255,53 @@ def test_safari_documents_the_limitation() -> None:
 # -- 宿主清单模板 ---------------------------------------------------
 
 
+def test_chromium_manifests_pin_the_extension_key() -> None:
+    """Chrome / Edge 的 manifest 必须带 `key` 字段。
+
+    **本地加载的扩展，ID 是由 `key` 算出来的**（没有 `key` 就按
+    目录路径算哈希）。ID 变了，宿主清单里的 `allowed_origins` 就对
+    不上，Chrome 直接拒绝拉起原生宿主——症状只是「扩展说应用没
+    响应」，很难往清单上想。
+    """
+    for browser in ("Chrome", "Edge"):
+        data = _load_manifest(browser)
+        assert data.get("key"), f"{browser} 的 manifest 缺 key 字段，扩展 ID 会飘"
+
+
+def test_extension_id_matches_the_manifest_key() -> None:
+    """manifest 里的公钥算出来的扩展 ID 必须跟代码里写死的一致。
+
+    算法是 Chromium 的 `GenerateId`：公钥 DER 字节做 SHA256，
+    取前 32 个十六进制位，每个位 `0`-`f` 映射成 `a`-`p`。
+
+    两边对不上 = Chrome 拒绝启动宿主 = 原生消息通道静默失效。
+    """
+    import base64
+    import hashlib
+
+    from sdm.ipc.native_host import CHROMIUM_EXTENSION_ID
+
+    for browser in ("Chrome", "Edge"):
+        key = _load_manifest(browser)["key"]
+        der = base64.b64decode(key)
+        digest = hashlib.sha256(der).hexdigest()
+        computed = "".join(chr(ord("a") + int(c, 16)) for c in digest[:32])
+        assert computed == CHROMIUM_EXTENSION_ID, (
+            f"{browser} 的 manifest key 算出的扩展 ID 是 {computed}，"
+            f"代码里写的是 {CHROMIUM_EXTENSION_ID}"
+        )
+
+
+def test_host_manifest_template_lists_the_real_extension_id() -> None:
+    """仓库里的宿主清单模板要写真 ID，不能留占位符。"""
+    from sdm.ipc.native_host import CHROMIUM_EXTENSION_ID
+
+    path = EXTENSIONS_DIR / "native-messaging-host" / "com.skyc8266.superdownloadmanager.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert f"chrome-extension://{CHROMIUM_EXTENSION_ID}/" in data["allowed_origins"]
+    assert not any("REPLACE_WITH_EXTENSION_ID" in o for o in data["allowed_origins"])
+
+
 def test_native_messaging_host_template_is_valid() -> None:
     """仓库里的宿主清单模板要跟 `host_manifest()` 生成的形状一致。"""
     path = EXTENSIONS_DIR / "native-messaging-host" / "com.skyc8266.superdownloadmanager.json"

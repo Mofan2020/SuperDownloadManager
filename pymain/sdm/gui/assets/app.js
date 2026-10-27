@@ -43,6 +43,9 @@ const State = {
   speedHistory: {},
   // 每个任务的错误详情（get_task_error 的结果）。
   taskErrors: {},
+  // 浏览器接管的现状（配对 token、扩展目录、各浏览器装没装）。
+  // null = 还没问过后端。
+  browserCapture: null,
 };
 
 const api = () => window.pywebview?.api;
@@ -1670,6 +1673,9 @@ function renderSettings() {
   // 站点规则
   wrap.appendChild(renderSiteRulesSection());
 
+  // 浏览器接管
+  wrap.appendChild(renderBrowserCaptureSection());
+
   // 启动
   wrap.appendChild(el("div", { class: "setting-section" }, [
     el("div", { class: "setting-section-title", text: t("settingsSectionStartup") }),
@@ -1823,6 +1829,131 @@ function renderSiteRulesSection() {
 
   return el("div", { class: "setting-section" }, [
     el("div", { class: "setting-section-title", text: t("settingsSiteRulesLink") }),
+    card,
+  ]);
+}
+
+function renderBrowserCaptureSection() {
+  const info = State.browserCapture;
+  const card = el("div", { class: "card" });
+
+  // 数据还没到（第一次进设置页）就先占个位，refreshBrowserCapture
+  // 拿到数据后会 render() 重画。
+  if (!info) {
+    card.appendChild(el("div", { class: "setting-section-hint", text: t("browserCaptureLoading") }));
+    return el("div", { class: "setting-section" }, [
+      el("div", { class: "setting-section-title", text: t("settingsBrowserCapture") }),
+      card,
+    ]);
+  }
+  if (info.error) {
+    card.appendChild(el("div", { class: "setting-section-hint", text: t("browserCaptureUnavailable") }));
+    return el("div", { class: "setting-section" }, [
+      el("div", { class: "setting-section-title", text: t("settingsBrowserCapture") }),
+      card,
+    ]);
+  }
+
+  card.appendChild(el("div", { class: "setting-section-hint", text: t("browserCaptureExplanation") }));
+
+  // -- 配对 token ----------------------------------------------------
+  //
+  // Safari 没有原生消息宿主，只能靠手动粘 token 配对；Chrome /
+  // Firefox 装了宿主就自动配对，这个输入框对它们没用——但放在一起
+  // 用户不用分辨「哪个浏览器要粘」。
+  const tokenInput = el("input", {
+    class: "input", type: "text", readonly: true, value: info.token || "",
+    style: "font-family:var(--mono,monospace)",
+  });
+  const copyBtn = el("button", {
+    class: "btn btn-sm", type: "button",
+    onclick: async () => {
+      const token = info.token || "";
+      try {
+        await navigator.clipboard.writeText(token);
+        toast(t("browserCaptureCopied"));
+      } catch (err) {
+        // webview 里剪贴板可能被拒。退一步：把 token 选中让用户自己拷。
+        tokenInput.select();
+        toast(t("browserCaptureCopyFailed"), "err");
+      }
+    },
+  }, [icon("copy"), el("span", { text: t("browserCaptureCopy") })]);
+
+  const resetBtn = el("button", {
+    class: "btn btn-sm", type: "button",
+    onclick: async () => {
+      const res = await api()?.reset_pair_token();
+      if (!res?.ok) { toast(res?.error || t("commonFailed"), "err"); return; }
+      toast(t("browserCaptureResetDone"));
+      await refreshBrowserCapture();
+    },
+  }, [icon("refresh"), el("span", { text: t("browserCaptureReset") })]);
+
+  card.appendChild(el("div", { class: "field", style: "margin-top:14px" }, [
+    el("label", { class: "field-label", text: t("browserCaptureToken") }),
+    el("div", { class: "field-row" }, [tokenInput, copyBtn, resetBtn]),
+    el("div", { class: "field-hint", text: t("browserCaptureTokenHint") }),
+  ]));
+
+  // -- 每个浏览器一行 ------------------------------------------------
+  const browsers = Array.isArray(info.browsers) ? info.browsers : [];
+  browsers.forEach((b) => {
+    const buttons = [];
+    if (b.extension_dir) {
+      buttons.push(el("button", {
+        class: "btn btn-sm", type: "button",
+        onclick: async () => {
+          const res = await api()?.open_browser_extension_folder(b.id);
+          if (!res?.ok) toast(res?.error || t("browserCaptureFolderMissing"), "err");
+        },
+      }, [icon("folder"), el("span", { text: t("browserCaptureOpenFolder") })]));
+    }
+    if (b.extensions_url) {
+      buttons.push(el("button", {
+        class: "btn btn-sm", type: "button",
+        onclick: async () => {
+          const res = await api()?.open_browser_extensions_page(b.id);
+          if (!res?.ok) toast(res?.error || t("commonFailed"), "err");
+        },
+      }, [icon("external"), el("span", { text: t("browserCaptureOpenPage") })]));
+    }
+
+    const hints = [];
+    hints.push(b.auto_capture ? t("browserCaptureAuto") : t("browserCaptureManualOnly"));
+    if (!b.needs_manual_pairing) {
+      hints.push(b.native_host ? t("browserCaptureHostReady") : t("browserCaptureHostMissing"));
+    }
+
+    card.appendChild(el("div", { class: "setting-toggle", style: "margin-top:14px" }, [
+      el("div", { class: "setting-toggle-text" }, [
+        el("div", { class: "setting-toggle-label" }, [
+          el("span", { text: b.label }),
+          el("span", {
+            class: "badge " + (b.installed ? "badge-completed" : "badge-queued"),
+            style: "margin-left:8px",
+          }, [
+            icon(b.installed ? "check" : "x"),
+            el("span", { text: b.installed ? t("browserCaptureInstalled") : t("browserCaptureNotInstalled") }),
+          ]),
+        ]),
+        el("div", { class: "setting-toggle-hint", text: hints.join(" · ") }),
+      ]),
+      el("div", { style: "display:flex;gap:8px;flex:none" }, buttons),
+    ]));
+
+    // Safari 的安装流程跟别的浏览器完全不同（开发者模式 + 未签名），
+    // 得单独把步骤写出来，不能让用户去猜。
+    if (b.id === "safari") {
+      card.appendChild(el("div", { class: "field-hint", style: "margin-top:6px", text: t("browserCaptureSafariSteps") }));
+      card.appendChild(el("div", { class: "field-hint", style: "margin-top:6px", text: t("browserCaptureTemporaryNote") }));
+    }
+  });
+
+  card.appendChild(el("div", { class: "field-hint", style: "margin-top:12px", text: t("browserCaptureReloadHint") }));
+
+  return el("div", { class: "setting-section" }, [
+    el("div", { class: "setting-section-title", text: t("settingsBrowserCapture") }),
     card,
   ]);
 }
@@ -2442,6 +2573,9 @@ function setView(view) {
   });
   if (view === "history") refreshHistory();
   if (view === "schedule") refreshSchedules();
+  // 浏览器接管的状态要扫扩展目录、查 pluginkit，不便宜——
+  // 只在切到设置页时拉一次，别每次 render 都去问后端。
+  if (view === "settings") refreshBrowserCapture();
   render();
 }
 
@@ -2496,6 +2630,18 @@ async function refreshHistory() {
 async function refreshSchedules() {
   const s = await api()?.get_schedules();
   if (s) State.schedules = s;
+}
+
+// 拉浏览器接管状态。
+//
+// 失败时也把结果写进 State（带 error），这样设置页能显示
+// 「读取失败」而不是一直转圈。
+async function refreshBrowserCapture() {
+  const res = await api()?.get_browser_capture_info();
+  if (res) {
+    State.browserCapture = res;
+    if (State.view === "settings") render();
+  }
 }
 
 // ============ 后端推送 ============

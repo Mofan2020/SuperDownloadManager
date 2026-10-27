@@ -8,6 +8,11 @@ const api = typeof browser !== "undefined" ? browser : chrome;
 const urlInput = document.getElementById("url");
 const statusBox = document.getElementById("status");
 const sendButton = document.getElementById("send");
+const tokenInput = document.getElementById("token");
+const tokenButton = document.getElementById("saveToken");
+
+/** 配对 token 的本地存储键（跟 background.js 里的一致）。 */
+const TOKEN_STORAGE_KEY = "sdmPairToken";
 
 function showStatus(text, isError) {
   statusBox.textContent = text;
@@ -33,10 +38,10 @@ async function showPairingStatus() {
     if (status && status.paired) {
       showStatus("已配对。", false);
     } else {
-      showStatus("未配对：应用里的原生消息没响应，只能走回环 HTTP 通道。", true);
+      showStatus("未配对：把应用里的配对 token 粘到下面。", true);
     }
   } catch (err) {
-    showStatus("后端没响应。", true);
+    showStatus("后端没响应（应用开着吗？）。", true);
   }
 }
 
@@ -67,5 +72,40 @@ sendButton.addEventListener("click", async () => {
   }
 });
 
+// -- 配对 token ----------------------------------------------------
+//
+// Safari 没有原生消息宿主，扩展只能走回环 HTTP 通道——而那个通道
+// **不开 `/pair`**（端口带着 `Access-Control-Allow-Origin: *`，
+// 任何网页都能调，把 token 暴露给网页等于把「谁都能往下载器塞
+// 任务」的门打开）。所以 token 只能由用户从应用里复制过来。
+
+async function loadToken() {
+  try {
+    const stored = await api.storage.local.get(TOKEN_STORAGE_KEY);
+    const token = stored[TOKEN_STORAGE_KEY] || "";
+    if (tokenInput) tokenInput.value = token;
+    return token;
+  } catch (err) {
+    return "";
+  }
+}
+
+if (tokenButton) {
+  tokenButton.addEventListener("click", async () => {
+    const token = (tokenInput?.value || "").trim();
+    try {
+      if (!token) {
+        await api.storage.local.remove(TOKEN_STORAGE_KEY);
+        showStatus("已清除配对 token。", false);
+        return;
+      }
+      await api.storage.local.set({ [TOKEN_STORAGE_KEY]: token });
+      showStatus("token 已保存。现在可以发链接了。", false);
+    } catch (err) {
+      showStatus("保存失败：浏览器不让扩展写本地存储。", true);
+    }
+  });
+}
+
 fillCurrentUrl();
-showPairingStatus();
+loadToken().then(showPairingStatus);

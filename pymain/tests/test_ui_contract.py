@@ -236,6 +236,23 @@ NEW_I18N_KEYS = (
     "detailConnections",
     "detailLogSummary",
     "detailSpeedCurve",
+    # 浏览器接管
+    "settingsBrowserCapture",
+    "browserCaptureExplanation",
+    "browserCaptureToken",
+    "browserCaptureTokenHint",
+    "browserCaptureCopy",
+    "browserCaptureReset",
+    "browserCaptureInstalled",
+    "browserCaptureNotInstalled",
+    "browserCaptureOpenFolder",
+    "browserCaptureOpenPage",
+    "browserCaptureAuto",
+    "browserCaptureManualOnly",
+    "browserCaptureSafariSteps",
+    "browserCaptureTemporaryNote",
+    "browserCaptureHostReady",
+    "browserCaptureHostMissing",
 )
 
 

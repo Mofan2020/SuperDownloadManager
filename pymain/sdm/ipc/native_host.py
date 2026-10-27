@@ -74,10 +74,24 @@ PAIR_TOKEN_KEY = "browser_pair_token"
 #: 这个文件是兜底的真身。
 PAIR_TOKEN_FILENAME = "browser_pair_token"
 
-#: Chrome / Edge 的扩展 ID 是商店分配的，装扩展的时候才知道。
+#: Chrome / Edge 的扩展 ID。
 #:
-#: 清单里的 `allowed_origins` 必须是精确的扩展 ID（`chrome-extension://<id>/`），
-#: 写错浏览器会拒绝启动宿主。安装器要用真实 ID 重写清单。
+#: **本地加载的扩展，ID 是由 manifest 里的 `key` 字段决定的**——
+#: 写死一把公钥，ID 就固定下来，不随装在哪台机器、哪个目录而变。
+#: 算法（Chromium 的 `GenerateId`）：公钥的 DER 字节做 SHA256，
+#: 取前 32 个十六进制位，每个位 `0`-`f` 映射成 `a`-`p`。
+#:
+#: 为什么非要固定：宿主清单里的 `allowed_origins` 必须跟扩展的
+#: origin **精确一致**，否则 Chrome 直接拒绝拉起宿主
+#: （"Access to the specified native messaging host is forbidden"）。
+#: 不固定 ID 的话这份清单永远对不上，原生消息通道形同虚设。
+#:
+#: 扩展升级时**不要换这把公钥**——一换 ID 就变了，所有装好的宿主
+#: 清单全部失效。
+CHROMIUM_EXTENSION_ID = "bangcjehjdodcpfekmnkfmbeffcclpih"
+
+#: 旧的占位符。保留是为了让「清单还没填真实 ID」这件事有迹可循，
+#: 而不是让一个占位符悄悄混进 `allowed_origins`。
 PLACEHOLDER_EXTENSION_ID = "REPLACE_WITH_EXTENSION_ID"
 
 #: Firefox 的扩展 ID 写在 manifest 的 `browser_specific_settings.gecko.id`，
@@ -272,6 +286,22 @@ def ensure_pair_token() -> str:
     return token
 
 
+def reset_pair_token() -> str:
+    """**作废当前 token，换一个新的。**
+
+    用户在设置页点「重新配对」时用。旧 token 立刻失效——
+    拿着旧 token 的扩展（或者别人复制的）再也派不了单。
+
+    两边都要写：设置文件里的键 + token 存档。`load_pair_token()`
+    是「设置文件优先」，只写一边会让下一次读取拿到旧值。
+    """
+    token = secrets.token_urlsafe(32)
+    _write_token_file(token)
+    _write_settings_token(token)
+    log.info(CAT_IPC, "已重置浏览器配对 token")
+    return token
+
+
 def verify_pair_token(token: Any) -> bool:
     """校验扩展带来的 token。
 
@@ -310,10 +340,13 @@ def host_manifest(
         "description": "Super Download Manager 浏览器接管宿主",
         "path": str(host_path),
         "type": "stdio",
-        "allowed_origins": _allowed_origins(browser, extension_ids),
     }
     if browser == "firefox":
+        # Firefox 只认 `allowed_extensions`——它的运行时 origin 是
+        # 随机的 `moz-extension://<uuid>/`，写 `allowed_origins` 没有意义。
         manifest["allowed_extensions"] = [FIREFOX_EXTENSION_ID]
+    else:
+        manifest["allowed_origins"] = _allowed_origins(browser, extension_ids)
     return manifest
 
 
@@ -322,9 +355,13 @@ def _allowed_origins(browser: str, extension_ids: Sequence[str] | None) -> list[
 
     传进来的既可以是完整 origin（`chrome-extension://xxx/`），
     也可以是裸的扩展 ID——裸 ID 要按浏览器补前缀。
+
+    **不传就用我们自己的扩展 ID**（`CHROMIUM_EXTENSION_ID`）。
+    写占位符的话 Chrome 会因为 origin 对不上而拒绝拉起宿主，
+    而症状只是「扩展说应用没响应」，很难往清单上想。
     """
     prefix = _ORIGIN_PREFIX.get(browser, _ORIGIN_PREFIX["chrome"])
-    ids = list(extension_ids) if extension_ids else [PLACEHOLDER_EXTENSION_ID]
+    ids = list(extension_ids) if extension_ids else [CHROMIUM_EXTENSION_ID]
     origins: list[str] = []
     for ext_id in ids:
         if "://" in ext_id:
