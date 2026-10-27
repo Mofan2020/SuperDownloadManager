@@ -78,6 +78,7 @@ class StartSpec:
     headers: dict[str, str] = field(default_factory=dict)   # 任务级自定义头
     proxy: str | None = None                                 # 任务级代理覆盖
     chunk_count_override: int | None = None                  # 分块数（None = 自动）
+    category: str | None = None                              # 用户显式选的分类（None = 自动）
     start_when: str = "now"                                 # now | queue | scheduled
     checksum_algorithm: str | None = None                   # md5 | sha1 | sha256 | None
     on_complete: str = "none"                               # none|open_file|open_folder|run_script|sleep
@@ -107,8 +108,14 @@ async def probe_url(self, url: str, referer: str | None = None) -> dict
 
     返回: {"ok": bool, "filename": str|None, "size": int|None,
            "final_url": str|None, "accepts_ranges": bool,
+           "category": str|None,
            "error": str|None, "error_category": str|None}
     探测失败**不是终态**：返回 ok=False，调用方让用户改完重试。
+
+    `category` 是按**服务器给的文件名**（Content-Disposition）判出来的
+    分类（`video` / `music` / `pictures` / `archives` / `documents` /
+    `software` / `other`）。前端据此自动切换分类下拉——用户没手动
+    选过时，.dmg 会自动变成「程序」。
     """
 
 async def set_global_proxy(self, proxy: str | None) -> None
@@ -164,7 +171,7 @@ def get_task_error(self, task_id: str) -> dict | None
 
 | 方法 | 参数 | 返回 |
 |---|---|---|
-| `create_task(url, options)` | `options` 是 dict，可含 `filename` / `save_dir` / `category` / `proxy` / `headers` / `chunk_count` / `start_when` / `checksum` / `on_complete` / `on_complete_script` / `referer` | `{"ok": bool, "task_id": str|None, "error": str|None}` |
+| `create_task(url, options)` | `options` 是 dict，可含 `filename` / `save_dir` / `category` / `proxy` / `headers` / `chunk_count` / `start_when` / `checksum` / `on_complete` / `on_complete_script` / `referer`。**`category` 传 null / 空 / `"auto"` = 自动**（引擎按 URL 和服务器给的文件名判断）；传具体分类 id 才表示用户选定了。`chunk_count` 引擎仍然支持，但 GUI 不再传——分片由引擎动态规划 | `{"ok": bool, "task_id": str|None, "error": str|None}` |
 | `pause_task(task_id)` | | `{"ok": bool, "error": str|None}` |
 | `resume_task(task_id)` | | 同上 |
 | `remove_task(task_id, delete_file)` | `delete_file` 决定**已完成的成品**是否删除 | 同上 |
@@ -327,7 +334,11 @@ proxy_scheme: str = "http"           # http | https | socks4 | socks5
 browser_pair_token: str = ""         # 浏览器配对 token
 initial_connections: int = 2         # 初始连接数（动态分段的起点）
 max_chunk_count: int = 32            # 分片数上限
+network_user_agent: str = ""         # 全局 UA，空 = 用程序内置的默认 UA
 ```
+
+UA 的优先级（高 → 低）：**站点规则里的 UA** → 全局 UA → 内置默认 UA。
+清空全局 UA = 恢复内置默认，不是「发一个空的 UA」。
 
 新增键要同时写进 `_KEY_MAP`（Swift 版键名映射）。没有 Swift 对应键的用
 `sdm.<字段名>` 形式。

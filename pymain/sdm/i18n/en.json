@@ -291,5 +291,9 @@
   "settingsChunkLimitsHint": "Connections at the start of a download, and the most chunks one task may use.",
   "settingsSectionNetwork": "Network",
   "settingsGlobalProxy": "Global proxy",
-  "settingsGlobalProxyHint": "Every download goes through this proxy. Blank = no proxy."
+  "settingsGlobalProxyHint": "Every download goes through this proxy. Blank = no proxy.",
+  "categoryAuto": "Auto",
+  "settingsUserAgent": "Global User-Agent",
+  "settingsUserAgentHint": "Sent with every download. Blank = the built-in default. A site rule's UA still wins.",
+  "settingsUserAgentReset": "Reset"
 }

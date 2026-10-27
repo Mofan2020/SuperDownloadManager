@@ -102,12 +102,46 @@ def category_for_extension(ext: str) -> DownloadCategory | None:
     return _EXTENSION_MAP.get(ext.lower().lstrip("."))
 
 
+def category_for_filename(name: str) -> DownloadCategory | None:
+    """按**文件名**判断分类（认扩展名）。
+
+    为什么不能只看 URL：CDN 的路径常常没有扩展名
+    （`/download/12345`），真正的文件名在 `Content-Disposition` 里。
+    探测拿到真实文件名后用它判分类，比猜 URL 准得多。
+
+    判不出来返回 None——调用方决定回退到 URL 猜测还是「其他」。
+    """
+    if not name:
+        return None
+    base = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].strip()
+    if "." not in base:
+        return None
+    ext = base.rsplit(".", 1)[-1]
+    if not ext or len(ext) > 12:
+        return None
+    return category_for_extension(ext)
+
+
 def category_from_url(url: str) -> DownloadCategory:
     """按 URL 路径扩展名判断分类，判不出来归 Other。"""
     path = urlparse(url).path
     ext = path.rsplit(".", 1)[-1] if "." in path.rsplit("/", 1)[-1] else ""
     cat = category_for_extension(ext)
     return cat or DownloadCategory.OTHER
+
+
+def category_for_download(url: str, filename: str | None = None) -> DownloadCategory:
+    """综合 URL 和真实文件名判分类。
+
+    **真实文件名优先。** URL 是用户粘进来的地址，可能是无扩展名的
+    CDN 路径；服务器给的文件名才是文件真正的类型。
+    先看文件名（认扩展名），看不了再退回 URL 猜，最后才「其他」。
+    """
+    if filename:
+        cat = category_for_filename(filename)
+        if cat is not None:
+            return cat
+    return category_from_url(url)
 
 
 def is_likely_file_url(url: str) -> bool:

@@ -59,6 +59,11 @@ class Settings:
 
     # 网络
     network_ignore_ssl: bool = False
+    #: 全局 User-Agent。空 = 用程序内置的默认 UA。
+    #:
+    #: **站点规则的 UA 优先于它**——规则是用户为某个主机显式配的
+    #: 「跟这个站点说话的方式」，全局设置只是兜底。
+    network_user_agent: str = ""
     #: 全局代理。空 = 不走代理。
     proxy_url: str = ""
     #: 代理协议：http / https / socks4 / socks5。
@@ -116,6 +121,7 @@ _KEY_MAP = {
     "sdm.proxy_scheme": "proxy_scheme",
     "sdm.browser_pair_token": "browser_pair_token",
     "sdm.network.ignoreSSL": "network_ignore_ssl",
+    "sdm.network.userAgent": "network_user_agent",
     "sdm.logs.level": "logs_level",
     "sdm.logs.persistence": "logs_persistence",
     "sdm.logs.retentionDays": "logs_retention_days",

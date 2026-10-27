@@ -3,6 +3,8 @@
 - `tests/test_sort_js.mjs` 测的是 `app.js` 里 F076 的排序实现。
 - `tests/test_settings_scroll_js.mjs` 测的是设置页重画时保持滚动位置。
 - `tests/test_connecting_js.mjs` 测的是「连接中」时不能显示 0 KB/s。
+- `tests/test_category_auto_js.mjs` 测的是自动分类（默认「自动」、
+  自动时不把分类发给后端）。
 
 app.js 是浏览器脚本，pytest 跑不了，所以用 Node 跑独立的
 .mjs 脚本，这里只负责调用 + 转发输出。
@@ -26,6 +28,7 @@ MJS_SUITES = [
     HERE / "test_sort_js.mjs",
     HERE / "test_settings_scroll_js.mjs",
     HERE / "test_connecting_js.mjs",
+    HERE / "test_category_auto_js.mjs",
 ]
 
 node = shutil.which("node")

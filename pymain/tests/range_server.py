@@ -57,6 +57,9 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
     ignore_range: bool = False
     #: 是否返回 403
     force_status: int = 0
+    #: 要发的 Content-Disposition（比如 `attachment; filename="x.dmg"`）。
+    #: 真实服务器靠它给文件名，探测也靠它认扩展名。
+    content_disposition: str = ""
 
     def log_message(self, *args):
         pass
@@ -73,6 +76,11 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
         finally:
             type(self).active_requests -= 1
 
+    def _extra_headers(self) -> None:
+        """额外的响应头（Content-Disposition 之类）。"""
+        if self.content_disposition:
+            self.send_header("Content-Disposition", self.content_disposition)
+
     def _do_GET(self) -> None:
         if self.force_status:
             self.send_response(self.force_status)
@@ -85,6 +93,7 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Length", str(total))
             self.send_header("Accept-Ranges", "bytes")
+            self._extra_headers()
             self.end_headers()
             with open(self.payload_path, "rb") as fh:
                 while True:
@@ -110,6 +119,7 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Length", str(length))
             self.send_header("Content-Range", f"bytes {start}-{end}/{total}")
+            self._extra_headers()
             self.end_headers()
             self._send_range(start, length)
             return
@@ -118,6 +128,7 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(total))
+        self._extra_headers()
         self.end_headers()
         self._send_range(0, total)
 
@@ -280,6 +291,7 @@ class RangeServer:
                 "delay_per_block": delay_per_block,
                 "ignore_range": ignore_range,
                 "force_status": force_status,
+                "content_disposition": self.content_disposition or "",
             },
         )
         # 每个 RangeServer 一个独立的 handler 类——并发计数是类属性，

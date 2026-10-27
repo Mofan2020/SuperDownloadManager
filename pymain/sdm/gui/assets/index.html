@@ -192,17 +192,11 @@
           </div>
         </div>
 
+        <!-- 分块数：**不给了**。分片本来就是引擎动态规划的（起始连接数
+             按文件大小和实测速度自己长），旁边挂一个默认 8 的数字框
+             只会让人以为那个数字决定实际分片数——它其实只是个上限，
+             用几个由引擎说了算。要限速、去设置页调线程数。 -->
         <div class="field-row">
-          <div class="field">
-            <label class="field-label" for="addChunkMode" data-i18n="addSheetChunkCountField">分块数</label>
-            <div class="field-row">
-              <select class="select" id="addChunkMode">
-                <option value="auto" data-i18n="addSheetChunkAuto">自动</option>
-                <option value="manual" data-i18n="addSheetChunkManual">手动</option>
-              </select>
-              <input class="input" id="addChunkCount" type="number" min="1" max="128" value="8" disabled>
-            </div>
-          </div>
           <div class="field">
             <label class="field-label" for="addStartWhen" data-i18n="addSheetStartWhenField">开始时机</label>
             <select class="select" id="addStartWhen">

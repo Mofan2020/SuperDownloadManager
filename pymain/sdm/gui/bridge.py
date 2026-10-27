@@ -79,6 +79,21 @@ except ImportError:  # pragma: no cover
     webview = None  # type: ignore[assignment]
 
 
+def _explicit_category(name: str | None) -> str | None:
+    """前端传来的分类 → 只保留「用户真选了的」。
+
+    `auto` / 空串 / 认不出来的值一律返回 None，意思是「自动」。
+    分成两步是为了让「用户选了视频」和「用户没选（自动）」在
+    引擎那边可区分——早先这两者都变成了「视频」，引擎按 URL 猜出来
+    的正确分类就被顶掉了。
+    """
+    value = (name or "").strip().lower()
+    if not value or value == "auto":
+        return None
+    resolved = _resolve_category(value)
+    return resolved.value if resolved is not None else None
+
+
 class GuiBridge:
     """前端可调用的所有方法。"""
 
@@ -104,14 +119,55 @@ class GuiBridge:
     # -- 生命周期 ----------------------------------------------------
 
     def set_window(self, window: Any) -> None:
+        """挂上窗口。
+
+        **这里绝对不能动 `_loop`。**
+
+        早先的实现是「从当前线程推断一个正在跑的循环，推断不到就
+        把 `_loop` 置成 None」。而窗口是在**主线程**里建的，主线程上
+        根本没有 asyncio 循环（引擎的循环在 `sdm-engine` 线程里跑），
+        `asyncio.get_running_loop()` 必然抛 RuntimeError——于是
+        `set_window` 把 `set_loop()` 刚设好的引擎循环**抹成了 None**。
+
+        后果极其隐蔽：`_loop is None` 时 `_run` / `_run_sync` 退化成
+        `asyncio.run(coro)`——**一次性循环**。`engine.start()` 在这个
+        一次性循环里把下载任务 `create_task` 出去，`asyncio.run` 一
+        返回就拆循环，任务在跑第一行之前就被取消：任务永远躺在列表里，
+        0 字节，连一个 socket 都没建过（用户 2026-10-27 报的
+        「一直卡在连接中」就是它）。
+
+        引擎循环只有一个来源：`set_loop()`。这里只管窗口。
+        """
         self._window = window
-        try:
-            self._loop = asyncio.get_running_loop()
-        except RuntimeError:
-            self._loop = None
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
+
+    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
+        """拿到（或建出）引擎的事件循环。
+
+        引擎的循环**必须常驻**：下载任务是在这个循环上 create_task
+        的，循环一关任务就没了。所以这里宁可自己起一个后台线程跑
+        循环，也绝不能退化成 `asyncio.run` 那种一次性循环。
+
+        正常路径下 `main()` 会先 `set_loop()`，这里只是兜底——
+        万一调用方忘了设，别再把下载静默地废掉。
+        """
+        if self._loop is not None:
+            return self._loop
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(
+            target=loop.run_forever,
+            name="sdm-engine-bridge",
+            daemon=True,
+        )
+        thread.start()
+        self._loop = loop
+        log.warning(
+            CAT_GUI,
+            "引擎事件循环没设上，已临时新建一个——之前的下载任务可能已经失效",
+        )
+        return loop
 
     def _call_js(self, func: str, payload: Any = None) -> None:
         """调前端的全局函数。"""
@@ -148,10 +204,8 @@ class GuiBridge:
 
     def _run(self, coro) -> None:
         """把协程丢到引擎的事件循环里跑。"""
-        if self._loop is None:
-            asyncio.run(coro)
-            return
-        asyncio.run_coroutine_threadsafe(coro, self._loop)
+        loop = self._ensure_loop()
+        asyncio.run_coroutine_threadsafe(coro, loop)
 
     def _apply_engine_setting(self, name: str, *args) -> None:
         """调引擎的设置方法——同步还是异步都行。
@@ -179,17 +233,20 @@ class GuiBridge:
 
         **死锁保护**：万一在引擎自己的事件循环里调（不该发生，但
         万一），等自己就是死锁——那种情况下只把协程丢进去，不等。
+
+        **不能再用 `asyncio.run`。** 一次性循环会把 `engine.start()`
+        里 create_task 出去的下载任务一起带走（见 `set_window` 的
+        注释），任务在跑第一行之前就被取消。
         """
-        if self._loop is None:
-            return asyncio.run(coro)
+        loop = self._ensure_loop()
         try:
             running = asyncio.get_running_loop()
         except RuntimeError:
             running = None
-        if running is self._loop:
+        if running is loop:
             log.warning(CAT_GUI, "在引擎事件循环里同步等待引擎——改成异步投递")
             return asyncio.ensure_future(coro)
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
         try:
             return future.result(timeout=timeout)
         except concurrent.futures.TimeoutError as err:
@@ -304,6 +361,10 @@ class GuiBridge:
         self._apply_engine_setting("set_speed_limit", float(settings.bandwidth_bytes_per_sec))
         self._apply_engine_setting("set_max_threads", settings.threads_default)
         self._apply_engine_setting("set_ignore_ssl", settings.network_ignore_ssl)
+        # 全局 UA。空 = 用内置默认值。
+        self._apply_engine_setting(
+            "set_user_agent", getattr(settings, "network_user_agent", "") or ""
+        )
         get_logger().update_settings(settings.log_settings())
 
         # 计划任务调度
@@ -544,14 +605,21 @@ class GuiBridge:
     def _apply_category(self, task_id: str, category: str | None) -> None:
         """把用户选的分类写回任务。
 
-        **引擎是按 URL 猜分类的**（`category_from_url(spec.url)`），
-        但用户在新建对话框里可以手动选。两个分类对不上时，
-        文件落在用户选的目录里、列表却归到另一类——点分类筛选
-        找不到自己刚下的东西。
+        **引擎是按 URL / 服务器给的文件名猜分类的**
+        （`category_from_url`），但用户在新建对话框里可以手动选。
+        两个分类对不上时，文件落在用户选的目录里、列表却归到另一类——
+        点分类筛选找不到自己刚下的东西。
 
         引擎建完任务就不再动 category 了，所以这里覆盖一下是安全的。
+
+        **「自动」不算覆盖。** 前端的分类下拉默认是「自动」，
+        自动的意思就是「让引擎自己判」——早先前端把下拉框的
+        第一个选项（视频）当成分类发过来，引擎判出来的正确分类
+        就被顶掉了，用户加 .dmg 却在视频分类里。
         """
         if not task_id or not category:
+            return
+        if (category or "").strip().lower() == "auto":
             return
         resolved = _resolve_category(category)
         if resolved is None:
@@ -583,15 +651,18 @@ class GuiBridge:
             else:
                 cat = category_from_url(url)
                 if opts.get("category"):
-                    # `category` 有两种来源：
+                    # `category` 有三种来源：
                     #   - 前端传的分类名（"video" / "music" …）
                     #   - 早期 API 传的扩展名（"mp4" / "mp3" …）
+                    #   - "auto"（自动）——**不是**一个分类，
+                    #     意思是「让引擎自己判」
                     #
                     # Swift 对照：App/MainWindow/DownloadListStore.swift:195
                     #   `let resolvedCategory = category ?? DownloadCategory.from(url: url)`
                     # —— 直接拿分类枚举用，不查扩展名表。
                     #
-                    # 两种都支持：先按分类名解析，解析不了再按扩展名查。
+                    # 三种都支持：先按分类名解析，解析不了再按扩展名查，
+                    # 都解析不了就用 URL 猜的。
                     cat = _resolve_category(opts["category"]) or cat
                 directory = base / cat.folder_name
         try:
@@ -643,6 +714,9 @@ class GuiBridge:
             "headers": headers,
             "proxy": (opts.get("proxy") or "").strip() or None,
             "chunk_count_override": chunk_count,
+            # 分类：**只有用户显式选了一个具体分类才传**。
+            # "auto" / 空 = 自动，交给引擎按 URL 和真实文件名判断。
+            "category": _explicit_category(opts.get("category")),
             "start_when": (opts.get("start_when") or "now").strip() or "now",
             "checksum_algorithm": (opts.get("checksum") or "").strip() or None,
             "on_complete": (opts.get("on_complete") or "none").strip() or "none",
@@ -758,6 +832,9 @@ class GuiBridge:
             "size": None,
             "final_url": None,
             "accepts_ranges": False,
+            # 分类：探测成功后由引擎按真实文件名给出来（见
+            # `category_for_download`），前端据此自动切换分类下拉。
+            "category": None,
             "error": None,
             "error_category": None,
         }
@@ -1023,6 +1100,10 @@ class GuiBridge:
             self._apply_engine_setting("set_speed_limit", float(settings.bandwidth_bytes_per_sec))
             self._apply_engine_setting("set_max_threads", settings.threads_default)
             self._apply_engine_setting("set_ignore_ssl", settings.network_ignore_ssl)
+            # 全局 UA。空 = 用内置默认值（用户清空输入框就是恢复默认）。
+            self._apply_engine_setting(
+                "set_user_agent", getattr(settings, "network_user_agent", "") or ""
+            )
             get_logger().update_settings(settings.log_settings())
             self._apply_global_proxy(settings)
         except Exception as err:
@@ -1067,7 +1148,7 @@ class GuiBridge:
         self.settings_store.set("open_at_login", enabled)
         return {"ok": result}
 
-    def get_default_dir(self, category: str | None = None) -> dict:
+    def get_default_dir(self, category: str | None = None, url: str | None = None) -> dict:
         """某个分类的默认保存目录。
 
         Swift 对照：`App/MainWindow/ClipboardConfirmView.swift` 的
@@ -1077,15 +1158,23 @@ class GuiBridge:
         根目录和分类目录名是后端的事（`DownloadCategory.folder_name`
         是 Video/Music/...，不是小写的分类值）。所以后端给。
 
+        **分类是「auto」时按 URL 猜。** 添加对话框的分类下拉默认是
+        「自动」——这时候目录也得有个合理的落点：链接是 .dmg 就落
+        Software，是 .mp4 就落 Video。猜不出来就回下载根目录。
+
         没给分类就返回下载根目录本身。
         """
         base = paths.download_dir()
-        if not category:
+        value = (category or "").strip().lower()
+        if not value or value == "auto":
+            if (url or "").strip():
+                cat = category_from_url(url)
+                return {"ok": True, "path": str(base / cat.folder_name)}
             return {"ok": True, "path": str(base)}
         try:
             from ..engine.categories import DownloadCategory
 
-            cat = DownloadCategory(category)
+            cat = DownloadCategory(value)
         except ValueError:
             return {"ok": True, "path": str(base)}
         return {"ok": True, "path": str(base / cat.folder_name)}

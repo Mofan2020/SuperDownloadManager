@@ -187,10 +187,13 @@ class HTTPDownloader:
         chunk_retry_budget: float = 30.0,
         probe_timeout: float = 15.0,
         proxy: str | None = None,
+        pool_timeout: float = 30.0,
     ) -> None:
         self.user_agent = user_agent
         self.ignore_ssl = ignore_ssl
         self.idle_timeout = idle_timeout
+        #: 等连接池空位的上限（秒）。None = 永不超时 = 会永久挂住。
+        self.pool_timeout = pool_timeout
         #: 规格 §1.5：每分片默认 5 次尝试。
         self.max_retries = max_retries
         #: 规格 §1.5：退避基数 500ms，上限 30s，抖动 200ms 量级。
@@ -235,11 +238,17 @@ class HTTPDownloader:
         )
         # read 超时是「两个读之间」的超时，不是总时长上限。
         # 慢而健康的连接会不断来数据，read 永远不会超时。
+        #
+        # **pool 不能是 None。** `pool=None` 的意思是「等连接池的空位
+        # 时永不超时」——池被占满（分片数撞上 max_connections、或者
+        # 上一批连接还没回收）就会**永久挂起**，既不报错也不重试，
+        # 用户看到的就是「一直卡在连接中」。
+        # 给它一个上限：等不到空位就报超时，按可重试错误处理。
         timeout = httpx.Timeout(
             connect=10.0,
             read=self.idle_timeout,
             write=30.0,
-            pool=None,
+            pool=self.pool_timeout,
         )
         verify: bool | ssl.SSLContext = True
         if self.ignore_ssl:
@@ -289,6 +298,27 @@ class HTTPDownloader:
         self._client = None
         if old is not None:
             # 不能直接 close——在途请求会炸。标记一下让它们自然结束。
+            old._sdm_superseded = True  # type: ignore[attr-defined]
+
+    def set_user_agent(self, value: str | None) -> None:
+        """换全局 User-Agent（设置项里改的那个）。
+
+        空的字符串 = 用内置默认 UA。用户清空输入框就是「恢复默认」，
+        不是「发一个空的 UA」——空 UA 会被不少站点直接拒。
+
+        **站点规则的 UA 仍然优先。** 规则是用户为某个主机显式配置的
+        「跟这个站点说话的方式」，它覆盖全局设置；全局设置再覆盖
+        内置默认值。优先级写死在 `probe` / `_stream_chunk` 的头合并里。
+        """
+        new = (value or "").strip() or USER_AGENT
+        if new == self.user_agent:
+            return
+        self.user_agent = new
+        old = self._client
+        self._client = None
+        if old is not None:
+            # UA 写在客户端的默认头里，所以改 UA 等于换客户端。
+            # 在途的分片会看到连接错误，引擎把它们当作可重试错误处理。
             old._sdm_superseded = True  # type: ignore[attr-defined]
 
     def set_proxy(self, value: str | None) -> None:
@@ -362,7 +392,9 @@ class HTTPDownloader:
             connect=10.0,
             read=self.probe_timeout,
             write=10.0,
-            pool=None,
+            # 探测等连接池空位也要有上限——探测必须很快出结果，
+            # 排在分片后面等半天没有意义。
+            pool=self.probe_timeout,
         )
         last_error: Exception | None = None
         elapsed = 0.0
@@ -405,7 +437,11 @@ class HTTPDownloader:
             delay = min(0.5 * (attempt + 1), 2.0)
             if elapsed + delay > self.probe_retry_budget:
                 break
-            log.notice(
+            # **这条用 warning 而不是 notice。**
+            # 用户常把日志级别调到 warning（默认是 info），
+            # 那时 notice 级的日志一条都看不到——「探测第 N 次失败」
+            # 恰恰是排查「卡在连接中」最关键的一条线索。
+            log.warning(
                 CAT_NET,
                 f"探测 {url} 第 {attempt + 1} 次失败 ({last_error}) — {delay:.1f}s 后重试",
             )

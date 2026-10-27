@@ -1093,3 +1093,126 @@ CSS 自定义属性的 `var()` 是在**声明它的那个元素**上做替换的
   `tests/test_column_alignment_js.mjs`（无头 Chromium 量像素，两种列
   组合都测；缺 playwright 就跳过，CI 上没有浏览器）
 - 每条新测试都验过「有牙齿」：临时回退修复，确认测试变红
+
+## v2.1.3：任务卡住不动的根因，和怎么把它挖出来
+
+用户报「一直卡在连接中」。上一轮（v2.1.2）把同类症状当成网络问题修过
+一轮（探测超时、重试预算、去掉重复探测）——**那些是真问题，但没碰到
+这一次的根因**。这一次的症状是：任务在列表里躺着，0 字节，不报错。
+
+### 静态推理到头了，就去拿进程内的 Python 栈
+
+代码层面的推理只能到「第一次 socket 之前」。`lsof` 显示进程**没有任何
+对外连接**（只有两个 LISTEN），说明连 DNS 都没开始；`sample` 只有 C 栈；
+`py-spy dump` 在 macOS 上要 root（放弃，没用 sudo）。
+
+最后用的是 lldb attach + CPython 的 C API，在进程内导出所有线程的
+Python 栈：
+
+```sh
+lldb -p <pid> -b \
+ -o "expr (void)PyGILState_Ensure()" \
+ -o "expr (int)PyRun_SimpleString(\"exec(open('/tmp/sdm_dump.py').read())\")" \
+ -o "expr (void)PyGILState_Release()" \
+ -o "detach" -o "quit"
+```
+
+`/tmp/sdm_dump.py` 里用 `sys._current_frames()` 拿每个线程的 Python 栈，
+再用 `gc.get_objects()` 找到 `GuiBridge` 实例，顺着 `bridge.engine` 把
+`engine.tasks` / `engine.live` / `loop._ready` 全导出来。
+
+**这个 app 是 ad-hoc 签名的，lldb 能 attach**（Hardened Runtime 的
+Developer ID 应用会被拒）。
+
+导出结果直接指出了根因：
+
+```
+=== task df443f43-... ===
+  state='paused' connecting=False bytes=0 total=None
+=== live df443f43-... ===
+  asyncio_task=<Task cancelled ...>
+  done=True cancelled=True
+  flow=None
+bridge._loop = None
+```
+
+任务在**跑第一行之前**就被取消了，引擎循环的引用是 None。
+
+### 根因：`set_window()` 猜循环，猜不到就抹成 None
+
+```python
+def set_window(self, window):
+    self._window = window
+    try:
+        self._loop = asyncio.get_running_loop()
+    except RuntimeError:
+        self._loop = None      # ← 这里
+```
+
+`main()` 的顺序是 `set_loop(engine_loop)`（第 556 行）→ 建窗口 →
+`set_window(window)`（第 608 行）。窗口在**主线程**里建，主线程上没有
+asyncio 循环（引擎的循环在 `sdm-engine` 线程里），`get_running_loop()`
+必然抛 RuntimeError → **刚设好的引擎循环被抹成 None**。
+
+`_loop is None` 之后 `_run` / `_run_sync` 退化成 `asyncio.run(coro)`——
+**一次性循环**。`engine.start()` 在这个循环里把下载任务 `create_task`
+出去，`asyncio.run` 一返回就拆循环，任务在跑第一行之前就被取消：
+
+- 任务 0 字节、连 socket 都没建过（`lsof` 无对外连接）
+- 暂停/继续/取消都打在错误的循环上，怎么点都没反应
+- `start_event_push()` 因为 `_loop is None` 直接 return，推送通道
+  从来没启动过
+
+**「解析」能成功是因为它自己开循环同步取结果**，不依赖引擎循环——
+这条差异当时就是最关键的线索。
+
+### 教训
+
+- **「猜当前线程的循环」这种写法要极度小心。** 猜测失败时的默认动作
+  不该是「把已有的引用清掉」，而该是「什么都不做」。清空一个别人
+  刚设好的引用，症状会出现在离现场很远的地方（下载不动），现场却
+  一点痕迹都不留。
+- **生命周期回调不要顺手改别人的状态。** `set_window` 的职责是挂窗口。
+  引擎循环只有一个来源（`set_loop`），就别让第二个来源去覆盖它。
+- **一次性循环（`asyncio.run`）不能用来启动常驻任务。** `create_task`
+  出来的任务属于那个循环，循环一关任务就没了。要常驻就用常驻循环。
+- **拿不到栈就别猜。** 「卡在连接中」的第一直觉是服务器/反爬/UA，
+  实际上连第一个请求都没发出去。`lsof` 显示没有对外连接这一条，
+  基本上就把「服务器拦的」这个方向排除了——**先排除明显不可能的
+  方向，再动网络层**。
+
+### 自动分类：把「自动」和「用户选了」在数据上分开
+
+早先前端把下拉框的第一个选项（video）当成分类发给后端，后端再覆盖
+引擎按 URL 猜出来的分类。要修的不是「猜得更准」，而是**让「用户没选」
+这件事能传到后端**：
+
+- 下拉第一个选项是 `auto`，默认选中；自动时传 `null`
+- 后端只有收到具体分类才覆盖引擎的判断
+- 引擎探测之后按**服务器给的文件名**（Content-Disposition）修正分类——
+  URL 常常是无扩展名的 CDN 路径，文件名才是真相
+- 用户手动改过分类，探测就不再自动改
+
+### 全局 UA 的优先级
+
+**站点规则 > 全局 UA > 内置默认 UA**。规则是用户为某个主机专门配的
+「跟这个站点说话的方式」，全局设置只是兜底。清空全局 UA = 恢复内置
+默认，不是「发一个空的 UA」。
+
+### 手动分片数
+
+分片本来就是引擎动态规划的（起始连接数按文件大小和实测速度自己长），
+添加框里挂一个默认 8 的数字框只会让人以为那个数字决定实际分片数。
+去掉之后 `collectAddOptions` 不再传 `chunk_count`，`StartSpec` 里那个
+字段保留（CLI 和早期 API 还能用）。
+
+### 验证方式
+
+- `tests/test_gui_task_lifecycle.py`——set_window 不抹循环、GUI 走一遍
+  真的把字节下下来、下载任务挂在常驻循环上、分类回填与不覆盖、
+  全局 UA 与站点规则优先级、连接池超时有限
+- `tests/test_category_auto_js.mjs`——分类下拉第一个是「自动」、自动时
+  不把分类发给后端、探测成功后自动切分类、手动改过就不改、
+  前端不再有分片数
+- `tests/test_ui_contract.py`——添加对话框**不许**再有分片数输入框
+- 每条都验过「有牙齿」：临时回退修复，确认测试变红

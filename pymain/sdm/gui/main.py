@@ -553,7 +553,13 @@ def main(argv: list[str] | None = None) -> int:
         daemon=True,
     )
     engine_thread.start()
-    bridge.set_loop(engine_loop)
+    # **set_loop 要放在 set_window 之后。**
+    #
+    # 引擎循环是整个下载的生命线：任务是在这个循环上 create_task 的，
+    # 循环一关任务就没了。历史上 `set_window()` 会顺手把 `_loop` 猜成
+    # 「当前线程的循环」，主线程上没循环 → 猜成 None → 把这里设好的
+    # 引擎循环抹掉了。桥接层已经改成不再碰 `_loop`，这里再把顺序摆正，
+    # 两边都不留坑。
 
     # 扩展 dispatch 服务
     dispatch = DispatchServer(
@@ -606,6 +612,8 @@ def main(argv: list[str] | None = None) -> int:
         text_select=True,
     )
     bridge.set_window(window)
+    # 引擎循环交给桥接层——**必须在 set_window 之后**（见上面的说明）。
+    bridge.set_loop(engine_loop)
 
     # 启动时同步开机自启状态。
     #

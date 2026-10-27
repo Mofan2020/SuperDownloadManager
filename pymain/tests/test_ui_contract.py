@@ -286,7 +286,6 @@ ADD_DIALOG_FIELDS = (
     "addCategory",      # 分类
     "addProxy",         # 代理覆盖
     "addHeaders",       # 自定义请求头
-    "addChunkCount",    # 分块数
     "addStartWhen",     # 开始时机
 )
 
@@ -296,6 +295,27 @@ def test_add_dialog_has_field(field: str) -> None:
     """新建任务对话框有规格 §2.2 要求的那些字段。"""
     html = (ASSETS / "index.html").read_text(encoding="utf-8")
     assert f'id="{field}"' in html, f"新建任务对话框缺字段 {field}"
+
+
+def test_add_dialog_has_no_manual_chunk_count() -> None:
+    """**新建任务对话框里不再有手动分片数。**
+
+    分片是引擎动态规划的（起始连接数按文件大小和实测速度自己长），
+    旁边挂一个默认 8 的数字框只会让人以为那个数字决定实际分片数。
+    用户 2026-10-27 明确要求去掉它。
+
+    这条测试是**防它长回来**的：谁想再加回去，这条会红。
+    """
+    html = (ASSETS / "index.html").read_text(encoding="utf-8")
+    assert 'id="addChunkCount"' not in html, "手动分片数输入框又回来了"
+    assert 'id="addChunkMode"' not in html, "分片模式选择器又回来了"
+
+    js = (ASSETS / "app.js").read_text(encoding="utf-8")
+    assert "addChunkCount" not in js, "前端还在读手动分片数"
+    assert "syncChunkMode" not in js, "前端还留着分片模式切换"
+    # 创建任务时不再传 chunk_count（设置页的 max_chunk_count 不算）。
+    assert "chunk_count: chunkCount" not in js, "创建任务还在传 chunk_count"
+    assert "chunk_count: chunk" not in js, "创建任务还在传 chunk_count"
 
 
 def test_add_dialog_url_is_multiline_textarea() -> None:

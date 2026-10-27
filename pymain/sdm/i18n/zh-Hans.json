@@ -291,5 +291,9 @@
   "settingsChunkLimitsHint": "下载开始时的连接数，以及单个任务最多分成几片。",
   "settingsSectionNetwork": "网络",
   "settingsGlobalProxy": "全局代理",
-  "settingsGlobalProxyHint": "所有下载都走这个代理。留空 = 不走代理。"
+  "settingsGlobalProxyHint": "所有下载都走这个代理。留空 = 不走代理。",
+  "categoryAuto": "自动",
+  "settingsUserAgent": "全局 User-Agent",
+  "settingsUserAgentHint": "所有下载默认带这个 UA。留空 = 用程序内置的默认值。站点规则里配的 UA 优先于它。",
+  "settingsUserAgentReset": "恢复默认"
 }

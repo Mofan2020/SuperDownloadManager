@@ -214,6 +214,10 @@ function speedCellText(task) {
 // **分类名走 i18n**（key 字段）——原来直接把英文枚举值首字母大写
 // 显示（"Video" / "Music"），中文界面下夹着英文很难看，而且
 // 换语言时那几行不变。
+// 程序内置的默认 UA。跟后端 `content_sniffer.USER_AGENT` 保持一致——
+// 这里只是给用户看个样子，让他知道留空时发的是什么。
+const DEFAULT_USER_AGENT = "SDM/2.0 (+https://github.com/Mofan2020/SuperDownloadManager)";
+
 const CATEGORY_META = {
   video:     { icon: "video",    color: "#DB2777", key: "categoryVideo" },
   music:     { icon: "music",    color: "#9333EA", key: "categoryMusic" },
@@ -1612,6 +1616,15 @@ function renderSettings() {
   }, ["http", "https", "socks4", "socks5"].map((v) =>
     el("option", { value: v, text: v, selected: (s.proxy_scheme || "http") === v })));
 
+  // 全局 UA。空 = 内置默认（后端有默认值，前端这里只提示）。
+  const uaInput = el("input", {
+    class: "input", type: "text",
+    value: s.network_user_agent || "",
+    placeholder: DEFAULT_USER_AGENT,
+  });
+  uaInput.addEventListener("change", () =>
+    saveSettings({ network_user_agent: uaInput.value.trim() }));
+
   wrap.appendChild(el("div", { class: "setting-section" }, [
     el("div", { class: "setting-section-title", text: t("settingsSectionNetwork") }),
     el("div", { class: "card" }, [
@@ -1619,6 +1632,19 @@ function renderSettings() {
         el("label", { class: "field-label", text: t("settingsGlobalProxy") }),
         el("div", { class: "field-row" }, [proxyInput, proxyScheme]),
         el("div", { class: "field-hint", text: t("settingsGlobalProxyHint") }),
+      ]),
+      // 全局 User-Agent。留空 = 用程序内置的默认 UA。
+      // **站点规则里的 UA 优先于它**——规则是用户为某个主机专门配的。
+      el("div", { class: "field", style: "margin-top:14px" }, [
+        el("label", { class: "field-label", text: t("settingsUserAgent") }),
+        el("div", { class: "field-row" }, [
+          uaInput,
+          el("button", {
+            class: "btn btn-sm", type: "button",
+            onclick: () => { uaInput.value = ""; saveSettings({ network_user_agent: "" }); },
+          }, [el("span", { text: t("settingsUserAgentReset") })]),
+        ]),
+        el("div", { class: "field-hint", text: t("settingsUserAgentHint") }),
       ]),
     ]),
   ]));
@@ -1891,6 +1917,9 @@ const AddDialog = {
   token: 0,
   // 用户手动改过保存目录就别再自动覆盖了。
   useCustomDir: false,
+  // 用户手动改过分类就别再让探测自动切换了——
+  // 用户选「视频」就是视频，程序别跟他抢。
+  categoryTouched: false,
 };
 
 function openAddDialog() {
@@ -1912,6 +1941,7 @@ function resetAddDialog() {
   AddDialog.probing = false;
   AddDialog.token++;
   AddDialog.useCustomDir = false;
+  AddDialog.categoryTouched = false;
 
   const url = document.getElementById("addUrl");
   if (url) url.value = "";
@@ -1921,10 +1951,6 @@ function resetAddDialog() {
   if (proxy) proxy.value = "";
   const dir = document.getElementById("addSaveDir");
   if (dir) dir.value = "";
-  const chunkMode = document.getElementById("addChunkMode");
-  if (chunkMode) chunkMode.value = "auto";
-  const chunkCount = document.getElementById("addChunkCount");
-  if (chunkCount) { chunkCount.value = "8"; chunkCount.disabled = true; }
   const startWhen = document.getElementById("addStartWhen");
   if (startWhen) startWhen.value = "now";
   const at = document.getElementById("addScheduleAt");
@@ -1936,19 +1962,26 @@ function resetAddDialog() {
   if (probeErr) { probeErr.textContent = ""; probeErr.hidden = true; }
 
   fillCategorySelect();
-  syncChunkMode();
   setProbeState(null, "");
   syncDefaultDir();
 }
 
 // 分类下拉。分类名走 i18n。
+//
+// **「自动」排在最前面，而且默认选中。**
+// 早先前端把下拉框的第一个选项（视频）当成分类发给后端，
+// 引擎按 URL 猜出来的正确分类就被顶掉了——用户加一个 .dmg，
+// 列表里却归在「视频」。默认「自动」+ 后端不覆盖，自动分类
+// 才真的自动。
 function fillCategorySelect() {
   const sel = document.getElementById("addCategory");
   if (!sel) return;
   clear(sel);
+  sel.appendChild(el("option", { value: "auto", text: t("categoryAuto") }));
   Object.keys(CATEGORY_META).forEach((cat) => {
     sel.appendChild(el("option", { value: cat, text: categoryLabel(cat) }));
   });
+  sel.value = "auto";
 }
 
 // 保存目录跟着分类走——除非用户自己改过。
@@ -1957,7 +1990,11 @@ async function syncDefaultDir() {
   const sel = document.getElementById("addCategory");
   const dir = document.getElementById("addSaveDir");
   if (!sel || !dir) return;
-  const res = await api()?.get_default_dir(sel.value);
+  // 分类是「自动」时，后端要靠 URL 猜目录（.dmg → Software）。
+  const url = firstUrlLine(document.getElementById("addUrl")?.value || "");
+  const res = url
+    ? await api()?.get_default_dir(sel.value, url)
+    : await api()?.get_default_dir(sel.value);
   dir.value = res?.path || "";
 }
 
@@ -2021,6 +2058,17 @@ async function probeAddUrl() {
       // 用户自己填了文件名就别覆盖。
       if (name && !name.value.trim()) name.value = res.filename;
     }
+    // **按真实文件名自动切换分类。**
+    // 探测拿到的是服务器给的文件名（Content-Disposition），
+    // 按扩展名就知道它是什么——.dmg 是程序、.zip 是压缩包。
+    // 用户手动改过分类就别动他的选择。
+    if (!AddDialog.categoryTouched && res.category && CATEGORY_META[res.category]) {
+      const sel = document.getElementById("addCategory");
+      if (sel && sel.value !== res.category) {
+        sel.value = res.category;
+        await syncDefaultDir();
+      }
+    }
     return;
   }
 
@@ -2069,22 +2117,16 @@ function collectAddOptions() {
     if (key && val) headers[key] = val;
   });
 
-  const chunkMode = value("addChunkMode");
-  const chunkRaw = value("addChunkCount");
-  let chunkCount = null;
-  if (chunkMode === "manual") {
-    const n = parseInt(chunkRaw, 10);
-    if (n > 0) chunkCount = n;
-  }
-
   const startWhen = value("addStartWhen") || "now";
+  // 分类是「自动」时传 null——后端会按 URL 和服务器给的文件名判断。
+  // 传一个具体分类才表示「用户选的就是这个」。
+  const cat = value("addCategory");
   const options = {
     filename: value("addFilename") || null,
     save_dir: value("addSaveDir") || null,
-    category: value("addCategory") || null,
+    category: cat && cat !== "auto" ? cat : null,
     proxy: value("addProxy") || null,
     headers,
-    chunk_count: chunkCount,
     start_when: startWhen,
   };
 
@@ -2135,13 +2177,6 @@ async function submitAddDialog() {
   await refreshTasks();
 }
 
-// 分块数的「自动 / 手动」切换。
-function syncChunkMode() {
-  const mode = document.getElementById("addChunkMode")?.value;
-  const count = document.getElementById("addChunkCount");
-  if (count) count.disabled = mode !== "manual";
-}
-
 // 接上对话框里的所有交互。页面加载时调一次。
 function wireAddDialog() {
   const root = document.getElementById("addTaskRoot");
@@ -2160,9 +2195,13 @@ function wireAddDialog() {
   }
 
   document.getElementById("addReprobe")?.addEventListener("click", probeAddUrl);
-  document.getElementById("addChunkMode")?.addEventListener("change", syncChunkMode);
 
-  document.getElementById("addCategory")?.addEventListener("change", syncDefaultDir);
+  // 分类被用户动过之后，探测就不该再自动改回去了。
+  document.getElementById("addCategory")?.addEventListener("change", (e) => {
+    AddDialog.categoryTouched = true;
+    syncDefaultDir();
+    void e;
+  });
 
   const dir = document.getElementById("addSaveDir");
   dir?.addEventListener("input", () => { AddDialog.useCustomDir = true; });

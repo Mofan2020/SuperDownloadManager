@@ -28,7 +28,7 @@ from pathlib import Path
 
 from ..history_store import HistoryEntry, HistoryStore
 from ..logging_setup import CAT_ENGINE, CAT_QUEUE, CAT_STORE, get_logger
-from .categories import category_from_url
+from .categories import DownloadCategory, category_for_download, category_from_url
 from .content_sniffer import ContentProbe, ProbeError
 from .download_flow import DownloadFlow, FlowError, FlowFailure
 from .errors import ErrorCategory, TaskError
@@ -170,6 +170,26 @@ class TaskSummary:
         return payload
 
 
+def _resolve_category_id(name: str | None) -> str | None:
+    """把外部传来的分类名解析成合法的分类 id。
+
+    `auto` / 空串 / 认不出来的值都返回 None——意思是「**自动**」，
+    由引擎自己判断。前端的「自动」选项就是这么表达的。
+
+    认不出来的值也当自动处理：宁可让引擎猜一个，也别把任务归到
+    一个不存在的分类里（那样列表按分类筛就找不到它）。
+    """
+    if not name:
+        return None
+    value = str(name).strip().lower()
+    if not value or value == "auto":
+        return None
+    try:
+        return DownloadCategory(value).value
+    except ValueError:
+        return None
+
+
 @dataclass
 class StartSpec:
     """启动一个下载所需的参数。"""
@@ -187,6 +207,13 @@ class StartSpec:
     proxy: str | None = None
     #: 分块数。None = 自动（动态分段自己长）。
     chunk_count_override: int | None = None
+    #: 用户在添加对话框里**显式选**的分类（分类 id）。
+    #: None = 自动——由引擎按 URL / 服务器给的文件名判断。
+    #:
+    #: **必须区分「自动」和「用户选了视频」。** 早先前端把下拉框的
+    #: 默认值（视频）当成分类发过来，引擎按 URL 猜出来的正确分类
+    #: 就被覆盖了——用户加一个 .dmg，列表里却归在视频。
+    category: str | None = None
     #: 开始时机：`now` / `queue` / `scheduled`。
     start_when: str = "now"
     #: 校验算法：md5 / sha1 / sha256 / None。
@@ -398,6 +425,17 @@ class DownloadEngine:
     async def set_ignore_ssl(self, value: bool) -> None:
         self.downloader.set_ignore_ssl(value)
 
+    async def set_user_agent(self, value: str | None) -> None:
+        """换全局 User-Agent。
+
+        空 = 恢复内置默认。**站点规则的 UA 仍然优先**——规则是
+        用户为某个主机显式配的，覆盖全局设置。
+
+        跟 SSL 开关一样是 async：改 UA 等于重建 httpx 客户端，
+        这件事应该在引擎自己的事件循环里做，别从别的线程插手。
+        """
+        self.downloader.set_user_agent(value)
+
     async def set_global_proxy(self, proxy: str | None) -> None:
         """全局代理（规格 §1.6）。空 / None = 直连。
 
@@ -452,6 +490,10 @@ class DownloadEngine:
             "size": probe.content_length,
             "final_url": probe.url,
             "accepts_ranges": bool(probe.range_supported),
+            # **把分类一起给出去。** 添加对话框据此把「自动」换成
+            # 具体的分类，保存目录也跟着落到对应的子目录里——
+            # 用户加一个 .dmg，不用手动选就知道它该进 Software。
+            "category": category_for_download(url, probe.suggested_filename).value,
             "error": None,
             "error_category": None,
         }
@@ -583,12 +625,15 @@ class DownloadEngine:
             )
             destination = Path(spec.destination_directory) / filename
 
+            # 分类：用户显式选的优先，否则按 URL 猜一个「预估值」。
+            # 预估值在探测拿到真实文件名之后还会被修正（见 _run_task）。
+            chosen = _resolve_category_id(spec.category)
             summary = TaskSummary(
                 id=task_id,
                 url=spec.url,
                 state=TaskState.QUEUED.value,
                 destination=str(destination),
-                category=category_from_url(spec.url).value,
+                category=chosen or category_from_url(spec.url).value,
                 filename=filename,
                 started_at=time.time(),
                 checksum_algorithm=spec.checksum_algorithm,
@@ -732,6 +777,22 @@ class DownloadEngine:
                 new_dest = Path(summary.destination).parent / real_name
                 summary.destination = str(new_dest)
                 summary.filename = real_name
+
+            # **分类按真实文件名修正。**
+            #
+            # URL 可能是无扩展名的 CDN 路径（`/download/12345`），
+            # 服务器在 `Content-Disposition` 里给的真实文件名才是
+            # 文件真正的类型。用户没手动选分类时（自动），这里用
+            # 真实文件名重判一次；用户手动选了就一个字都不改。
+            if not _resolve_category_id(spec.category):
+                refined = category_for_download(spec.url, probe.suggested_filename)
+                if refined.value != summary.category:
+                    log.info(
+                        CAT_ENGINE,
+                        f"任务 {summary.filename} 的分类按真实文件名修正: "
+                        f"{summary.category} → {refined.value}",
+                    )
+                    summary.category = refined.value
 
         destination = Path(summary.destination)
 
