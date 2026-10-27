@@ -1226,3 +1226,88 @@ asyncio 循环（引擎的循环在 `sdm-engine` 线程里），`get_running_loo
   前端不再有分片数
 - `tests/test_ui_contract.py`——添加对话框**不许**再有分片数输入框
 - 每条都验过「有牙齿」：临时回退修复，确认测试变红
+
+---
+
+## v2.2.0 浏览器接管的几个决策
+
+### Safari 不签名，走「未签名的临时扩展」
+
+本项目**没有 Apple Developer Program 开发者签名**，所以 Safari 扩展
+不签名。Apple 官方给未签名扩展留的路子（macOS 17 / Safari 17 起）是：
+设置 → 高级 → 「显示网页开发者功能」→ 设置 → 开发者 → 「允许未签名的
+扩展」→ 设置 → 开发者 → 「添加临时扩展…」。
+
+**不需要 Xcode，不需要开发者账号。**
+
+代价是平台给的两条硬限制：退出 Safari 会重置「允许未签名的扩展」，
+临时扩展最长 24 小时。这两条不是工程问题，只能在界面和文档里如实标出。
+
+> 早先 v1.0 记的「Safari 强制 7 天重签」已经不适用——那条说的是
+> **签名**扩展的过期规则；现在走的是**临时**扩展，完全不签名。
+
+### 回环 HTTP 端口绝不开 `/pair`
+
+那个端口带着 `Access-Control-Allow-Origin: *`，**任何网页**都能调。
+在上面开 `/pair` 等于把配对 token 贴给整个互联网——谁拿到谁就能往
+用户的下载器塞任务。
+
+所以 Safari 没有原生消息宿主时**必须手动粘一次 token**（扩展选项页和
+弹窗折叠区都给了输入框）。Chrome / Edge / Firefox 装了原生宿主就自动
+配对，不需要用户操心。
+
+### Chrome / Edge 的扩展 ID 用公钥钉死
+
+宿主清单里的 `allowed_origins` 必须跟扩展的 origin **精确一致**，否则
+Chrome 直接拒绝拉起宿主（表现是 "Access to the specified native messaging
+host is forbidden"）。
+
+而「加载已解压的扩展程序」装出来的扩展，ID 默认按**目录路径**算哈希——
+换个机器、换个目录就变了，清单永远对不上。所以 Chrome / Edge 的
+manifest 里写死一把公钥（`key` 字段），ID 恒为
+`bangcjehjdodcpfekmnkfmbeffcclpih`。
+
+**升级扩展时不要换这把公钥**——一换 ID 就变了，所有装好的宿主清单全部
+失效。`tests/test_extensions_manifests.py` 里有一条测试盯着「manifest
+里的 key 算出来的 ID」和「代码里写死的 ID」是否一致，drift 会直接红。
+
+Firefox 不需要这一步：它的扩展 ID 是 manifest 里
+`browser_specific_settings.gecko.id` 自己定的，宿主清单用
+`allowed_extensions` 授权。
+
+### 判定「装没装」靠 manifest 里的名字，不靠扩展 ID
+
+Chromium 系扩展目录的路径是 `<profile>/Extensions/<id>/<版本>/`，那个
+`<id>` 每个开发者都不一样（商店分配的，或者按目录算的）。所以扫描时
+读 manifest 的 `name` 字段比对。
+
+Firefox 装好的扩展是 `.xpi`（zip），manifest 在压缩包里——读的时候
+得先当 zip 解。
+
+Safari 的临时扩展不进普通扩展目录，只有 `pluginkit -mAvvv -p
+com.apple.Safari.web-extension` 知道。
+
+### 扩展跟着应用打包
+
+扩展只躺在源码仓库里的话，装应用的用户永远拿不到它——而浏览器的
+「加载已解压的扩展程序」要选的就是那个目录。所以：
+
+- macOS：`Contents/Resources/extensions/<浏览器>/`
+- Windows（onefile）：`sys._MEIPASS/extensions/<浏览器>/`
+
+应用的「设置 → 浏览器接管」板块直接把目录在访达/资源管理器里打开，
+用户选一下就装好了。
+
+### 验证方式
+
+- `tests/test_browser_capture.py`——三个浏览器的静态信息对（Safari 必须
+  手动配对、不能自动接管）、按 manifest 名字认装没装、`.xpi` 当 zip 读、
+  重置 token 后旧 token 立刻作废、打包版的扩展目录在 `.app` 的
+  `Contents/Resources` 和 onefile 的 `_MEIPASS` 里都能找对
+- `tests/test_browser_capture_js.mjs`——设置页板块：三个浏览器都列出来、
+  装没装如实显示、Safari 写明只能手动派单、Safari 不给「打开扩展管理页」
+  按钮、复制 token 进剪贴板、重新生成调后端
+- `tests/test_extensions_manifests.py`——Chrome / Edge 的 manifest 带
+  `key`，且算出来的 ID 等于代码里写死的那个
+- `tests/test_native_host.py`——默认清单写真 ID 不留占位符；Firefox 的
+  清单不带 `allowed_origins`
