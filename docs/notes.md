@@ -1094,6 +1094,16 @@ CSS 自定义属性的 `var()` 是在**声明它的那个元素**上做替换的
   组合都测；缺 playwright 就跳过，CI 上没有浏览器）
 - 每条新测试都验过「有牙齿」：临时回退修复，确认测试变红
 
+## v2.1.3 的发布状态
+
+v2.1.3 已由 GitHub Actions 发布，并在用户手测通过后从 Pre-release 转成
+**正式版**（`gh release edit v2.1.3 --prerelease=false`）：
+
+> https://github.com/Mofan2020/SuperDownloadManager/releases/tag/v2.1.3
+
+workflow 本身仍然只发 Pre-release（`release-python.yml`），转正式版这一步
+始终是人工确认后的手动动作——按仓库约定，未经手测不转正式版。
+
 ## v2.1.3：任务卡住不动的根因，和怎么把它挖出来
 
 用户报「一直卡在连接中」。上一轮（v2.1.2）把同类症状当成网络问题修过
