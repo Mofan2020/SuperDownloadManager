@@ -1311,3 +1311,65 @@ com.apple.Safari.web-extension` 知道。
   `key`，且算出来的 ID 等于代码里写死的那个
 - `tests/test_native_host.py`——默认清单写真 ID 不留占位符；Firefox 的
   清单不带 `allowed_origins`
+
+---
+
+## v2.2.1 剪贴板监控：两个平台都从来没工作过
+
+用户 2026-10-28 实测发现（macOS 和 Windows 同时复现）。这类 bug 的
+共同点：**它是个纯后台功能，不工作的时候界面上一点线索都没有**。
+
+### macOS：AppleScript 写错了
+
+```python
+subprocess.run(["osascript", "-e", "pbpaste"])   # 错的
+```
+
+`pbpaste` 是 **shell 命令**，不是 AppleScript 命令。AppleScript 解释器
+把它当变量名，报「变量"pbpaste"没有定义」(-2753)、退出码非 0 →
+读取函数返回 `(None, -1)` → **每一轮都失败**。
+
+AppleScript 里读剪贴板的正确写法是 `the clipboard`（Standard Additions
+的**属性**，不是命令）。
+
+修法：优先调 `/usr/bin/pbpaste`（纯文本输出，文件类剪贴板时输出空、
+退出码 0，不会误报），`osascript -e "the clipboard"` 兜底。
+
+### Windows：没声明 restype，句柄被截断
+
+`GetClipboardData` 返回 `HANDLE`（64 位）。**ctypes 在没声明 `restype`
+时默认按 `c_int` 返回** → 64 位 Windows 上句柄被截成 32 位 → 低 32 位
+最高位为 1 时 `c_void_p(handle)` 补成错指针 → `GlobalLock` 拿不到数据
+→ 读出来是空的。
+
+修法：所有 Win32 调用都声明 `argtypes` / `restype`，句柄类一律用
+`wintypes.HANDLE`（`c_void_p`）。
+
+### 开关打开 ≠ 监听在跑
+
+监听线程之前是「启动那一刻设置已经开着才起」。从设置页或 Windows 托盘
+把开关打开 → 设置写对了，**线程没跑**。
+
+**根治办法是让线程常驻**，而不是给每个入口补一次 `start()`：入口会
+越加越多，补一次漏一个。常驻之后「开不开」由线程每轮读设置决定
+（`_capture_enabled` 本来就是这么设计的，只是没人保证线程在跑）。
+
+### 教训：失败要出声
+
+读失败原来只有一条 **debug** 级日志。Windows 用户默认日志级别是
+warning，那条他们根本看不到 —— 功能不工作 + 没有错误信息 = 无从查起。
+
+后台功能（剪贴板、扩展派单、通知）的失败一律 **warning**，并且要节流
+（30 秒一条），不然每 0.5 秒一次轮询能刷几千行把真正的错误淹掉。
+
+### 验证方式
+
+- `tests/test_clipboard.py`——macOS 用的命令不是坏写法（源码级断言）、
+  真读一次剪贴板拿得到文本、Windows 的 `restype` 是 `HANDLE`、
+  64 位句柄读得出文本、剪贴板被占用/没有文本时不抛异常、
+  `CloseClipboard` 一定被调、监听线程无条件起、开关后来打开会开始检查、
+  bridge 统一出口会推 `settings_updated`、托盘走 bridge、失败是
+  warning 级且被节流
+- **变异测试**：把 Win32 声明去掉 → `test_windows_reads_text_with_a_64bit_handle` 红；
+  把命令换回 `osascript -e "pbpaste"` → macOS 那两条红
+- **真机端到端**：把一个 `.dmg` 链接放进剪贴板，监听器真的收到了候选

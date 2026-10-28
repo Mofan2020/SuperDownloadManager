@@ -302,24 +302,29 @@ _tray_controller = None
 
 #: 剪贴板监听器的强引用。
 #:
-#: 启动时 `capture_clipboard` 是关的，监听线程压根没跑；用户后来在
-#: 菜单栏勾上，得有个地方把它起起来。
+#: 监听线程是**常驻**的（启动时无条件起），开关状态由它每轮自己读
+#: 设置（clipboard.py 的 `_capture_enabled`）——所以任何入口把开关
+#: 打开，下一轮就生效，不需要谁负责起线程。
 _clipboard_monitor = None
 
 
-def _start_clipboard_monitor() -> None:
-    """起剪贴板监听。
+def _start_clipboard_monitor(bridge) -> ClipboardMonitor:
+    """起剪贴板监听，**无条件**。
 
-    监听线程每轮自己读 `capture_clipboard`（clipboard.py 的
-    `_capture_enabled`），所以**关**不用管——下一轮它自己就停了。
-    但**开**要管：线程没起就永远不监听。
+    「开不开」不是这里决定的——监听线程每轮自己读
+    `settings.capture_clipboard`（clipboard.py 的 `_capture_enabled`）。
+
+    之前这里是 `if settings.settings.capture_clipboard: clipboard.start()`
+    ——**只在启动那一刻设置已经开着的时候才起线程**。于是用户从
+    设置页、或从 Windows 托盘把开关打开，设置写对了但**线程压根
+    没跑**，剪贴板监控等于没有，而且没有任何报错。
+
+    抽成函数是为了能直接测它：测试只要看「这个函数返回的监听器
+    线程是不是活的」，不需要真的开窗口。
     """
-    if _clipboard_monitor is None:
-        return
-    try:
-        _clipboard_monitor.start()
-    except Exception as err:
-        log.debug(CAT_GUI, f"启动剪贴板监听失败: {err}")
+    monitor = ClipboardMonitor(on_candidate=bridge.set_clipboard_candidate)
+    monitor.start()
+    return monitor
 
 
 def _remove_resident_entries() -> None:
@@ -431,20 +436,21 @@ def _install_status_bar(bridge, window, on_quit=None, on_show=None) -> None:
     def toggle_clipboard() -> None:
         """切换「剪贴板监控」。
 
-        **写的是 `settings.capture_clipboard`**——菜单栏、托盘、设置页
-        说的是同一件事。写完还得把勾选状态同步回菜单，不然勾还是
-        原来那个。
+        **走 bridge 的统一出口**——写的是 `settings.capture_clipboard`
+        （菜单栏、托盘、设置页说的是同一件事），写完推一次
+        `settings_updated`，设置页上的开关跟着变。
+
+        监听线程是常驻的（`gui/main.py` 里无条件 `clipboard.start()`），
+        开关状态由它每轮自己读——**这里不需要起线程**。
         """
         try:
             current = bool(SettingsStore.shared().settings.capture_clipboard)
             new_value = not current
-            macos_status.set_clipboard_monitor_enabled(new_value)
+            result = bridge.set_clipboard_monitor(new_value)
+            if not result.get("ok"):
+                log.debug(CAT_GUI, f"切换剪贴板监控失败: {result.get('error')}")
+                return
             controller.set_clipboard_checked(new_value)
-            # 监听器每轮自己读设置（clipboard.py 的 _capture_enabled），
-            # 关掉下一轮就停；**开的时候得把线程起起来**——启动时
-            # 设置是关的，线程压根没跑。
-            if new_value:
-                _start_clipboard_monitor()
         except Exception as err:
             log.debug(CAT_GUI, f"切换剪贴板监控失败: {err}")
 
@@ -573,11 +579,12 @@ def main(argv: list[str] | None = None) -> int:
         log.warning(CAT_GUI, f"扩展 dispatch 服务启动失败（浏览器接管不可用）: {err}")
 
     # 剪贴板监听
-    clipboard = ClipboardMonitor(on_candidate=bridge.set_clipboard_candidate)
-    if settings.settings.capture_clipboard:
-        clipboard.start()
-    # **菜单栏的「剪贴板监控」勾选项要能把它起起来**（启动时设置是关的，
-    # 线程压根没跑）。
+    #
+    # **无条件起线程。** 「开不开」由监听线程自己每轮读设置决定
+    # （clipboard.py 的 `_capture_enabled`）。之前是「启动时设置
+    # 已经是开的才起线程」——于是用户从设置页、或 Windows 托盘把
+    # 开关打开，设置写对了但**线程压根没跑**，剪贴板监控等于没有。
+    clipboard = _start_clipboard_monitor(bridge)
     global _clipboard_monitor
     _clipboard_monitor = clipboard
 

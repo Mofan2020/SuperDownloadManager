@@ -1365,6 +1365,31 @@ class GuiBridge:
 
     # -- 剪贴板候选 --------------------------------------------------
 
+    def set_clipboard_monitor(self, enabled: bool) -> dict:
+        """开关剪贴板监控。
+
+        **菜单栏、托盘、设置页三个入口都走这里。**
+
+        之前三个入口各写各的：设置页走 `save_settings`，菜单栏走
+        `macos_status.set_clipboard_monitor_enabled`，托盘走自己那份。
+        写的是同一个设置键倒没错，但**只有设置页那条会推
+        `settings_updated`**——菜单栏和托盘勾完之后，设置页上的开关
+        还是老样子，用户以为没生效。
+
+        监听线程是常驻的（见 `gui/main.py`），开关状态由它每轮自己读，
+        所以这里**不需要**再去起线程——写了设置下一轮就生效。
+        """
+        value = bool(enabled)
+        try:
+            self.settings_store.set("capture_clipboard", value)
+        except Exception as err:
+            log.warning(CAT_GUI, f"写剪贴板监控开关失败: {err}")
+            return {"ok": False, "error": str(err)}
+        payload = self.settings_store.settings.to_dict()
+        # 推给前端——设置页上的开关要跟着变，不然用户以为没点上。
+        self._emit_event("settings_updated", payload)
+        return {"ok": True, "enabled": value, "settings": payload}
+
     def get_clipboard_candidate(self) -> dict | None:
         """前端轮询这个，拿剪贴板里发现的下载链接。"""
         with self._lock:

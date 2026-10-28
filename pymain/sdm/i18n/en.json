@@ -319,5 +319,6 @@
   "browserCaptureHostMissing": "Native messaging host is not installed. Restart the app after installing the extension.",
   "browserCaptureSafariSteps": "Safari install steps: Settings → Advanced → turn on “Show features for web developers”; Settings → Developer → tick “Allow unsigned extensions”; Settings → Developer → “Add Temporary Extension…” → pick the Safari extension folder above; finally tick “Super Download Manager” in Settings → Extensions.",
   "browserCaptureTemporaryNote": "Safari's temporary extensions come with platform limits: they are removed when Safari quits, the “allow unsigned extensions” setting resets too, and a temporary extension expires after 24 hours. The Safari extension can only hand off downloads manually — it cannot capture them automatically.",
-  "browserCaptureReloadHint": "After the extension files change, hit “Reload” once on the browser's extensions page for the change to take effect."
+  "browserCaptureReloadHint": "After the extension files change, hit “Reload” once on the browser's extensions page for the change to take effect.",
+  "settingsToggleClipboardCaptureHint": "Copy a download link and you get a confirmation prompt. Only links whose extension maps to a known file type (zip / dmg / mp4 …) are picked up — ordinary links from chat are ignored."
 }

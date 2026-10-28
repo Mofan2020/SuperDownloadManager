@@ -1,3 +1,69 @@
+## v2.2.1
+
+修剪贴板监控——**macOS 和 Windows 上它从来就没工作过**。用户 2026-10-28
+实测发现的：两个平台都复现。
+
+### macOS：AppleScript 写错了，读取每轮都失败
+
+代码写的是 `osascript -e "pbpaste"`。但 `pbpaste` 是 **shell 命令**，
+不是 AppleScript 命令——AppleScript 解释器把它当成一个变量名，报
+
+```
+0:7: execution error: 变量"pbpaste"没有定义。 (-2753)
+```
+
+退出码非 0 → 读取函数返回 `(None, -1)` → **每一轮都失败**。也就是说
+「剪贴板链接自动识别」这个功能从上线到现在一次都没工作过。
+
+改成直接调 `/usr/bin/pbpaste`：输出纯文本，剪贴板里是文件时输出空、
+退出码 0（不会误报），而且不用每 0.5 秒起一个 AppleScript 解释器。
+`osascript -e "the clipboard"` 留作兜底（那是 AppleScript 里读剪贴板的
+**正确**写法，`the clipboard` 是 Standard Additions 的属性）。
+
+### Windows：句柄被截断，读出来是空的
+
+`GetClipboardData` 返回的是 `HANDLE`（64 位）。代码没声明 `restype`，
+而 ctypes 在没声明时默认按 `c_int` 返回——**64 位 Windows 上句柄被截成
+32 位**。低 32 位最高位是 1 的时候（现代 Windows 的句柄值经常落在
+这个区间），`ctypes.c_void_p(handle)` 会把这个负数补成
+`0xFFFFFFFFxxxxxxxx` 的错指针，`GlobalLock` 拿不到数据 → 读出来是空的。
+
+现在给所有 Win32 调用都声明了 `argtypes` / `restype`，
+`GetClipboardData` 和 `GlobalLock` 的 `restype` 是 `wintypes.HANDLE`。
+
+### 开关打开后线程压根没起
+
+监听线程之前是「**启动那一刻设置已经开着**才起」。于是：
+
+- 用户从设置页把开关打开 → 设置写对了，**线程没跑** → 没反应
+- 用户从 Windows 托盘把开关打开 → 同上，而且托盘那条路**连
+  `start()` 都不调**
+
+现在线程**无条件常驻**，「开不开」由它每轮自己读设置决定
+（`_capture_enabled` 本来就是这么设计的，只是从来没人保证线程在跑）。
+任何入口改开关，下一轮就生效。
+
+### 三个入口统一走一个出口
+
+菜单栏、托盘、设置页之前各写各的设置键——写的是同一个键倒没错，但
+**只有设置页那条会推 `settings_updated`**，菜单栏和托盘勾完之后，
+设置页上的开关还是老样子，用户以为没生效。现在三个入口都走
+`GuiBridge.set_clipboard_monitor()`：写设置 + 推事件 + 状态一致。
+
+### 读失败不再静默
+
+之前读失败只有一条 **debug** 级日志，而 Windows 用户默认日志级别是
+warning——那条根本看不到，「剪贴板监控用不了」在用户那边是一个完全
+无从查起的问题。现在失败是 **warning** 级（30 秒节流，不刷屏）。
+
+### 设置页补了一条说明
+
+「剪贴板链接自动识别」旁边加了一句：只有扩展名能识别成文件类型
+（zip / dmg / mp4 …）的链接才会提示，聊天里的普通链接不会打扰你。
+这是 Swift v1.0.7 起就有的过滤规则，但从来没在界面上说过。
+
+---
+
 ## v2.2.0
 
 **浏览器下载捕获**——Chrome / Edge / Firefox / Safari 四个浏览器的下载

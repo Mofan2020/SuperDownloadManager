@@ -1523,7 +1523,7 @@ function renderSettings() {
     el("div", { class: "card" }, [
       toggleRow(t("settingsLanguage"), t("settingsLanguageHint"), "locale", ["system", "en", "zh-Hans"], s.locale),
       toggleRow(t("settingsToggleAutoCategorize"), "", "classify_enabled", null, s.classify_enabled),
-      toggleRow(t("settingsToggleClipboardCapture"), "", "capture_clipboard", null, s.capture_clipboard),
+      toggleRow(t("settingsToggleClipboardCapture"), t("settingsToggleClipboardCaptureHint"), "capture_clipboard", null, s.capture_clipboard),
       toggleRow(t("settingsToggleSystemNotifications"), "", "notify_on_complete", null, s.notify_on_complete),
       toggleRow(t("settingsToggleHideDockWhenWindowClosed"), "", "hide_dock_when_window_closed", null, s.hide_dock_when_window_closed),
       toggleRow(t("settingsToggleShowToolbarLabels"), "", "toolbar_show_labels", null, s.toolbar_show_labels),

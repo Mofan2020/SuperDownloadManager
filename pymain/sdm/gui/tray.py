@@ -242,12 +242,24 @@ class TrayController:
     def _toggle_clipboard(self, *_args: Any) -> None:
         """切换「剪贴板监控」。
 
-        **写的是同一个设置键**（`capture_clipboard`）——菜单栏、托盘、
-        设置页说的是同一件事。
+        **走 bridge 的统一出口**（`GuiBridge.set_clipboard_monitor`）——
+        写的是同一个设置键（`capture_clipboard`），写完还会推一次
+        `settings_updated`，设置页上的开关跟着变。
+
+        之前托盘自己写设置（`set_clipboard_monitor_enabled`），不推
+        事件：用户从托盘勾完，回头看设置页还是「关」的状态。
         """
         try:
             new_value = not self._clipboard_checked
-            set_clipboard_monitor_enabled(new_value)
+            setter = getattr(self.bridge, "set_clipboard_monitor", None)
+            if callable(setter):
+                result = setter(new_value)
+                if not result.get("ok"):
+                    log.debug(CAT_GUI, f"托盘切换剪贴板监控失败: {result.get('error')}")
+                    return
+            else:
+                # 没有这个接口的假 bridge（测试里用）→ 退回老写法。
+                set_clipboard_monitor_enabled(new_value)
             self._clipboard_checked = new_value
         except Exception as err:
             log.debug(CAT_GUI, f"托盘切换剪贴板监控失败: {err}")

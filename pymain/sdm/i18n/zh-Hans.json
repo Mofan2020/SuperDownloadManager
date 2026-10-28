@@ -319,5 +319,6 @@
   "browserCaptureHostMissing": "原生消息宿主未安装，扩展装上后需要重新打开应用。",
   "browserCaptureSafariSteps": "Safari 安装步骤：设置 → 高级 → 打开「显示网页开发者功能」；设置 → 开发者 → 勾选「允许未签名的扩展」；设置 → 开发者 → 「添加临时扩展…」→ 选中上面的 Safari 扩展目录；最后到设置 → 扩展里勾上「Super Download Manager」。",
   "browserCaptureTemporaryNote": "Safari 的临时扩展有平台限制：退出 Safari 会被移除，「允许未签名的扩展」也会重置，需要重新添加；临时扩展最长 24 小时。Safari 扩展只能手动派单，不能自动接管下载。",
-  "browserCaptureReloadHint": "扩展文件更新后，要在浏览器的扩展管理页里点一次「重新加载」才会生效。"
+  "browserCaptureReloadHint": "扩展文件更新后，要在浏览器的扩展管理页里点一次「重新加载」才会生效。",
+  "settingsToggleClipboardCaptureHint": "复制一个下载链接就会弹出确认。只有扩展名能识别成文件类型（zip / dmg / mp4 …）的链接才会提示，聊天里的普通链接不会打扰你。"
 }
