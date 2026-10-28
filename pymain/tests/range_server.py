@@ -42,8 +42,12 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
     timeline: ClassVar[list[tuple[float, int]]] = []
     #: **并发时间轴**：`(时刻, 此刻在飞的请求数)`。
     concurrency_timeline: ClassVar[list[tuple[float, int]]] = []
+    #: **每请求字节时间轴**：`(时刻, 请求 id, 这一笔发了多少字节)`。
+    request_timeline: ClassVar[list[tuple[float, int, int]]] = []
     _timeline_lock: ClassVar[threading.Lock] = threading.Lock()
     _total_sent: ClassVar[int] = 0
+    #: 请求计数器。给每个请求一个 id，用来数「尾段里有几条连接在发」。
+    _request_seq: ClassVar[int] = 0
 
     @classmethod
     def reset_timeline(cls) -> None:
@@ -51,7 +55,9 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
         with cls._timeline_lock:
             cls.timeline = []
             cls.concurrency_timeline = []
+            cls.request_timeline = []
             cls._total_sent = 0
+            cls._request_seq = 0
             cls.active_requests = 0
             cls.max_concurrent = 0
             cls.request_count = 0
@@ -77,6 +83,22 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
         with cls._timeline_lock:
             cls.concurrency_timeline.append((time.monotonic(), active))
 
+    @classmethod
+    def _record_request_bytes(cls, request_id: int, count: int) -> None:
+        """记一笔「这个请求在这一刻发了多少字节」。
+
+        **用来数「尾段里到底有几条连接在干活」。** 这是**跟机器
+        快慢完全无关**的结构指标：
+
+        - 尾段（后 20% 的字节）如果只由 1 条连接在发 → 长尾没治
+        - 尾段如果有好几条连接各自都在发 → 活分开了
+
+        比「尾段平均并发 ÷ 峰值并发」更稳——后者受连接爬坡时机
+        影响，在慢机器上会飘（实测 CI 上飘到 0.65，本机 0.83）。
+        """
+        with cls._timeline_lock:
+            cls.request_timeline.append((time.monotonic(), request_id, count))
+
     def end_headers(self) -> None:
         """每个响应都声明 Connection: close。
 
@@ -91,6 +113,8 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
 
     payload_path: Path = Path()
     total_bytes: int = 0
+    #: 这个请求的 id（`do_GET` 入口分配）。用来在时间轴上区分连接。
+    _request_id: int = 0
     #: 每个 4KB 块之间的延迟，用来模拟慢速连接
     chunk_delay: float = 0.0
     #: True = 每个块之间都延迟；False = 只在发第一块前延迟一次
@@ -115,6 +139,10 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
         if type(self).active_requests > type(self).max_concurrent:
             type(self).max_concurrent = type(self).active_requests
         type(self)._record_concurrency(type(self).active_requests)
+        # 给这个请求一个 id——用来数「尾段里有几条连接在发」。
+        with type(self)._timeline_lock:
+            type(self)._request_seq += 1
+            self._request_id = type(self)._request_seq
         try:
             self._do_GET()
         finally:
@@ -194,6 +222,7 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
                     return
                 sent += len(block)
                 type(self)._record_sent(len(block))
+                type(self)._record_request_bytes(self._request_id, len(block))
                 if self.chunk_delay:
                     # delay_per_block=False 时：只在第一块**之前**延迟一次，
                     # 之后各块之间不延迟。这样每分片耗时 = 一次延迟，
