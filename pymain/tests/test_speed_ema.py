@@ -418,7 +418,7 @@ def test_failed_task_is_written_to_history(tmp_path) -> None:
 
 
 def test_cleanup_deletes_expired_rotated_logs(tmp_path) -> None:
-    """清理逻辑：过期���轮转文件被删，没过期的留着。
+    """清理逻辑：过期的轮转文件被删，没过期的留着。
 
     直接调清理方法，目录指向 tmp_path——**不碰用户真实的
     日志目录**（~/Library/Logs/SuperDownloadManager/）。

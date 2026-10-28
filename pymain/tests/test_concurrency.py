@@ -252,9 +252,14 @@ def test_partial_file_preserved_on_failure(tmp_path: Path) -> None:
                 pass  # 失败是预期的（服务器被关掉了）
 
             # partial 文件应该还在，且有内容
-            partial = dest.with_name(dest.name + ".sdm.partial-0")
+            # **在工作目录里，不在下载目录里。**
+            from sdm.engine import work_dir
+
+            partial = work_dir.partial_path(dest, 0)
             assert partial.exists(), "失败后 partial 文件被删了"
             assert partial.stat().st_size > 0, "partial 文件是空的"
+            # 下载目录里不该有任何辅助文件。
+            assert not list(tmp_path.glob("*.sdm.*")), "下载目录被辅助文件污染了"
         finally:
             srv.stop()
 

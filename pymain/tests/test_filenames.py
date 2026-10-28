@@ -128,10 +128,17 @@ class TestUniquePath:
         p.write_bytes(b"x")
         out = unique_path(p)
         assert out != p
-        assert out.name == "a-1.zip"
+        # 跟 macOS 一致：空格 + 编号，编号在扩展名之前。
+        assert out.name == "a 1.zip"
 
     def test_increments(self, tmp_path) -> None:
         (tmp_path / "a.zip").write_bytes(b"x")
-        (tmp_path / "a-1.zip").write_bytes(b"x")
+        (tmp_path / "a 1.zip").write_bytes(b"x")
         out = unique_path(tmp_path / "a.zip")
-        assert out.name == "a-2.zip"
+        assert out.name == "a 2.zip"
+
+    def test_keeps_extension_at_the_end(self, tmp_path) -> None:
+        """没有扩展名时编号也是加在最后。"""
+        (tmp_path / "movie").write_bytes(b"x")
+        out = unique_path(tmp_path / "movie")
+        assert out.name == "movie 1"

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import sys
 from pathlib import Path
 from typing import ClassVar
@@ -83,8 +84,16 @@ def test_dynamic_planner_splits_largest_incomplete_chunk():
     assert planner.take_pending() is not None
 
 
-def test_dynamic_planner_never_exceeds_target():
-    """分片数不超过目标值。"""
+def test_dynamic_planner_never_exceeds_the_hard_cap():
+    """分片数不超过**硬上限**（`max_chunks`）。
+
+    **不是「目标分片数」。** 以前拿 `target` 当硬上限，那等于
+    「分片数不许超过连接数」——空闲连接想切最大的未完成分片都切
+    不动，只能下班。下载末尾的活就没人接了，速度掉到 1/N。
+
+    分片数比连接数多是**故意的**：多出来的分片就是给空闲连接
+    准备的活干。
+    """
     planner = DynamicPlanner(
         RangeStrategy(min_chunk_size=1024, max_chunks=64),
         content_length=64 * 1024,
@@ -93,7 +102,35 @@ def test_dynamic_planner_never_exceeds_target():
     )
     while planner.split_largest() is not None:
         pass
-    assert planner.chunk_count == 4
+    assert planner.chunk_count == 64
+    # 分片布局仍然完整覆盖整个文件——拆得再碎也不能有空洞。
+    chunks = sorted(planner.chunks(), key=lambda c: c.start)
+    assert chunks[0].start == 0
+    assert chunks[-1].end == 64 * 1024
+    for previous, current in itertools.pairwise(chunks):
+        assert current.start == previous.end
+
+
+def test_dynamic_planner_splits_beyond_the_target_for_idle_connections():
+    """**目标分片数不是上限**——空闲连接必须有活干。
+
+    这是长尾的根源：以前分片数一到 `target` 就不再拆，空闲的
+    worker 直接退出。下载末尾只剩几分片时，活跃连接一路往下掉。
+
+    这条测试钉的是「拆到 target 之后还能继续拆」。
+    """
+    planner = DynamicPlanner(
+        RangeStrategy(min_chunk_size=1024, max_chunks=64),
+        content_length=64 * 1024,
+        initial_chunks=1,
+        target_chunks=4,
+    )
+    # 先拆到超过目标分片数。
+    splits = 0
+    while planner.chunk_count <= 4 and planner.split_largest() is not None:
+        splits += 1
+    assert splits >= 4, f"拆到目标分片数就停了，只拆了 {splits} 次"
+    assert planner.chunk_count > 4, "分片数必须能超过目标分片数"
 
 
 def test_dynamic_planner_stops_when_chunks_get_too_small():
@@ -540,10 +577,95 @@ def test_existing_file_is_kept_not_overwritten(tmp_path, server):
     assert Path(task.destination).exists()
 
 
+def test_duplicate_download_gets_macos_style_number(tmp_path, server):
+    """真下载一次重名文件，落盘的名字要是 macOS 风格。
+
+    **端到端验一次**——上面那条 `test_existing_file_is_kept_not_overwritten`
+    只断言「名字不一样了」，没断言「是什么名字」。命名规则是用户
+    明确提的需求（「末尾加个空格，然后加编号，最后是点扩展名」），
+    得盯死。
+    """
+    existing = tmp_path / "movie.mkv"
+    existing.write_bytes(b"old")
+
+    engine = DownloadEngine()
+
+    async def _inner():
+        spec = StartSpec(
+            url=server.url,
+            destination_directory=tmp_path,
+            filename_override="movie.mkv",
+        )
+        ids = await engine.start([spec])
+        for _ in range(300):
+            task = engine.get(ids[0])
+            if task and task.state in ("completed", "failed", "cancelled"):
+                break
+            await asyncio.sleep(0.05)
+        return engine.get(ids[0])
+
+    task = run_async(_inner)
+    assert task is not None
+    assert task.state == TaskState.COMPLETED.value
+    assert Path(task.destination).name == "movie 1.mkv"
+    # 编号在扩展名之前，扩展名还在最后。
+    assert Path(task.destination).suffix == ".mkv"
+    # 老文件没被动。
+    assert existing.read_bytes() == b"old"
+
+
 def test_name_conflict_policy_default_is_keep_both():
     """默认策略是保留两者。"""
     engine = DownloadEngine()
     assert engine.name_conflict_policy == NAME_CONFLICT_KEEP_BOTH
+
+
+class TestKeepBothNaming:
+    """重名时自动加编号——**格式跟 macOS 一致**。
+
+    macOS 的做法是：在文件名的**末尾**（扩展名之前）加一个空格，
+    再加编号，编号表示这是第几个同名文件。也就是 `a 1.zip`、
+    `a 2.zip`，不是 `a (1).zip` 也不是 `a-1.zip`。
+
+    跟系统保持一致，用户不用适应第二套规则。
+    """
+
+    def test_first_duplicate_gets_number_1(self, tmp_path: Path) -> None:
+        from sdm.engine.download_engine import _resolve_keep_both
+
+        (tmp_path / "a.zip").write_bytes(b"x")
+        out = _resolve_keep_both(tmp_path / "a.zip")
+        assert out.name == "a 1.zip"
+
+    def test_numbers_increment(self, tmp_path: Path) -> None:
+        from sdm.engine.download_engine import _resolve_keep_both
+
+        (tmp_path / "a.zip").write_bytes(b"x")
+        (tmp_path / "a 1.zip").write_bytes(b"x")
+        out = _resolve_keep_both(tmp_path / "a.zip")
+        assert out.name == "a 2.zip"
+
+    def test_extension_stays_at_the_end(self, tmp_path: Path) -> None:
+        """扩展名必须在最后——编号插在主干和扩展名之间。"""
+        from sdm.engine.download_engine import _resolve_keep_both
+
+        (tmp_path / "movie.mkv").write_bytes(b"x")
+        out = _resolve_keep_both(tmp_path / "movie.mkv")
+        assert out.name == "movie 1.mkv"
+        assert out.suffix == ".mkv"
+
+    def test_no_extension_gets_the_number_at_the_end(self, tmp_path: Path) -> None:
+        from sdm.engine.download_engine import _resolve_keep_both
+
+        (tmp_path / "README").write_bytes(b"x")
+        out = _resolve_keep_both(tmp_path / "README")
+        assert out.name == "README 1"
+
+    def test_absent_path_is_returned_unchanged(self, tmp_path: Path) -> None:
+        from sdm.engine.download_engine import _resolve_keep_both
+
+        out = _resolve_keep_both(tmp_path / "fresh.zip")
+        assert out.name == "fresh.zip"
 
 
 # --------------------------------------------------------------------

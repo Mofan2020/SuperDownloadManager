@@ -2,7 +2,7 @@
 
 对应 Swift 版 Engine/ResumeState.swift。
 
-文件格式（`<目标名>.sdm.json`）：
+文件格式（`downloads/<key>.sdm.json`）：
     {
       "url": "...",
       "content_length": 12345,
@@ -25,6 +25,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import work_dir
 from .content_sniffer import ContentProbe
 from .range_planner import Chunk
 
@@ -47,6 +48,12 @@ class ResumeState:
         filename: str,
         chunks: list[Chunk],
     ) -> ResumeState:
+        # **按起始偏移排好序再存。**
+        #
+        # 规划器返回的是「创建顺序」，不是「文件里的位置顺序」——动态
+        # 分段会反复拆在途分片，创建顺序跟字节位置完全对不上。存成
+        # 位置顺序，sidecar 才读得懂（也才每次写出来都一样）。
+        ordered = sorted(chunks, key=lambda c: c.start)
         return cls(
             url=probe.url,
             content_length=probe.content_length or 0,
@@ -54,14 +61,18 @@ class ResumeState:
             last_modified=probe.last_modified,
             accepts_ranges=probe.accepts_ranges,
             filename=filename,
-            chunks=[asdict(c) for c in chunks],
+            chunks=[asdict(c) for c in ordered],
             saved_at=datetime.now(UTC).isoformat(),
         )
 
     @staticmethod
     def sidecar_path(final_path: Path) -> Path:
-        """目标文件旁边的 sidecar：`x.dmg` → `x.dmg.sdm.json`。"""
-        return final_path.with_name(final_path.name + ".sdm.json")
+        """sidecar 的位置：`downloads/<key>.sdm.json`。
+
+        **不在下载目录里。** sidecar 是软件的内部元信息，跟用户
+        要的文件混在一起只会污染下载目录（详见 `work_dir` 模块）。
+        """
+        return work_dir.sidecar_path(final_path)
 
     def write(self, final_path: Path) -> None:
         dst = self.sidecar_path(final_path)

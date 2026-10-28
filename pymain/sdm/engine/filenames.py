@@ -113,10 +113,15 @@ def _split_ext(name: str) -> tuple[str, str]:
 
 
 def unique_path(path: Path) -> Path:
-    """如果目标已存在，生成一个不冲突的路径（`-1`、`-2` 后缀）。
+    """如果目标已存在，生成一个不冲突的路径。
 
-    Windows 上 `file.zip` 存在时不会自动变成 `file (1).zip`，
-    得自己加后缀。
+    **编号的格式跟 macOS 一致：`名字 1.扩展名`。**
+    也就是在文件名的**末尾**（扩展名之前）加一个空格，再加编号，
+    表示这是第几个同名文件。跟系统保持一致，用户不用适应第二套
+    规则——Finder、Safari、邮件客户端都是这么处理重名的。
+
+    之前用的是 `名字-1.扩展名`（连字符），那是 Windows 资源管理器
+    之外的第三种风格，用户看着别扭。
     """
     path = Path(path)
     if not path.exists():
@@ -125,8 +130,8 @@ def unique_path(path: Path) -> Path:
     ext = path.suffix
     parent = path.parent
     for i in range(1, 1000):
-        candidate = parent / f"{stem}-{i}{ext}"
+        candidate = parent / f"{stem} {i}{ext}"
         if not candidate.exists():
             return candidate
     # 1000 个同名文件，不现实。给个时间戳兜底。
-    return parent / f"{stem}-{int(time.time())}{ext}"
+    return parent / f"{stem} {int(time.time())}{ext}"

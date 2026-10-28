@@ -43,6 +43,14 @@ const State = {
   speedHistory: {},
   // 每个任务的错误详情（get_task_error 的结果）。
   taskErrors: {},
+  // 每个任务的分片明细（get_task_detail 的 chunks）。
+  //
+  // **不能挂在 task 对象上。** 列表轮询每 1.5 秒把 `State.tasks`
+  // 整个换成 `get_tasks()` 的结果（列表接口不带分片明细，省内存 +
+  // 省序列化）——挂在 task 上的 chunks 会被这一换抹掉，详情面板里
+  // 分片表刚出现就没了。跟 taskErrors / speedHistory 一样，按
+  // taskId 单独存。
+  taskChunks: {},
   // 浏览器接管的现状（配对 token、扩展目录、各浏览器装没装）。
   // null = 还没问过后端。
   browserCapture: null,
@@ -1191,14 +1199,14 @@ async function loadTaskDetail(taskId) {
   const task = State.tasks.find((x) => x.id === taskId);
   if (!task) return;
   if (detail) {
-    if (detail.chunks && detail.chunks.length) task.chunks = detail.chunks;
+    if (detail.chunks && detail.chunks.length) State.taskChunks[taskId] = detail.chunks;
     if (detail.error !== undefined) State.taskErrors[taskId] = detail.error || null;
     if (detail.speed_history && detail.speed_history.length) {
       State.speedHistory[taskId] = detail.speed_history;
     }
   } else if (backend && typeof backend.get_task_chunks === "function") {
     const chunks = await backend.get_task_chunks(taskId);
-    if (chunks && chunks.length) task.chunks = chunks;
+    if (chunks && chunks.length) State.taskChunks[taskId] = chunks;
   }
   if (State.selectedTaskId === taskId) renderDetail();
 }
@@ -1270,13 +1278,17 @@ function renderDetail() {
   body.appendChild(renderSpeedCurve(task));
 
   // 分片
-  if (task.chunks && task.chunks.length) {
+  //
+  // **从 State.taskChunks 取，不从 task 对象取**——task 对象每 1.5 秒
+  // 被列表轮询整个换掉，挂它身上的分片明细一换就没了。
+  const chunks = State.taskChunks[task.id] || [];
+  if (chunks.length) {
     // 分片最多 128 个，全渲染 DOM 会偏大。默认显示前 64 个，
     // 底下给一个「展开全部分片」的按钮——想看全的时候能看全，
     // 不想看的时候不占地方。
     const CHUNK_VIEW_LIMIT = 64;
     const expanded = State.expandedChunks === task.id;
-    const visible = expanded ? task.chunks : task.chunks.slice(0, CHUNK_VIEW_LIMIT);
+    const visible = expanded ? chunks : chunks.slice(0, CHUNK_VIEW_LIMIT);
     body.appendChild(el("div", { class: "section-title" }, [
       icon("layers", "icon-sm"),
       el("span", { text: `${t("detailShowChunks")} (${task.completed_chunks}/${task.chunk_count})` }),
@@ -1286,10 +1298,10 @@ function renderDetail() {
     // **超过 256 段就不画了**——几百个 1px 的小段既看不清，
     // 每次重绘还要重建几百个节点，纯浪费。给一行汇总就够了。
     const CHUNK_SEGMENT_LIMIT = 256;
-    if (task.chunks.length <= CHUNK_SEGMENT_LIMIT) {
-      body.appendChild(renderChunkSegments(task.chunks));
+    if (chunks.length <= CHUNK_SEGMENT_LIMIT) {
+      body.appendChild(renderChunkSegments(chunks));
     } else {
-      body.appendChild(el("div", { class: "chunk-summary", text: tf("detailChunkSummary", task.chunks.length) }));
+      body.appendChild(el("div", { class: "chunk-summary", text: tf("detailChunkSummary", chunks.length) }));
     }
     const table = el("table", { class: "chunk-table" }, [
       el("thead", {}, [el("tr", {}, [
@@ -1317,7 +1329,7 @@ function renderDetail() {
     body.appendChild(table);
 
     // 展开 / 收起
-    if (task.chunks.length > CHUNK_VIEW_LIMIT) {
+    if (chunks.length > CHUNK_VIEW_LIMIT) {
       body.appendChild(el("button", {
         class: "btn btn-sm", style: "margin-top:10px",
         onclick: () => {
@@ -1328,14 +1340,17 @@ function renderDetail() {
         icon("chevron", "icon-sm " + (expanded ? "icon-chevron-up" : "icon-chevron-down")),
         el("span", { text: expanded
           ? t("taskDetailChunksCollapse")
-          : `${t("taskDetailChunksExpandMore")} (${task.chunks.length})` }),
+          : `${t("taskDetailChunksExpandMore")} (${chunks.length})` }),
       ]));
     }
 
     body.appendChild(el("button", {
       class: "btn btn-sm", style: "margin-top:12px",
       onclick: async () => {
-        const ok = await api()?.copy_to_clipboard(JSON.stringify(task, null, 2));
+        // **把分片明细一起拷进去**——它现在单独存在
+        // State.taskChunks 里，不拼回去的话拷出来的 JSON 没有分片。
+        const payload = { ...task, chunks };
+        const ok = await api()?.copy_to_clipboard(JSON.stringify(payload, null, 2));
         toast(ok?.ok ? t("detailCopyJSON") : t("detailCopyJSON"), ok?.ok ? "ok" : "err");
       },
     }, [icon("copy", "icon-sm"), el("span", { text: t("detailCopyJSON") })]));
@@ -2676,6 +2691,7 @@ function handleSdmEvent(kind, payload) {
     delete State.speedSamples[id];
     delete State.speedHistory[id];
     delete State.taskErrors[id];
+    delete State.taskChunks[id];
     render();
     return;
   }

@@ -67,6 +67,24 @@ def _cleanup_sandbox() -> None:
     shutil.rmtree(_SANDBOX, ignore_errors=True)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_work_dir(tmp_path_factory, monkeypatch):
+    """每个测试一个独立的工作目录。
+
+    **工作目录放的是下载辅助文件**（sidecar / 会话文件 / 分片临时
+    文件）。它按目标文件的绝对路径哈希分目录，理论上不会互相撞，
+    但测试之间共享一个目录会让「这个测试留下的东西」污染下一个
+    测试的断言（比如「下载目录里不该有残留」这类检查）。所以每个
+    测试单独给一个。
+
+    `SDM_WORK_DIR` 是每次调用现读的（不是模块加载时缓存的），
+    所以 monkeypatch 对运行中的代码立即生效。
+    """
+    work = tmp_path_factory.mktemp("work")
+    monkeypatch.setenv("SDM_WORK_DIR", str(work))
+    return work
+
+
 def run_async(coro_fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     """在新的事件循环里跑一个异步函数。"""
     return asyncio.run(coro_fn(*args, **kwargs))

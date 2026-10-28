@@ -144,3 +144,27 @@ def test_version_is_consistent():
     assert f'version = "{version_mod.__version__}"' in pyproject, (
         f"pyproject.toml 的版本跟 version.py（{version_mod.__version__}）对不上"
     )
+
+
+def test_extension_manifest_versions_match():
+    """四个扩展的 manifest 版本要跟 version.py 一致。
+
+    **版本号散在多个文件里，改一处等于没改完。** 扩展版本对不上
+    不会报错——只是用户装扩展时看到的是旧版本号，很难联想到是
+    打包时漏改的。
+
+    以前这条测试只看 version.py 和 pyproject.toml，扩展的 manifest
+    是漏网的——v2.2.1 发版时就差点漏掉。
+    """
+    import json
+
+    repo_root = ROOT.parent
+    for name in ("Chrome", "Edge", "Firefox", "Safari"):
+        manifest_path = repo_root / "Extensions" / name / "manifest.json"
+        if not manifest_path.is_file():
+            continue
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest.get("version") == version_mod.__version__, (
+            f"{name} 扩展的版本是 {manifest.get('version')}，"
+            f"跟 version.py（{version_mod.__version__}）对不上"
+        )

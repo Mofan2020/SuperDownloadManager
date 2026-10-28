@@ -28,6 +28,7 @@ from pathlib import Path
 
 from ..history_store import HistoryEntry, HistoryStore
 from ..logging_setup import CAT_ENGINE, CAT_QUEUE, CAT_STORE, get_logger
+from . import work_dir
 from .categories import DownloadCategory, category_for_download, category_from_url
 from .content_sniffer import ContentProbe, ProbeError
 from .download_flow import DownloadFlow, FlowError, FlowFailure
@@ -41,6 +42,7 @@ from .resume_state import ResumeState
 from .speed_display import SpeedInput, compute
 from .speed_limiter import SpeedLimiter
 from .speed_policy import SpeedPolicy
+from .work_dir import PARTIAL_INFIX, task_key, work_root
 
 log = get_logger()
 
@@ -242,10 +244,15 @@ NAME_CONFLICT_ASK = "ask"
 
 
 def _resolve_keep_both(path: Path) -> Path:
-    """找一个不重名的文件名：`a.zip` → `a (1).zip` → `a (2).zip`。
+    """找一个不重名的文件名：`a.zip` → `a 1.zip` → `a 2.zip`。
 
     **默认策略。** 用户下了一个已经存在的文件名时，最安全的做法是
     两个都留着——把用户的旧文件悄悄删掉或者覆盖掉，是不可逆的损失。
+
+    **编号的格式跟 macOS 一致：空格 + 编号，编号在扩展名之前。**
+    也就是 `a 1.zip`，不是 `a (1).zip` 也不是 `a-1.zip`。
+    系统（Finder / Safari / 邮件客户端）都是这么处理重名的，
+    用户不用适应第二套规则。
     """
     if not path.exists():
         return path
@@ -253,10 +260,10 @@ def _resolve_keep_both(path: Path) -> Path:
     suffix = path.suffix
     parent = path.parent
     for index in range(1, 1000):
-        candidate = parent / f"{stem} ({index}){suffix}"
+        candidate = parent / f"{stem} {index}{suffix}"
         if not candidate.exists():
             return candidate
-    return parent / f"{stem} ({int(time.time())}){suffix}"
+    return parent / f"{stem} {int(time.time())}{suffix}"
 
 
 def _trash_or_rename(path: Path) -> bool:
@@ -345,6 +352,10 @@ class DownloadEngine:
     ) -> None:
         self.strategy = strategy or RangeStrategy()
         self.parallelism_cap = parallelism_cap
+        #: 用户在设置页设的「分片上限」。真正生效的是
+        #: `_sync_chunk_cap()` 算出来的那个（不小于连接数 × 4）。
+        self._user_max_chunks = self.strategy.max_chunks
+        self._sync_chunk_cap()
         self.default_download_dir = Path(default_download_dir) if default_download_dir else None
         self.downloader = downloader or HTTPDownloader()
         self.limiter = SpeedLimiter(0)
@@ -421,6 +432,29 @@ class DownloadEngine:
         clamped = max(1, min(128, n))
         self.strategy.default_chunks = clamped
         self.parallelism_cap = clamped
+        self._sync_chunk_cap()
+
+    def set_chunk_limits(self, initial_connections: int, max_chunks: int) -> None:
+        """设置页的「初始连接数 / 分片上限」——**以前这两个是死设置**。
+
+        界面上能改，引擎压根不读，用户调完发现什么都没变，只能得出
+        「这程序没有动态分段能力」的结论。
+
+        - `initial_connections` → 起步时开几条连接（默认 2，保守）。
+        - `max_chunks` → 分片数的硬上限。分片数**必须大于连接数**，
+          否则空闲连接没活干，下载末尾会长出很长的尾巴。
+
+        上限被用户设得比连接数还小时，**按连接数的 4 倍兜底**——
+        宁可多分片（每个分片一个独立请求，有开销），也不要长尾。
+        """
+        self.strategy.initial_chunks = max(1, min(32, int(initial_connections)))
+        self._user_max_chunks = max(1, min(512, int(max_chunks)))
+        self._sync_chunk_cap()
+
+    def _sync_chunk_cap(self) -> None:
+        """分片数硬上限 = 用户设的上限 和 「连接数 × 4」里大的那个。"""
+        floor = max(1, self.parallelism_cap) * 4
+        self.strategy.max_chunks = max(self._user_max_chunks, floor, 32)
 
     async def set_ignore_ssl(self, value: bool) -> None:
         self.downloader.set_ignore_ssl(value)
@@ -1320,7 +1354,7 @@ class DownloadEngine:
         （PermissionError），自己按文件名 glob 删会漏。
 
         flow 已经不在了（任务早就结束了）时，用 destination 反推
-        分片文件名——分片名是 `<目标名>.sdm.partial-<id>`。
+        分片文件名——分片名是 `downloads/<key>.sdm.partial-<id>`。
         """
         if flow is None:
             live = self.live.get(task_id)
@@ -1330,11 +1364,14 @@ class DownloadEngine:
         if summary is None:
             return
         base = Path(summary.destination)
+        # 工作目录里的分片。
         try:
-            for path in base.parent.glob(base.name + ".sdm.partial-*"):
+            for path in work_root().glob(task_key(base) + PARTIAL_INFIX + "*"):
                 _unlink_with_retry(path)
         except OSError:
             pass
+        # 老位置（升级前下载目录里）的分片，也顺手清掉。
+        work_dir.remove_legacy_partials(base)
 
     async def remove(self, task_id: str) -> None:
         """从队列移除。磁盘上的文件不动。"""
@@ -1361,9 +1398,10 @@ class DownloadEngine:
             return {"decision": "unsafeReject", "reason": "任务不存在"}
 
         destination = Path(summary.destination)
-        sidecar = ResumeState.sidecar_path(destination)
+        # 升级前的 sidecar 还在下载目录旁边，搬过来。
+        sidecar = work_dir.adopt_legacy_sidecar(destination)
         original = None
-        if sidecar.exists():
+        if sidecar is not None and sidecar.exists():
             try:
                 original = ResumeState.read(sidecar)
             except Exception:

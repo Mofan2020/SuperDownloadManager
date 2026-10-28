@@ -445,6 +445,10 @@ def test_r10_cancel_leaves_no_partial_files(tmp_path: Path) -> None:
 
             leftovers = list(tmp_path.glob("*.sdm.partial-*"))
             assert not leftovers, f"取消后残留分片：{[p.name for p in leftovers]}"
+            # 工作目录里也不该有残留。
+            from sdm.engine import work_dir
+
+            assert not list(work_dir.work_root().glob("*.sdm.partial-*")), "取消后工作目录有残留分片"
         finally:
             srv.stop()
 
@@ -472,8 +476,12 @@ def test_r10_pause_keeps_partial_files(tmp_path: Path) -> None:
             await engine.pause(task_id)
             await asyncio.sleep(0.3)
 
-            partials = list(tmp_path.glob("*.sdm.partial-*"))
+            from sdm.engine import work_dir
+
+            partials = list(work_dir.work_root().glob("*.sdm.partial-*"))
             assert partials, "暂停后分片被删了，resume 就没法接着下了"
+            # 分片不在下载目录里。
+            assert not list(tmp_path.glob("*.sdm.partial-*")), "分片文件跑回下载目录了"
         finally:
             srv.stop()
 

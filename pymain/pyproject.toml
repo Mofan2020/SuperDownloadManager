@@ -1,6 +1,6 @@
 [project]
 name = "sdm"
-version = "2.2.1"
+version = "2.2.2"
 description = "SuperDownloadManager — 跨平台下载管理器"
 requires-python = ">=3.11"
 

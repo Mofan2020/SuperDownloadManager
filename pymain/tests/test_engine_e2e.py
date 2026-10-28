@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import sys
 import time
 from pathlib import Path
@@ -184,10 +185,14 @@ def test_resume_continues_from_existing_partials(tmp_path, server):
             except (TimeoutError, asyncio.CancelledError, FlowError):
                 pass
 
-            partials = list(tmp_path.glob("resume.bin.sdm.partial-*"))
+            from sdm.engine import work_dir
+
+            partials = list(work_dir.work_root().glob("*.sdm.partial-*"))
             assert partials, "取消后分片文件应该保留，否则续传无从谈起"
             # 取消后不该有合并好的目标文件——那是「下完了」的状态
             assert not dest.exists(), "取消时不该产出目标文件"
+            # 下载目录里不该留下任何辅助文件。
+            assert not list(tmp_path.glob("*.sdm.*")), "下载目录被辅助文件污染了"
 
             flow2 = DownloadFlow(
                 url=slow.url,
@@ -219,11 +224,27 @@ def test_sidecar_written_after_success(tmp_path, server):
         )
         await flow.run()
 
-        sidecar = dest.with_name(dest.name + ".sdm.json")
+        from sdm.engine import work_dir
+
+        sidecar = work_dir.sidecar_path(dest)
         assert sidecar.exists(), "sidecar 必须存在"
+        # sidecar 不住在下载目录里。
+        assert not list(tmp_path.glob("*.sdm.*")), "下载目录被辅助文件污染了"
         data = json.loads(sidecar.read_text(encoding="utf-8"))
         assert data["content_length"] == server.total_bytes
-        assert len(data["chunks"]) == 2
+        # **分片数量不再等于「目标分片数」。**
+        #
+        # 动态分段里分片数会超过目标——超出来的那些就是给空闲连接
+        # 准备的活干（不然下载末尾会长出很长的尾巴）。所以这里断言的
+        # 是「分片完整覆盖整个文件」，不是「有几片」。
+        chunks = data["chunks"]
+        assert chunks, "sidecar 里必须有分片布局"
+        assert chunks[0]["start"] == 0
+        assert chunks[-1]["end"] == server.total_bytes
+        # 首尾相接、不能有空洞也不能重叠。
+        for previous, current in itertools.pairwise(chunks):
+            assert current["start"] == previous["end"], "分片之间有空洞或重叠"
+        assert all(c["bytes_done"] == c["end"] - c["start"] for c in chunks)
 
     run_async(_inner)
 

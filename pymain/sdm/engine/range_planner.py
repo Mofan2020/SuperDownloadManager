@@ -98,6 +98,15 @@ class RangeStrategy:
     merge_threshold: float = 0.3                  # min/max 速度比 < 此值则合并
     split_streak_sec: float = 5.0
     first_rearrange_after: float = 10.0           # v1.0 激进版：10 秒而非 30 秒
+    #: 能把一个分片拆到多小的**硬地板**。
+    #:
+    #: **这个值决定了下载末尾还有没有速度。** 剩下的字节少到每片
+    #: 都不到两倍最小尺寸时，一片都拆不动——末尾的活只能由还活着
+    #: 的那几条连接慢慢磨，速度掉到 1/N，这就是「长尾」。
+    #:
+    #: 64KB 是权衡出来的：再小的话，光是请求头和连接建立的开销就
+    #: 超过下载本身的时间了，得不偿失。
+    min_split_bytes: int = 64 * 1024
 
 
 @dataclass
@@ -219,11 +228,28 @@ class DynamicPlanner:
           到拆点为止，新连接从拆点接着往末尾下。已写的字节不会白下。
         - 分片**空闲** → 取整体中点。
 
-        拆不动的情况：分片数已达目标、剩下的不够再拆一半（小于
-        两倍最小分片大小）、或者没有未完成的分片。
+        拆不动的情况：分片数已达硬上限、剩下的不够再拆一半
+        （小于两倍最小可拆大小）、或者没有未完成的分片。
+
+        **上限是 `max_chunks`，不是 `target`。** 这两个数以前被搞混
+        了，后果是长尾：
+
+        - `target` 是**目标分片数**，实际上等于连接数（设置里的
+          「线程数」）。
+        - 以前拿它当硬上限，于是分片数永远不超过连接数。连接一下
+          完，空闲 worker 想去切最大的未完成分片，切不动
+          （`len(chunks) >= target`）→ **worker 直接退出**。
+
+        于是下载末尾的活越来越少人干：最后那条连接一个人磨剩下的
+        全部字节，速度掉到 1/N。这就是 IDM 不会有的那种「下到 96%
+        就不动了」。
+
+        分片数比连接数多是**故意的**：多出来的分片就是给空闲连接
+        准备的活干——空闲连接切走最大分片的一半，剩下的活就分给了
+        大家，末尾的速度才掉不下去。
         """
         with self._lock:
-            if len(self._chunks) >= self.target:
+            if len(self._chunks) >= self.strategy.max_chunks:
                 return None
             source = self._pick_split_target()
             if source is None:
@@ -235,7 +261,7 @@ class DynamicPlanner:
             else:
                 low = source.start
             remaining = source.end - low
-            if remaining < 2 * self.strategy.min_chunk_size:
+            if remaining < 2 * self._min_split_size():
                 return None
 
             mid = (low + source.end) // 2
@@ -254,6 +280,31 @@ class DynamicPlanner:
                 split_at=mid,
                 was_inflight=inflight,
             )
+
+    def _min_split_size(self) -> int:
+        """能拆的最小粒度——**跟着剩余量缩放**。
+
+        固定 1MB 的话，下载到 90% 之后每个分片都不到 2MB，一片都
+        拆不动，末尾只能剩一两条连接在磨。
+
+        缩放规则：按「剩余总量 / 目标分片数」算出平均每片该多大，
+        再夹在硬地板和策略上限（`min_chunk_size`）之间。剩得越少，
+        切得越细——这正是末尾需要的。
+
+        硬地板是 `min(min_split_bytes, min_chunk_size)`——**不能是
+        绝对的 64KB**。策略自己把 `min_chunk_size` 调小的时候（小
+        文件测试、或者用户把分片调细），地板也得跟着降，否则一片都
+        拆不动。
+        """
+        remaining_total = sum(chunk.remaining for chunk in self._chunks.values())
+        if remaining_total <= 0:
+            return self._floor_split_size()
+        adaptive = remaining_total // max(1, self.target)
+        capped = min(adaptive, self.strategy.min_chunk_size)
+        return max(capped, self._floor_split_size())
+
+    def _floor_split_size(self) -> int:
+        return min(self.strategy.min_split_bytes, self.strategy.min_chunk_size)
 
     def _pick_split_target(self) -> Chunk | None:
         """挑「最大的未完成分片」——按剩余字节数比。"""

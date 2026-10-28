@@ -33,6 +33,49 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
     max_concurrent: ClassVar[int] = 0
     #: 一共收到多少个请求。
     request_count: ClassVar[int] = 0
+    #: **传输时间轴**：`(时刻, 全服务器累计发出的字节数)`。
+    #:
+    #: 用来量化「下载末尾的速度掉得有多厉害」——长尾就是这个指标
+    #: 露馅的：末尾那一小段的速度只有峰值的一个零头。
+    #:
+    #: 多线程服务器要加锁，不然累计数会算错。
+    timeline: ClassVar[list[tuple[float, int]]] = []
+    #: **并发时间轴**：`(时刻, 此刻在飞的请求数)`。
+    concurrency_timeline: ClassVar[list[tuple[float, int]]] = []
+    _timeline_lock: ClassVar[threading.Lock] = threading.Lock()
+    _total_sent: ClassVar[int] = 0
+
+    @classmethod
+    def reset_timeline(cls) -> None:
+        """把时间轴清零（每个测试用新的服务器，但类变量是共享的）。"""
+        with cls._timeline_lock:
+            cls.timeline = []
+            cls.concurrency_timeline = []
+            cls._total_sent = 0
+            cls.active_requests = 0
+            cls.max_concurrent = 0
+            cls.request_count = 0
+
+    @classmethod
+    def _record_sent(cls, count: int) -> None:
+        with cls._timeline_lock:
+            cls._total_sent += count
+            cls.timeline.append((time.monotonic(), cls._total_sent))
+
+    @classmethod
+    def _record_concurrency(cls, active: int) -> None:
+        """记一笔「此刻有多少个请求在飞」。
+
+        **这是量长尾最稳的指标。** 「末尾速度掉了多少」是拿时间
+        比值算的，CI 机器一忙就飘；而「下载到 80% 的时候还有几条
+        连接在传」是**结构性的**——好的实现到最后都保持满并发，
+        坏的一到最后只剩一条连接在爬。
+
+        记录时机：请求进来时记一次（并发 +1），请求结束时记一次
+        （并发 -1）。
+        """
+        with cls._timeline_lock:
+            cls.concurrency_timeline.append((time.monotonic(), active))
 
     def end_headers(self) -> None:
         """每个响应都声明 Connection: close。
@@ -71,10 +114,12 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
         type(self).request_count += 1
         if type(self).active_requests > type(self).max_concurrent:
             type(self).max_concurrent = type(self).active_requests
+        type(self)._record_concurrency(type(self).active_requests)
         try:
             self._do_GET()
         finally:
             type(self).active_requests -= 1
+            type(self)._record_concurrency(type(self).active_requests)
 
     def _extra_headers(self) -> None:
         """额外的响应头（Content-Disposition 之类）。"""
@@ -148,6 +193,7 @@ class RangeFileHandler(http.server.BaseHTTPRequestHandler):
                 except (BrokenPipeError, ConnectionResetError):
                     return
                 sent += len(block)
+                type(self)._record_sent(len(block))
                 if self.chunk_delay:
                     # delay_per_block=False 时：只在第一块**之前**延迟一次，
                     # 之后各块之间不延迟。这样每分片耗时 = 一次延迟，

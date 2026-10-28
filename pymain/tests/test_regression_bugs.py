@@ -27,9 +27,12 @@ def test_resume_state_read_roundtrip(tmp_path: Path) -> None:
         content_length=123456,
         filename="file.bin",
     )
-    sidecar = tmp_path / "file.bin.sdm.json"
-    state.write(sidecar.parent / "file.bin")
+    final_path = tmp_path / "file.bin"
+    state.write(final_path)
 
+    # sidecar 现在住在工作目录里，不在下载目录里。
+    sidecar = ResumeState.sidecar_path(final_path)
+    assert sidecar.exists()
     loaded = ResumeState.read(sidecar)
     assert loaded.url == state.url
     assert loaded.content_length == state.content_length

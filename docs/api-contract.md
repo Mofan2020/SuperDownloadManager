@@ -139,12 +139,31 @@ def get_task_error(self, task_id: str) -> dict | None
 
 - 初始分片数保守（`initial_connections`，默认 2），**不**一次性切死。
 - 空闲连接到来时，对**当前最大的未完成分片**对半拆分，新连接从拆分点继续。
-- 分片数上限 `max_chunks`（默认 32，可配到 128）。
+- 分片数上限 `max_chunks`（默认 32，可配到 512），**但强制不低于
+  「连接数 × 4」**——分片数被卡到跟连接数一样大时，空闲连接没活干，
+  下载末尾会长出很长的尾巴。
+- **目标分片数 = 连接数，不是分片数的硬上限。** 分片数必须能超过
+  连接数，多出来的分片就是给空闲连接准备的活干。
+- 最小可拆大小**随剩余量自适应**：按「剩余总量 / 目标分片数」算出
+  平均每片该多大，夹在硬地板（64KB）和 `min_chunk_size` 之间。
+  剩得越少，切得越细。
+- worker 拆不出新分片时**不退出**，改成等新分片（20ms 一轮）——早退
+  会让那条连接永久消失。
+- 「找活干」**不占连接名额**；名额只在真正传输时才占。
 - 分片布局落盘到会话文件，崩溃/暂停后能按原布局恢复。
 
 ### 2.6 会话文件（规格 §1.3）
 
-路径：`<最终文件名>.sdm.session.json`（跟分片临时文件同目录）。
+路径：`~/Library/Application Support/SuperDownloadManager/downloads/<key>.sdm.session.json`
+（Windows 是 `%LOCALAPPDATA%\SuperDownloadManager\downloads\`，
+Linux 是 `~/.local/share/SuperDownloadManager/downloads/`）。
+
+**辅助文件一律不住在下载目录里。** `key` 是目标文件名主干加上目标
+绝对路径的短哈希——同名文件在不同目录是不同文件，sidecar 用来比对
+etag / content_length 判断「还是不是同一个文件」，共用一个会导致把
+新内容续写进旧文件的空洞里。
+
+升级前的会话文件（目标文件旁边）会在读取时自动搬过来。
 
 ```json
 {
@@ -388,7 +407,7 @@ proxy_url: str = ""                  # 全局代理，空 = 不走代理
 proxy_scheme: str = "http"           # http | https | socks4 | socks5
 browser_pair_token: str = ""         # 浏览器配对 token
 initial_connections: int = 2         # 初始连接数（动态分段的起点）
-max_chunk_count: int = 32            # 分片数上限
+max_chunk_count: int = 32            # 分片数上限（引擎里强制 ≥ 连接数 × 4）
 network_user_agent: str = ""         # 全局 UA，空 = 用程序内置的默认 UA
 ```
 

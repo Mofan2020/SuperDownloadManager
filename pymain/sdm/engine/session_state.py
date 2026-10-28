@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..logging_setup import CAT_STORE, get_logger
+from . import work_dir
 from .content_sniffer import ContentProbe
 from .errors import ErrorCategory, TaskError
 
@@ -86,9 +87,12 @@ class SessionState:
 
     @staticmethod
     def path_for(destination: Path) -> Path:
-        """会话文件路径：`<最终文件名>.sdm.session.json`。"""
-        destination = Path(destination)
-        return destination.with_name(destination.name + SESSION_SUFFIX)
+        """会话文件路径：`downloads/<key>.sdm.session.json`。
+
+        **不在下载目录里**——会话文件是软件的内部状态，用户在
+        下载文件夹里看到一堆 `.sdm.session.json` 只会困惑。
+        """
+        return work_dir.session_path(destination)
 
     # -- 序列化 ------------------------------------------------------
 
@@ -129,6 +133,12 @@ class SessionState:
         **不能**抛异常：会话文件是加速器，不是必需品。
         """
         path = cls.path_for(destination)
+        if not path.exists():
+            # 升级前下的会话文件还在老位置（目标文件旁边）。
+            # 把它搬过来，用户正在下的东西不能凭空消失。
+            adopted = work_dir.adopt_legacy_session(destination)
+            if adopted is not None:
+                path = adopted
         try:
             raw = path.read_text(encoding="utf-8")
         except OSError:
@@ -187,6 +197,12 @@ class SessionState:
             pass
         except OSError as err:
             log.warning(CAT_STORE, f"会话文件删除失败 {path}: {err}")
+        # 老位置（升级前）也清一下，别留在下载目录里。
+        legacy = work_dir.legacy_session_path(destination)
+        try:
+            legacy.unlink()
+        except OSError:
+            pass
 
     # -- 校验 --------------------------------------------------------
 

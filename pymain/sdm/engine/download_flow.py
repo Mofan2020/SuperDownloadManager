@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..logging_setup import CAT_ENGINE, CAT_STORE, get_logger
+from . import work_dir
 from .content_sniffer import ContentProbe, ProbeError
 from .errors import RETRYABLE_BY_DEFAULT, ErrorCategory, TaskError
 from .file_assembler import FileAssembler
@@ -195,6 +196,35 @@ class DownloadFlow:
         self._assembler: FileAssembler | None = None
         self._planner: DynamicPlanner | None = None
         self._governor = ConnectionGovernor(self.initial_connections, self.parallelism_cap)
+        #: 空闲 worker 等新分片的轮询间隔（秒）。
+        #:
+        #: 拆不动但还没下完时，worker 得等着别人切出新分片。20 毫秒
+        #: 足够跟得上，又不至于让几十个 worker 空转烧 CPU。
+        self._idle_poll = 0.02
+        #: **worker 因为「拆不出新分片」而空等的次数。**
+        #:
+        #: 这个计数是长尾修复的**直接证据**：worker 空等，说明
+        #: 「当前没有可拆的活，但下载还没完」——这一刻如果 worker
+        #: 直接退出，那条连接就永久没了，末尾的活只能由剩下的连接
+        #: 慢慢磨。修复后它等着，切出新分片的 worker 会把活分过来。
+        #:
+        #: 暴露出来是为了让测试能盯住这个行为本身（而不是只盯
+        #: 「末尾速度够不够快」这种间接指标）。
+        self.worker_idle_waits = 0
+        #: worker **提前下班**的次数（下载还没完就退出）。
+        #:
+        #: **这个数必须恒为 0。** 非零就说明还有 worker 在活没干完
+        #: 的时候跑了——那正是长尾的成因。
+        self.workers_exited_early = 0
+        #: 当前活着的 worker 数。
+        self._live_workers = 0
+        #: 下载**还没完**的时候，存活 worker 数的最低值。
+        #:
+        #: 这是长尾的直接度量：连接数是随着 worker 一起消失的，
+        #: 所以「活着的 worker 越来越少」就等于「速度越来越慢」。
+        #: 好的实现里这个数应该一直是满的（= 并发上限），
+        #: 直到最后一刻才一起下班。
+        self.min_live_workers = 0
         #: 每个分片开始传输的时刻，用于算该分片自己的耗时
         self._chunk_started_at: dict[int, float] = {}
         #: 规划好的分片布局。详情面板要展示真实的分片状态，
@@ -567,24 +597,63 @@ class DownloadFlow:
         self._governor.bind_loop(asyncio.get_running_loop())
 
         async def worker() -> None:
+            self._live_workers += 1
+            if self._live_workers > self.min_live_workers:
+                self.min_live_workers = self._live_workers
+            try:
+                await _worker_body()
+            finally:
+                self._live_workers -= 1
+                # **下载还没完就有 worker 走了 = 提前下班。**
+                #
+                # 记下来是为了让测试能盯住这个行为本身——「末尾速度
+                # 够不够快」是间接指标，机器一忙就飘；「有没有 worker
+                # 在活没干完的时候跑了」是直接的事实。
+                if not planner.all_complete():
+                    self.workers_exited_early += 1
+
+        async def _worker_body() -> None:
             while True:
                 if self._cancelled:
                     raise asyncio.CancelledError()
-                await self._governor.acquire()
-                try:
-                    chunk = planner.take_pending()
-                    if chunk is None:
-                        # 没有待办分片了——把当前最大的未完成分片
-                        # 对半拆开，新连接从拆分点接着下。
-                        split = planner.split_largest()
-                        if split is None:
-                            return
+
+                # 1) 找活干：先看待办队列，再看能不能切一块出来。
+                #
+                # **找活干不占连接名额**——名额只在真的在下载的时候
+                # 才占。这样「连接数」限制的是**同时在传输的连接数**，
+                # 不是「已经分好片的数量」。
+                chunk = planner.take_pending()
+                if chunk is None:
+                    split = planner.split_largest()
+                    if split is not None:
                         if split.was_inflight:
                             # 被拆的分片正在传输：它的区间缩短了，
                             # 已经写超的部分要砍掉——那些字节属于
                             # 新分片的区间，留着会重叠。
                             assembler.shrink_chunk(split.source.id, split.split_at)
                         chunk = split.chunk
+
+                if chunk is None:
+                    # 2) 没活干。
+                    if planner.all_complete():
+                        # 全下完了，这个 worker 可以下班。
+                        return
+                    # **下载还没完，但这个 worker 拿不到活。**
+                    #
+                    # 这是长尾的成因所在。以前这里直接 `return`：
+                    # worker 一退出，那条连接就永久没了。下载末尾只剩
+                    # 几个分片时，活跃连接数一路往下掉（32 → 8 → 2 → 1），
+                    # 速度跟着掉到 1/N——这就是「下到 96% 就不动了」。
+                    #
+                    # 现在改成等：别的 worker 切出新分片时自己会醒，
+                    # 末尾的活照样分给所有连接。
+                    self.worker_idle_waits += 1
+                    await asyncio.sleep(self._idle_poll)
+                    continue
+
+                # 3) 有活：占一个连接名额下。
+                await self._governor.acquire()
+                try:
                     planner.mark_inflight(chunk.id)
                     try:
                         await self._download_one(
@@ -817,4 +886,11 @@ class DownloadFlow:
         return max(0.0, now - updated)
 
     def _partial_path(self, chunk_id: int) -> Path:
-        return self.destination.with_name(self.destination.name + f".sdm.partial-{chunk_id}")
+        """分片临时文件的位置。
+
+        **在工作目录里，不在下载目录里**——用户在下载文件夹里
+        看到一堆 `.sdm.partial-N` 只会以为软件坏了。
+
+        升级前下的分片还在老位置，这里把它们搬过来。
+        """
+        return work_dir.adopt_legacy_partial(self.destination, chunk_id)

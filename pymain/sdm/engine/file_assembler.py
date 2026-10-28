@@ -21,6 +21,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
 
+from . import work_dir
+
 
 def _unlink_with_retry(path: Path, attempts: int = 20, delay: float = 0.05) -> bool:
     """删文件，失败就重试。
@@ -64,8 +66,12 @@ class FileAssembler:
     # -- 分片文件命名 ------------------------------------------------
 
     def partial_path(self, chunk_id: int) -> Path:
-        """`<目标>.sdm.partial-<chunkID>`。"""
-        return self.destination.with_name(self.destination.name + f".sdm.partial-{chunk_id}")
+        """分片临时文件：`downloads/<key>.sdm.partial-<id>`。
+
+        **不在下载目录里。** 分片文件是软件的内部实现细节，
+        十几个躺在用户的下载文件夹里只会让人以为下载坏了。
+        """
+        return work_dir.adopt_legacy_partial(self.destination, chunk_id)
 
     # -- 打开 / 写入 ------------------------------------------------
 
@@ -251,7 +257,7 @@ class FileAssembler:
             self._partial_paths.clear()
 
         self.destination.parent.mkdir(parents=True, exist_ok=True)
-        tmp_target = self.destination.with_name(self.destination.name + ".merging")
+        tmp_target = work_dir.merging_path(self.destination)
         if tmp_target.exists():
             tmp_target.unlink()
 

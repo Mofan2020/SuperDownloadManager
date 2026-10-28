@@ -113,10 +113,14 @@ def test_close_all_releases_handles(tmp_path: Path) -> None:
     assembler.close_all()
 
     # 句柄关了之后文件可以正常删掉
-    for path in (tmp_path / "out.bin.sdm.partial-0", tmp_path / "out.bin.sdm.partial-1"):
+    from sdm.engine import work_dir
+
+    paths = [work_dir.partial_path(tmp_path / "out.bin", 0),
+             work_dir.partial_path(tmp_path / "out.bin", 1)]
+    for path in paths:
         assert path.exists()
         path.unlink()
-    assert not list(tmp_path.glob("*.sdm.partial-*"))
+    assert not list(work_dir.work_root().glob("*.sdm.partial-*"))
 
 
 def test_cleanup_partials_survives_locked_file(
@@ -127,7 +131,11 @@ def test_cleanup_partials_survives_locked_file(
     assembler.open_chunk(0, 0)
     assembler.append(b"data", 0)
 
-    fake = _WindowsLikeUnlink(tmp_path / "out.bin.sdm.partial-0", failures=999)
+    from sdm.engine import work_dir
+
+    fake = _WindowsLikeUnlink(
+        work_dir.partial_path(tmp_path / "out.bin", 0), failures=999
+    )
     monkeypatch.setattr(Path, "unlink", fake.make())
 
     # 不抛就算过——清理是尽力而为，不能因为删不掉就崩掉取消流程
@@ -181,18 +189,20 @@ def test_engine_cancel_cleans_partials_even_when_unlink_is_locked(
             task_id = ids[0]
             await asyncio.sleep(0.35)
 
+            from sdm.engine import work_dir
+
             # 分片文件已经在盘上了（说明确实下载过）
-            assert list(tmp_path.glob("*.sdm.partial-*")), "没产生分片，测不到删除路径"
+            assert list(work_dir.work_root().glob("*.sdm.partial-*")), "没产生分片，测不到删除路径"
 
             # 让 unlink 前 3 次失败——模拟文件还开着
-            target = next(tmp_path.glob("*.sdm.partial-*"))
+            target = next(work_dir.work_root().glob("*.sdm.partial-*"))
             fake = _WindowsLikeUnlink(target, failures=3)
             monkeypatch.setattr(Path, "unlink", fake.make())
 
             await engine.cancel(task_id)
             await asyncio.sleep(0.2)
 
-            leftovers = list(tmp_path.glob("*.sdm.partial-*"))
+            leftovers = list(work_dir.work_root().glob("*.sdm.partial-*"))
             assert not leftovers, f"取消后残留分片：{[p.name for p in leftovers]}"
         finally:
             srv.stop()
@@ -226,7 +236,9 @@ def test_engine_cancel_deletes_while_unlink_always_fails(
             task_id = ids[0]
             await asyncio.sleep(0.35)
 
-            target = next(tmp_path.glob("*.sdm.partial-*"))
+            from sdm.engine import work_dir
+
+            target = next(work_dir.work_root().glob("*.sdm.partial-*"))
             fake = _WindowsLikeUnlink(target, failures=9999)
             monkeypatch.setattr(Path, "unlink", fake.make())
 

@@ -360,6 +360,12 @@ class GuiBridge:
         # 把设置推给引擎
         self._apply_engine_setting("set_speed_limit", float(settings.bandwidth_bytes_per_sec))
         self._apply_engine_setting("set_max_threads", settings.threads_default)
+        # 动态分段的两个旋钮（初始连接数 / 分片上限）。
+        self._apply_engine_setting(
+            "set_chunk_limits",
+            int(settings.initial_connections),
+            int(settings.max_chunk_count),
+        )
         self._apply_engine_setting("set_ignore_ssl", settings.network_ignore_ssl)
         # 全局 UA。空 = 用内置默认值。
         self._apply_engine_setting(
@@ -1099,6 +1105,13 @@ class GuiBridge:
         try:
             self._apply_engine_setting("set_speed_limit", float(settings.bandwidth_bytes_per_sec))
             self._apply_engine_setting("set_max_threads", settings.threads_default)
+            # **动态分段的两个旋钮**（以前是死设置——界面能改，引擎
+            # 压根不读，用户调完发现什么都没变）。
+            self._apply_engine_setting(
+                "set_chunk_limits",
+                int(settings.initial_connections),
+                int(settings.max_chunk_count),
+            )
             self._apply_engine_setting("set_ignore_ssl", settings.network_ignore_ssl)
             # 全局 UA。空 = 用内置默认值（用户清空输入框就是恢复默认）。
             self._apply_engine_setting(
