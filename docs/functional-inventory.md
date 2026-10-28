@@ -1,7 +1,14 @@
-# SuperDownloadManager（Swift 版）功能台账
+# SuperDownloadManager（macOS 原生版）功能台账
 
-> **用途**：本文是 Swift 版 SuperDownloadManager（v1.1.9 / v1.1.10-WIP）的完整功能台账，
-> 作为 **Python 重构（pywebview GUI + httpx 引擎）的验收基准**。
+> **状态：历史归档。** 原生版（Swift，v1.1.9 / v1.1.10-WIP）的源码已从仓库
+> 移除——当前仓库只有 Python 版（pywebview GUI + httpx 引擎）。原生版的代码
+> 仍在 git 历史里（`git log --all -- Engine/`）。
+>
+> **用途不变**：本文是原生版的完整功能台账，作为 **Python 版的验收基准**
+> ——Python 版的每个行为决策为什么长这样，这里多半能查到原因。
+>
+> 文中的「Swift 实现位置（file:line）」指向的路径现在**已经不存在**，
+> 只作历史参照。
 >
 > - 每条功能给出**触发路径**、**现有行为**、**Swift 实现位置（file:line）**、
 >   **可测试的行为约定**、**Python 重构验收要点**。

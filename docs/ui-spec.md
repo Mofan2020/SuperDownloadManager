@@ -2,8 +2,9 @@
 
 > 目标实现栈：Python + pywebview（macOS = WKWebView，Windows = WebView2）+ HTML/CSS/JS 前端。
 > 本文档是前端实现的唯一依据：所有尺寸、颜色、断点、状态文案均已给出可直接落地的数值。
-> 现有 macOS SwiftUI 版（`App/MainWindow/*.swift`）的视觉语言与功能清单是本规范的来源；
-> 语义（状态名、分类、按钮文案）保持一致，载体从 SwiftUI 换成 DOM。
+> 本规范同时是前端实现的唯一依据：所有尺寸、颜色、断点、状态文案均已给出
+> 可直接落地的数值。语义（状态名、分类、按钮文案）沿用项目早期的 macOS 原生版，
+> 载体换成 DOM。
 
 ---
 
@@ -63,7 +64,7 @@ CSS 侧统一用 `@media (max-width: 879px)` … `@media (min-width: 1440px)` �
 ### 0.4 文案与语言
 
 - 双语：English / 简体中文，跟随系统。语言切换 **不重启**（前端持有 `locale` 状态，所有文案走 `t(key)`）。
-- 文案 key 沿用 SwiftUI 版 `Engine/L10n.swift` 的语义命名，Python 侧落成 `locale.py` 字典：`{"en": {...}, "zh-Hans": {...}}`。
+- 文案 key 沿用项目早期的语义命名，落成 `locale.py` 字典：`{"en": {...}, "zh-Hans": {...}}`。
 - 数字、字节、时间统一用 `Intl.NumberFormat` / 自写格式化：
   - 字节：`1 KB = 1024 B`，`MB`、`GB` 保留 1 位小数，`< 1024` 显示 `512 B`。
   - 速度：`B/s`、`KB/s`、`MB/s`（1 位小数），恒定宽度 → 用 `font-variant-numeric: tabular-nums`。
@@ -230,7 +231,7 @@ Toast 尺寸：min-width 220px，max-width 380px，padding 10px 14px
 | `cancelled` 已取消 | `#64748B` | `#94A3B8` | `--neutral` |
 | `awaiting_new_link` 等待新链接 | `#EA580C` | `#FB923C` | `--warning-strong`（新增变量：`#EA580C` / `#FB923C`） |
 
-**分类色**（沿用 SwiftUI 版 tint 的十六进制化）
+**分类色**（按分类色板的十六进制值）
 
 | 分类 | 图标 | 亮色 | 暗色 |
 |---|---|---|---|
@@ -531,7 +532,7 @@ html, body { height: 100%; margin: 0; overflow: hidden; }
 尺寸：
 - `.sidebar-item`：`height: 30px; padding: 0 10px; border-radius: 8px; margin: 0 8px; gap: 10px;`
 - 图标 16px，颜色 `var(--text-secondary)`；选中时图标与文字都变 `--accent`。
-- 计数徽章：`min-width: 20px; height: 18px; padding: 0 6px; border-radius: 999px; background: var(--neutral-soft); color: var(--text-secondary); font: var(--text-micro);` 计数为 0 时不渲染徽章（SwiftUI 版行为），但失败项为 0 时改为淡红点 `2px` 圆点以示警示。
+- 计数徽章：`min-width: 20px; height: 18px; padding: 0 6px; border-radius: 999px; background: var(--neutral-soft); color: var(--text-secondary); font: var(--text-micro);` 计数为 0 时不渲染徽章，但失败项为 0 时改为淡红点 `2px` 圆点以示警示。
 - 选中态：`background: var(--accent-soft); color: var(--accent); font-weight: 500;` + 左侧 3px 圆角条 `::before { content:''; position:absolute; left:-8px; top:6px; bottom:6px; width:3px; border-radius:0 3px 3px 0; background:var(--accent); }`（`position: relative` 于 item）。
 - 悬停态：`background: rgba(15,23,42,0.05)`（暗色 `rgba(255,255,255,0.06)`）。
 - 分区标题：11px / 600 / 字距 0.04em / `--text-tertiary` / 大写（仅英文；中文不转大写）/ padding `8px 18px 4px`。三个分组标题固定为 **活动 / 按分类 / 其他**。
@@ -766,7 +767,7 @@ X=0                                            窗口右边缘
 ```
 
 - 元信息网格：`display: grid; grid-template-columns: 96px minmax(0,1fr); gap: 8px 16px;`
-- 抽屉底部固定一个「复制 JSON」按钮，复制整条任务的 JSON（沿用 SwiftUI 版字段：`id / filename / url / state / bytesDone / totalBytes / speedBytesPerSec / speedLimitBytesPerSec / destination / error`）。
+- 抽屉底部固定一个「复制 JSON」按钮，复制整条任务的 JSON（沿用项目早期字段：`id / filename / url / state / bytesDone / totalBytes / speedBytesPerSec / speedLimitBytesPerSec / destination / error`）。
 
 ### 2.6 历史视图
 
@@ -928,7 +929,7 @@ X=0                                            窗口右边缘
 - 表格列宽：时间 100px（mono）、级别 64px、分类 140px、消息 `minmax(200px, 1fr)`。
 - 行高 22px，`--text-mono` 12px。级别列用语义色。
 - 新日志在前（倒序）。超过 5000 行时只渲染最新 2000 行（虚拟滚动由实现自行选择；本规范只要求滚动容器 `overflow-y: auto` 且表头 sticky）。
-- 筛选框对「消息」和「分类」做大小写不敏感子串匹配（沿用 SwiftUI 版行为）。
+- 筛选框对「消息」和「分类」做大小写不敏感子串匹配（项目既有行为）。
 - 「复制全部」复制**筛选后**的行，格式 `时间戳 [级别] [分类] 消息`，每行一条。
 
 ### 2.12 过期链接横幅
@@ -968,7 +969,7 @@ X=0                                            窗口右边缘
 ```
 
 - 弹层宽度 520；`max-height: calc(100vh - 80px); overflow-y: auto;`。
-- 分类下拉改变时，若用户未手动选过目录，保存目录自动切到 `~/Downloads/<分类>/`；用户手动选过则不再自动改（沿用 SwiftUI 版 `useCustomDir` 逻辑）。
+- 分类下拉改变时，若用户未手动选过目录，保存目录自动切到 `~/Downloads/<分类>/`；用户手动选过则不再自动改（沿用项目既有的 `useCustomDir` 逻辑）。
 - 「停止监听剪贴板」勾选后即写入 `sdm.capture.clipboard=false` 并关闭弹层（等同设置里的开关）。
 - 「跳过」：URL 记入 `lastSeenURLs`，5 分钟内不再提示。
 - 按钮顺序：左「跳过」（secondary）、右「下载」（primary，`Enter` 为默认按钮）。
@@ -1320,10 +1321,10 @@ X=0                                            窗口右边缘
 
 - 行高 28px，`--text-caption`。
 - 状态色：等待 `--neutral`、下载中 `--accent`、完成 `--success`、失败 `--danger`。
-- **耗时 > 15s 且状态不是「完成」时**，耗时数字变 `--danger`（沿用 SwiftUI 版的停滞检测语义）。
+- **耗时 > 15s 且状态不是「完成」时**，耗时数字变 `--danger`（沿用项目既有的停滞检测语义）。
 - 表头 sticky `top: 0`，玻璃底。
 - 容器：`max-height: 260px; overflow-y: auto;`（抽屉内）。
-- 抽屉底部固定一个「复制 JSON」按钮，复制整条任务的 JSON（沿用 SwiftUI 版字段：`id / filename / url / state / bytesDone / totalBytes / speedBytesPerSec / speedLimitBytesPerSec / destination / error`）。
+- 抽屉底部固定一个「复制 JSON」按钮，复制整条任务的 JSON（沿用项目早期字段：`id / filename / url / state / bytesDone / totalBytes / speedBytesPerSec / speedLimitBytesPerSec / destination / error`）。
 
 ### 4.10 日志表
 

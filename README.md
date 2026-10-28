@@ -153,6 +153,15 @@ python -m pytest tests -q
 python -m sdm.gui.main --self-test
 ```
 
+## Repository layout
+
+| Path | What |
+|---|---|
+| `pymain/` | The application: `sdm/engine` (httpx download engine), `sdm/gui` (pywebview shell), `sdm/ipc`, `sdm/cli` |
+| `pymain/tests/` | pytest suite |
+| `Extensions/` | Chrome / Edge / Firefox / Safari browser extensions |
+| `docs/` | API contract, UI spec, release process, decision log |
+
 ## Repository conventions
 
 - Auto-commit + auto-push. A tag triggers the release workflow.

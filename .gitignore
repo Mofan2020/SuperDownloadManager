@@ -1,16 +1,15 @@
-# Build artifacts
+# 构建产物
 build/
 build_release/
 DerivedData/
+pymain/build/
+dist/
+
+# Xcode 工程（原生版遗留，不再入库；本地如有残留不会被跟踪）
 *.xcodeproj
 xcuserdata/
 *.xcuserstate
 *.xcworkspace
-
-# Swift Package Manager
-.swiftpm/
-.build/
-Package.resolved
 
 # macOS
 .DS_Store
@@ -35,10 +34,6 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
-
-# PyInstaller 产物
-dist/
-pymain/build/
 
 # 浏览器视觉验证用的临时预览页（脚本生成，不入库）
 pymain/sdm/gui/assets/_preview.html
