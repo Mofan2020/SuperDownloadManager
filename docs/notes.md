@@ -1508,6 +1508,34 @@ Windows 上那条断言为什么失败？查下来是**真的内容损坏**：
 > 往往说明**别的平台只是恰好躲过了**——这里的躲法是「能删掉文件」。
 > 要问的是「什么条件下会出事」，而不是「为什么这里没事」。
 
+## v2.2.3 的变异验证清单
+
+**这份清单从 release-notes 里挪过来了。** release-notes 是给用户看的，
+放「撤掉哪个修复会让哪条测试变红」这种内部依据既没意思又占篇幅；
+但**这份依据不能丢**——它是「这些修复真的有效」的唯一硬证据。
+
+每个修复单独撤掉，对应的测试必须变红：
+
+| 撤掉的修复 | 变红的测试 |
+|---|---|
+| 轮询不刷新分片明细 | `test_detail_live_js.mjs` 的「轮询会刷新打开着的详情页的分片明细」 |
+| 换链后不改写会话里的 URL | `test_relink_resumes_instead_of_redownloading`、`test_relink_rewrites_session_url` |
+| 换链时不做字节认亲 | 6 条 `test_relink.py` 用例 |
+| 弱 ETag 也拿来判「资源变了」 | `test_weak_etag_is_not_used_to_judge_staleness` |
+| ETag 变了不做字节确认 | `test_rotating_etag_does_not_break_resume` |
+| 会话过期了不清也不自动重来 | `test_changed_resource_clears_session_and_restarts` |
+| 收尾期间调「继续下载」直接返回 | `test_resume_during_task_finalization_still_starts` |
+| 残留的分片文件被当成已下好的字节 | `test_stale_partial_file_does_not_block_a_fresh_download` |
+| 下载器把动态分段新切出来的分片当成续传 | `test_leftover_split_chunks_do_not_corrupt_a_new_download` |
+| 撤掉 STALE_SESSION 的内部回退 | `test_stale_session_restarts_instead_of_failing`、`test_stale_session_detected_by_etag_restarts` |
+
+**Windows 的那条怎么验**：macOS 能删掉打开的文件，所以「删不掉的残留」
+在 macOS 上永远测不到。测试里把 `Path.unlink` 换成「对 `.sdm.partial-`
+抛 PermissionError」的假实现来模拟。撤掉修复时正好 3 条变红
+（和 CI 上看到的 3 个 F 一一对应），加上修复全绿。
+
+**本地全量**：783 passed / 3 skipped；ruff 全绿；JS 用例 4/4。
+
 ## v2.2.3 换链接与续传
 
 **「是不是同一个文件」用字节比对判，不用 ETag。**

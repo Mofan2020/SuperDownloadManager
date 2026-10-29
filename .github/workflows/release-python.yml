@@ -286,16 +286,30 @@ jobs:
 
       - name: Prepare release notes
         run: |
-          if [ ! -f release-notes.md ]; then
-            echo "## v${{ steps.ver.outputs.version }}" > release-notes.md
+          # **只发布当前版本的那一段。**
+          #
+          # 以前是把整个 release-notes.md 塞进 release body——于是每个
+          # 新版本的更新日志都带着前面所有旧版本的内容，越滚越长（v2.2.3
+          # 那次是 18 KB、14 个版本）。
+          VERSION="v${{ steps.ver.outputs.version }}"
+          SECTION="release-notes-${{ steps.ver.outputs.version }}.md"
+          awk -v ver="$VERSION" '
+            $0 == "## " ver { found = 1; print; next }
+            found && /^## / { exit }
+            found { print }
+          ' release-notes.md > "$SECTION"
+          if [ ! -s "$SECTION" ]; then
+            echo "## $VERSION" > "$SECTION"
           fi
+          echo "--- release body ---"
+          cat "$SECTION"
 
       - name: Create GitHub Release (pre-release)
         uses: softprops/action-gh-release@v2
         with:
           name: v${{ steps.ver.outputs.version }}
           tag_name: v${{ steps.ver.outputs.version }}
-          body_path: release-notes.md
+          body_path: release-notes-${{ steps.ver.outputs.version }}.md
           files: |
             build/release/SuperDownloadManager-macOS.zip
             build/release/SuperDownloadManager-macOS.zip.sha256
