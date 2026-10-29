@@ -218,6 +218,20 @@ class DownloadFlow:
         self.workers_exited_early = 0
         #: 当前活着的 worker 数。
         self._live_workers = 0
+        #: **空转到「没救了」的上限（秒）。**
+        #:
+        #: worker 拿不到活时会一直等（这是长尾修复的一部分）。但
+        #: 「一直等」有个前提：总会有别的 worker 切出新分片，或者
+        #: 总有在途的分片在推进。
+        #:
+        #: 万一这个前提不成立（分片既不在待办队列也不在途、还
+        #: 永远完不成），worker 就会**永远空转**——下载挂在「下载
+        #: 中」，一个字节都不动。Windows CI 上真的挂过一次。
+        #:
+        #: 所以加一道保险：**没有任何在途分片、而且超过这个时间
+        #: 一个字节都没进展，就报错退出**。宁可失败，也不要永远
+        #: 假装在下载。
+        self._idle_deadline_sec = 30.0
         #: 下载**还没完**的时候，存活 worker 数的最低值。
         #:
         #: 这是长尾的直接度量：连接数是随着 worker 一起消失的，
@@ -417,7 +431,11 @@ class DownloadFlow:
         assembler = FileAssembler(self.destination)
         self._assembler = assembler
         for chunk in planner.chunks():
-            assembler.open_chunk(chunk.id, chunk.start)
+            # `resume=chunk.bytes_done > 0`：**从头开始的分片必须把
+            # 盘上残留的旧字节清掉**，否则它们会被当成「已经下好的
+            # 字节」——分片被跳过、下载卡死，合并出来的文件还是旧
+            # 内容。见 `FileAssembler.open_chunk`。
+            assembler.open_chunk(chunk.id, chunk.start, resume=chunk.bytes_done > 0)
 
         if pre_existing > 0:
             self.progress_channel.report(pre_existing)
@@ -729,6 +747,17 @@ class DownloadFlow:
                     # 现在改成等：别的 worker 切出新分片时自己会醒，
                     # 末尾的活照样分给所有连接。
                     self.worker_idle_waits += 1
+                    # **没救了就别空转。** 没有在途分片 + 长时间
+                    # 没有进展 = 这个下载已经卡死，继续等只是假装
+                    # 在下载。报错退出，至少让用户知道出了什么事。
+                    if (
+                        planner.inflight_count == 0
+                        and time.monotonic() - self._last_progress_at > self._idle_deadline_sec
+                    ):
+                        raise FlowError(
+                            FlowFailure.PARTIAL.value,
+                            "下载卡住了：没有在途的分片，也没有进展",
+                        )
                     await asyncio.sleep(self._idle_poll)
                     continue
 

@@ -22,6 +22,16 @@ import socketserver
 import threading
 import time
 
+# **复用 range_server 里那套已经在 Windows CI 上踩过坑的加固基类。**
+#
+# - `QuietErrorMixin`：客户端中途断开时，标准库会把 traceback 打到
+#   stderr；pytest 退出那一刻打就撞上解释器关闭，整个进程 abort。
+# - `BoundedThreadJoinMixin`：关服务器时带超时地等处理线程退出。
+#   处理线程持有 socket，Windows 上不等的話删不干净。
+#
+# 自己另写一份服务器 = 把这些坑重新踩一遍。
+from .range_server import BoundedThreadJoinMixin, QuietErrorMixin
+
 __all__ = ["LinkServer"]
 
 
@@ -99,7 +109,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             srv.record(start, len(body))
 
 
-class _Threaded(socketserver.ThreadingMixIn, http.server.HTTPServer):
+class _Threaded(
+    BoundedThreadJoinMixin,
+    QuietErrorMixin,
+    socketserver.ThreadingMixIn,
+    http.server.HTTPServer,
+):
     allow_reuse_address = True
     request_queue_size = 128
     daemon_threads = True

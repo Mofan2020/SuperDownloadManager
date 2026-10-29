@@ -1335,7 +1335,25 @@ class DownloadEngine:
             return
         live = self.live.get(task_id)
         if live is not None and live.task is not None and not live.task.done():
-            return  # 还在跑
+            if summary.state in (TaskState.DOWNLOADING.value, TaskState.QUEUED.value):
+                return  # 还在跑
+            # **任务已经进终态，但收尾还没做完。**
+            #
+            # 状态是在 except 分支里写的，`finally`（弹 live、关分片
+            # 句柄、落历史）在这之后才跑。这中间有个窗口：用户在这个
+            # 窗口里点「继续下载」或者换链接，直接 `return` 就等于
+            # **什么都没做**——任务停在「等待中」永远不动，而界面上
+            # 看起来像是「点了没反应」。
+            #
+            # 链接失效的场景特别容易撞上：横幅一出现用户就输新链接，
+            # 那时候失败分支往往刚把状态写完。
+            #
+            # 所以这里等它收完再来。
+            with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                await asyncio.wait_for(asyncio.shield(live.task), timeout=10.0)
+            live = self.live.get(task_id)
+            if live is not None and live.task is not None and not live.task.done():
+                return
 
         options = self._task_options.get(task_id, {})
         original = self._specs.get(task_id)
@@ -1548,7 +1566,15 @@ class DownloadEngine:
             SessionState.remove(destination)
             self._discard_partials(task_id, summary)
 
-        summary.state = TaskState.QUEUED.value
+        # **不要在这里把状态改成「等待中」。**
+        #
+        # `resume()` 内部会用状态判断「这个任务是不是还在跑」：
+        # 终态（失败 / 等待新链接 / 取消）说明它只是**在收尾**，
+        # 该等它收完再启动；「下载中 / 等待中」才是真的在跑。
+        # 这里抢先改成「等待中」，resume() 会以为它在跑，直接
+        # 返回——换链就变成「点了没反应」。
+        #
+        # `resume()` 自己会把状态设成「下载中」，这里不用管。
         await self.resume(task_id)
         return result.to_dict()
 

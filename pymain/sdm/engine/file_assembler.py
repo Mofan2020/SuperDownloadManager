@@ -75,11 +75,28 @@ class FileAssembler:
 
     # -- 打开 / 写入 ------------------------------------------------
 
-    def open_chunk(self, chunk_id: int, start_offset: int) -> None:
+    def open_chunk(self, chunk_id: int, start_offset: int, resume: bool = True) -> None:
         """打开分片文件，记录它在最终文件里的起始位置。
 
         以追加模式打开——v1.0.x 用覆盖模式，每次打开都把文件截断，
         暂停后恢复的下载会静默丢掉已下载的字节。
+
+        `resume=False` 表示这个分片**从头开始**：盘上残留的旧字节
+        必须清掉。
+
+        **为什么必须清。** 残留的分片文件（取消过的下载、删不掉的
+        旧文件、Windows 上被占用没删掉的）会被当成「这个分片已经
+        下好了这么多字节」——于是：
+
+        1. 新下载**跳过**这个分片（`start >= chunk.end` 直接返回），
+           但规划器里的 `bytes_done` 还是 0 → `all_complete()` 永远
+           不成立 → **worker 无限空转，下载永远卡住**。
+        2. 就算没卡住，合并出来的文件也是**旧内容 + 新内容**的拼接，
+           静默损坏。
+
+        这不是假想：Windows 上分片文件被句柄占着时删不掉（`unlink`
+        抛 PermissionError），旧文件就留在那儿了。所以**不靠删除，
+        靠截断**——文件开着也能截。
         """
         with self._queue_lock:
             if chunk_id in self._handles:
@@ -88,12 +105,16 @@ class FileAssembler:
             path = self.partial_path(chunk_id)
             pre_existing = 0
             if path.exists():
-                pre_existing = path.stat().st_size
+                if resume:
+                    pre_existing = path.stat().st_size
             else:
                 path.touch()
 
             # 不用 with：句柄要长期持有，分片写完才关。
             handle = open(path, "r+b")  # noqa: SIM115
+            if not resume:
+                # 从头开始：把残留的旧字节清零。
+                handle.truncate(0)
             if pre_existing > 0:
                 handle.seek(0, os.SEEK_END)
             self._handles[chunk_id] = handle

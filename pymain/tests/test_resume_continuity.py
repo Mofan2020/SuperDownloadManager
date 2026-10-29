@@ -244,6 +244,108 @@ def test_weak_etag_is_not_used_to_judge_staleness():
     assert same.staleness(same_probe) is None
 
 
+def test_resume_during_task_finalization_still_starts(tmp_path, payload):
+    """**任务刚进终态、收尾还没做完时点「继续下载」，必须能启动。**
+
+    状态是在失败分支里写的，`finally`（弹掉 live、清分片句柄）在
+    之后。这中间有个窗口——用户在这个窗口里点「继续下载」或者在
+    横幅里换链接，早先的实现直接 `return`，等于**什么都没做**：
+    任务停在「等待中」永远不动，界面上看着像「点了没反应」。
+
+    链接失效的场景特别容易撞：横幅一出现用户就输新链接，那会儿
+    失败分支往往刚把状态写完。
+
+    现场是**造出来的**，不靠时序：任务失败后手动塞一个「还在收尾」
+    的 live 进去（task 没 done，状态已是终态）。
+    """
+    server = LinkServer(payload, serve_limit=CHUNK_BOUNDARY, fail_status=403)
+    new = LinkServer(payload, etag='"v2"')
+    dest = tmp_path / "payload.bin"
+    try:
+
+        async def _inner():
+            engine = _fast_fail_engine()
+            ids = await engine.start(
+                [
+                    StartSpec(
+                        url=server.url,
+                        destination_directory=tmp_path,
+                        filename_override="payload.bin",
+                    )
+                ]
+            )
+            task_id = ids[0]
+            waiting = await _wait_for_state(engine, task_id, {"awaiting_new_link"})
+            assert waiting is not None
+            assert waiting.state == "awaiting_new_link", waiting.state
+
+            # **造出「收尾还没做完」的现场。**
+            from sdm.engine.download_engine import LiveTask
+
+            spec = engine._specs[task_id]
+            live = LiveTask(task_id, spec)
+            live.task = asyncio.create_task(asyncio.sleep(0.4))
+            engine.live[task_id] = live
+            assert engine.live.get(task_id) is not None
+
+            result = await engine.relink(task_id, new.url)
+            assert result["decision"] in ("safeToResume", "unsafeButProceed"), result
+
+            done = await _wait_for_state(engine, task_id, {"completed", "failed"})
+            assert done is not None
+            assert done.state == "completed", (
+                f"收尾期间点的换链没启动下载：state={done.state} "
+                f"error={done.error_message}"
+            )
+            assert dest.read_bytes() == payload
+
+        run_async(_inner)
+    finally:
+        server.stop()
+        new.stop()
+
+
+def test_stale_partial_file_does_not_block_a_fresh_download(tmp_path, payload):
+    """**盘上残留的分片文件不能让新下载把它当成「已经下好的字节」。**
+
+    残留的分片文件很常见：取消过的下载、用户清理目录没清干净、
+    **Windows 上文件被句柄占着删不掉**（`unlink` 抛
+    PermissionError，重试 20 次也没用）。
+
+    后果有两条，第二条更狠：
+
+    1. 新下载**跳过**那个分片（`start >= chunk.end` 直接返回），
+       但规划器里的 `bytes_done` 还是 0 → `all_complete()` 永远不
+       成立 → **worker 无限空转，下载永远卡在「下载中」**。
+    2. 就算没卡住，合并出来的是**旧内容 + 新内容**的拼接，静默损坏。
+
+    修法：不靠删除，靠**截断**——从头开始的分片把残留清零。
+    """
+    from sdm.engine import work_dir
+    from sdm.engine.download_flow import DownloadFlow
+
+    dest = tmp_path / "payload.bin"
+    server = LinkServer(payload)
+    try:
+        # 造一个残留的分片文件：旧内容、正确的大小（128KB）。
+        leftover = work_dir.partial_path(dest, 0)
+        leftover.parent.mkdir(parents=True, exist_ok=True)
+        leftover.write_bytes(bytes(128 * 1024))
+
+        async def _inner():
+            flow = DownloadFlow(url=server.url, destination=dest)
+            # **限时**：坏实现下这个调用会永远不返回（worker 空转），
+            # 不能让测试挂死——挂死比失败难查得多。
+            await asyncio.wait_for(flow.run(), timeout=30)
+            assert dest.read_bytes() == payload, (
+                "合并出来的文件跟源不一致——残留的分片字节被混进去了"
+            )
+
+        run_async(_inner)
+    finally:
+        server.stop()
+
+
 # -- 3. 资源真的变了：不能死循环 --------------------------------
 
 
