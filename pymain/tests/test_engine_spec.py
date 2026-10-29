@@ -315,8 +315,16 @@ def test_session_staleness_falls_back_to_length():
     assert session.staleness(ContentProbe(url="u", content_length=200)) == "content_length"
 
 
-def test_stale_session_blocks_resume(tmp_path, server):
-    """资源变了 → 任务失败并给出 `stale_session`，不静默重下。
+def test_stale_session_restarts_instead_of_failing(tmp_path, server):
+    """资源变了 → **自己从头再下一次**，不把失败甩给用户。
+
+    旧契约是「抛 `stale_session` 给调用方，让用户决定」。用户反馈
+    「继续下载失效」之后改了：资源真的变了，那个会话**永久**不可用，
+    抛出去的结果就是用户点一次重试失败一次，永远恢复不了。
+
+    现在流程层自己清掉会话和分片，在同一个协程里重新下一次，并且
+    用 `stale_restarted` 告诉上层「这次是重新开始的」——界面据此
+    显示提示，用户知道进度为什么归零。
 
     这里用**文件大小**做变化信号：测试服务器不发 ETag，校验时
     走不到 ETag 那一级（两边的信号都得存在才能比）。
@@ -331,16 +339,19 @@ def test_stale_session_blocks_resume(tmp_path, server):
 
     async def _inner():
         flow = DownloadFlow(url=server.url, destination=dest)
-        with pytest.raises(FlowError) as excinfo:
-            await flow.run()
-        assert excinfo.value.kind == FlowFailure.STALE_SESSION.value
-        assert excinfo.value.category == ErrorCategory.STALE_SESSION
+        outcome = await flow.run()
+        assert outcome is not None
+        assert flow.stale_restarted, "资源变了要记下「重新开始过」"
+        # 会话文件已经作废，不能留着。
+        assert SessionState.read(dest) is None, "过期的会话文件该清掉"
+        # 重新下的是服务器现在这份文件。
+        assert dest.read_bytes() == server.expected_bytes()
 
     run_async(_inner)
 
 
-def test_stale_session_detected_by_etag(tmp_path, server):
-    """ETag 变了 → `stale_session`。
+def test_stale_session_detected_by_etag_restarts(tmp_path, server):
+    """ETag 变了 → 同样自己重新下一次。
 
     用 `monkeypatch` 换掉探测结果，模拟「服务器上的文件被换掉了」。
     """
@@ -364,9 +375,10 @@ def test_stale_session_detected_by_etag(tmp_path, server):
             return probe
 
         flow.downloader.probe = fake_probe  # type: ignore[method-assign]
-        with pytest.raises(FlowError) as excinfo:
-            await flow.run()
-        assert excinfo.value.kind == FlowFailure.STALE_SESSION.value
+        await flow.run()
+        assert flow.stale_restarted, "ETag 变了要记下「重新开始过」"
+        assert SessionState.read(dest) is None
+        assert dest.read_bytes() == server.expected_bytes()
 
     run_async(_inner)
 

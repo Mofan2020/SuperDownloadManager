@@ -37,7 +37,17 @@ jobs:
 
       - name: Test
         working-directory: pymain
-        run: python -m pytest tests -v
+        # **`-vv` 不是为了好看，是为了能查挂死。**
+        #
+        # `pyproject.toml` 里的 `addopts = "-q"` 抵掉了命令行上的
+        # `-v`，输出退回「每个文件一行点号」。一旦某个用例挂死，
+        # 日志里就只有一行点号——看不出是哪个用例，还以为是整个
+        # 文件挂了。两个 `-v` 抵掉 `-q` 之后是逐个用例一行，
+        # 挂在哪、哪个失败、失败原因是什么，一目了然。
+        #
+        # `-rf` 让失败在最后再汇总一次（挂死时汇总那部分看不到，
+        # 但失败用例的 traceback 会在当场打出来）。
+        run: python -m pytest tests -vv -rf
 
   no-pyobjc:
     name: Test (no PyObjC)

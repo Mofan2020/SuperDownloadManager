@@ -28,6 +28,8 @@
   "detailError": "错误",
   "detailHideChunks": "隐藏分段",
   "detailPerTaskLimit": "单任务限速",
+  "detailRestarted": "已重新开始",
+  "detailRestartedHint": "服务器上的文件已变化，无法续传，已重新开始下载",
   "detailShowChunks": "显示分段",
   "detailSize": "大小",
   "detailSpeed": "速度",

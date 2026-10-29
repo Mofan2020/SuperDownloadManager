@@ -382,15 +382,23 @@ class ConnectionGovernor:
         self.maximum = max(1, maximum)
         self._limit = max(1, min(initial, self.maximum))
         self._running = 0
-        self._changed: asyncio.Event | None = None
-
-    def bind_loop(self, loop) -> None:
-        """绑定事件循环并建好唤醒事件。
-
-        `asyncio.Event` 在 3.10 之后不再绑定创建时的循环，所以要
-        在**运行中的那个循环里**建，不能在 `__init__` 里建。
-        """
-        self._changed = asyncio.Event()
+        #: 正在等名额的协程。每个一个 future。
+        #:
+        #: **为什么不用 `asyncio.Event`。** `Event` 是个「粘性的标志位」：
+        #: `set()` 之后标志一直是 True，除非有人记得 `clear()`。而这里
+        #: 真正需要的语义是「**通知一下，让所有等待者重新检查条件**」——
+        #: 两者本来就不一样，中间那层 `clear()` 全靠调用方记得写。
+        #:
+        #: 自己管 future 列表就把这件事写进了代码结构里：
+        #:
+        #: - `set_result` 唤醒所有等待者（不取消任何一个）。
+        #: - 醒来之后**重新检查条件**，不够就再等。
+        #: - 不用再绑事件循环（`Event` 要绑，future 不用）。
+        #:
+        #: （曾经怀疑这里有丢唤醒导致的死锁。推演下来不是：单线程事件
+        #: 循环里「检查条件」和 `clear()` 之间没有 await，`release()`
+        #: 插不进来。真正的挂死原因见 `docs/notes.md`。）
+        self._waiters: list[asyncio.Future] = []
 
     @property
     def limit(self) -> int:
@@ -408,27 +416,36 @@ class ConnectionGovernor:
         self._wake()
 
     def _wake(self) -> None:
-        if self._changed is None:
-            return
-        try:
-            self._changed.set()
-        except Exception:
-            pass
+        """唤醒所有等名额的协程。
+
+        它们醒来后会**重新检查条件**——名额够了就抢到，不够就继续
+        等。所以「唤醒」不需要携带「有几个名额」这种信息。
+        """
+        for fut in list(self._waiters):
+            if not fut.done():
+                try:
+                    fut.set_result(None)
+                except Exception:
+                    pass
 
     async def acquire(self) -> None:
-        """等一个下载名额。"""
+        """等一个下载名额。
+
+        **醒来之后一定要重新检查条件。** 唤醒只是「可能有位置了」
+        的信号，不是「位置归你了」——几个等待者会同时醒来抢。
+        """
         while True:
             if self._running < self._limit:
                 self._running += 1
                 return
-            if self._changed is not None:
-                self._changed.clear()
-                try:
-                    await self._changed.wait()
-                except Exception:
-                    await _sleep(0.05)
-            else:
-                await _sleep(0.02)
+            loop = asyncio.get_running_loop()
+            fut = loop.create_future()
+            self._waiters.append(fut)
+            try:
+                await fut
+            finally:
+                if fut in self._waiters:
+                    self._waiters.remove(fut)
     def release(self) -> None:
         self._running = max(0, self._running - 1)
         self._wake()

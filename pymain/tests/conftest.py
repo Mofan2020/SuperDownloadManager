@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import faulthandler
 import os
 import shutil
 import sys
@@ -88,6 +89,33 @@ def _isolated_work_dir(tmp_path_factory, monkeypatch):
 def run_async(coro_fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     """在新的事件循环里跑一个异步函数。"""
     return asyncio.run(coro_fn(*args, **kwargs))
+
+
+# -- 挂死看门狗 -----------------------------------------------------
+#
+#: 单个测试超过这么久就认为卡死了（秒）。
+#:
+#: CI 作业的超时是 20 分钟。等到那时候，日志里只有一行点号，
+#: 根本看不出是哪个用例挂的。现在提前到 3 分钟就转储所有线程的栈
+#: 并让作业失败——**挂死必须留下现场**，不然只能靠猜。
+#:
+#: 3 分钟对单个用例非常宽松：本地跑完整套才 2 分半，最慢的用例
+#: 也就几十秒。
+HANG_TIMEOUT = 180.0
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item):
+    """给每个测试套一层「卡死了就转储栈」的看门狗。
+
+    覆盖的是**调用阶段**——测试函数体和它自己的 `finally` 都在
+    里面。夹具的拆解不在覆盖范围内（那些是我们的代码，很快）。
+    """
+    faulthandler.dump_traceback_later(HANG_TIMEOUT, exit=True)
+    try:
+        return (yield)
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
 
 @pytest.fixture

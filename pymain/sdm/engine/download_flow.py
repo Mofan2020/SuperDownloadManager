@@ -255,6 +255,14 @@ class DownloadFlow:
         self._last_progress_at = time.monotonic()
         #: 退避过一次的标记——单流回退只做一次。
         self._fell_back = False
+        #: 「资源变了」之后自动从头开始过。
+        #:
+        #: 引擎靠它给用户一个提示（「服务器上的文件已变化，已重新
+        #: 开始下载」）——资源真的变了，本来就只能重下，但必须说清楚，
+        #: 不然用户以为续传又失灵了。
+        self.stale_restarted = False
+        #: 「资源变了」的回退只做一次。
+        self._stale_fallback = False
         self._probe: ContentProbe | None = None
 
     # -- 对外状态 ----------------------------------------------------
@@ -314,6 +322,24 @@ class DownloadFlow:
         self._cleanup_partials()
         self._remove_session()
 
+    def _discard_session_partials(self) -> None:
+        """把会话文件里记着的分片临时文件删掉。
+
+        **删不掉也没关系**——从头开始的分片会把残留**截断**
+        （见 `FileAssembler.open_chunk`）。Windows 上文件被句柄占着
+        时 `unlink` 会抛 PermissionError，删是尽力而为，截断才是
+        兜底。
+        """
+        session = SessionState.read(self.destination)
+        if session is None:
+            return
+        for chunk in session.chunks:
+            path = self._partial_path(chunk.id)
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
     def _cleanup_partials(self) -> None:
         """删掉所有分片临时文件。
 
@@ -353,6 +379,25 @@ class DownloadFlow:
                 self._cleanup_partials()
                 self._remove_session()
                 return await self._run_once(use_range=False)
+            if err.kind == FlowFailure.STALE_SESSION.value and not self._stale_fallback:
+                # **服务器上的文件变了 → 旧字节作废，从头开始。**
+                #
+                # 会话文件里的 ETag / 长度跟服务器现在的对不上，这个
+                # 会话**永久**不可用。清掉它和分片，重新下一次——
+                # **在同一个协程里重跑**，不新建后台任务。
+                #
+                # 资源真的变了，本来就只能重下；但必须让用户知道
+                # 「这次是重新开始的」，否则看着像续传又失灵。
+                self._stale_fallback = True
+                self.stale_restarted = True
+                log.notice(
+                    CAT_ENGINE,
+                    "服务器上的文件已变化，放弃旧进度，重新下载",
+                )
+                self._cleanup_partials()
+                self._discard_session_partials()
+                self._remove_session()
+                return await self._run_once(use_range=True)
             raise
 
     async def _run_once(self, use_range: bool) -> FlowOutcome:
@@ -693,7 +738,6 @@ class DownloadFlow:
         """
         self._planner = planner
         self._governor = ConnectionGovernor(self.initial_connections, self.parallelism_cap)
-        self._governor.bind_loop(asyncio.get_running_loop())
 
         async def worker() -> None:
             self._live_workers += 1
@@ -784,7 +828,17 @@ class DownloadFlow:
             for task in tasks:
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # **等收尾要有上限。**
+            #
+            # `gather(..., return_exceptions=True)` 会一直等到所有
+            # 任务结束。worker 卡在不可中断的地方（系统调用、没
+            # 响应的 socket）时，它不响应取消，`gather` 就永远等
+            # 下去——**整个下载卡死**，用户看到的是「下载中」，
+            # 一个字节都不动，界面也没有任何提示。
+            #
+            # 给 10 秒：还没收完的 worker 就是孤儿了，让它们自己
+            # 烂掉，但**不能因为收尾收不干净就把整个下载挂住**。
+            await asyncio.wait(tasks, timeout=10.0)
             raise
         finally:
             ramp_task.cancel()

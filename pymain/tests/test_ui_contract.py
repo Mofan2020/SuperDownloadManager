@@ -236,6 +236,8 @@ NEW_I18N_KEYS = (
     "detailConnections",
     "detailLogSummary",
     "detailSpeedCurve",
+    "detailRestarted",
+    "detailRestartedHint",
     # 浏览器接管
     "settingsBrowserCapture",
     "browserCaptureExplanation",

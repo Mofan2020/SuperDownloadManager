@@ -28,6 +28,8 @@
   "detailError": "Error",
   "detailHideChunks": "Hide chunks",
   "detailPerTaskLimit": "Per-task limit",
+  "detailRestarted": "Restarted",
+  "detailRestartedHint": "The file on the server has changed, so it could not be resumed — the download was restarted from the beginning.",
   "detailShowChunks": "Show chunks",
   "detailSize": "Size",
   "detailSpeed": "Speed",

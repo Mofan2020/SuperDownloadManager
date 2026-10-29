@@ -38,7 +38,7 @@ from sdm.engine.http_downloader import HTTPDownloader
 from sdm.engine.resume_state import ResumeState
 from sdm.engine.session_state import SessionState
 
-from .conftest import run_async
+from .async_guard import run_with_timeout
 from .link_server import LinkServer
 
 
@@ -172,7 +172,7 @@ def test_relink_resumes_instead_of_redownloading(tmp_path, payload):
                 "等于整个重下了一遍"
             )
 
-        run_async(_inner)
+        run_with_timeout(_inner)
     finally:
         old.stop()
         new.stop()
@@ -210,7 +210,7 @@ def test_relink_rewrites_session_url(tmp_path, payload):
                 f"会话里的 URL 还是旧的：{session.url}"
             )
 
-        run_async(_inner)
+        run_with_timeout(_inner)
     finally:
         old.stop()
         new.stop()
@@ -250,7 +250,7 @@ def test_relink_rejects_a_different_file(tmp_path, payload):
             # 拒绝之后不能偷偷开始下。
             assert new.total_sent == 0, "拒绝了却还在下"
 
-        run_async(_inner)
+        run_with_timeout(_inner)
     finally:
         old.stop()
         new.stop()
@@ -285,7 +285,7 @@ def test_relink_uses_bytes_not_etag(tmp_path, payload):
             assert result["decision"] == "safeToResume", result
             assert result.get("verifiedSameFile") is True, result
 
-        run_async(_inner)
+        run_with_timeout(_inner)
     finally:
         old.stop()
         new.stop()
@@ -330,7 +330,7 @@ def test_relink_without_samples_falls_back_to_restart(tmp_path, payload):
             assert final.state == "completed", final.error_message
             assert dest.read_bytes() == payload
 
-        run_async(_inner)
+        run_with_timeout(_inner)
     finally:
         old.stop()
         new.stop()
@@ -354,7 +354,7 @@ def test_handler_rejects_length_mismatch(payload):
         finally:
             server.stop()
 
-    run_async(_inner)
+    run_with_timeout(_inner)
 
 
 def test_handler_verifies_bytes(tmp_path, payload):
@@ -374,7 +374,7 @@ def test_handler_verifies_bytes(tmp_path, payload):
         finally:
             server.stop()
 
-    run_async(_inner)
+    run_with_timeout(_inner)
 
 
 def test_handler_rejects_different_bytes(payload):
@@ -393,4 +393,4 @@ def test_handler_rejects_different_bytes(payload):
         finally:
             server.stop()
 
-    run_async(_inner)
+    run_with_timeout(_inner)

@@ -34,7 +34,7 @@ if str(ROOT) not in sys.path:
 from sdm.engine.download_engine import DownloadEngine, StartSpec
 from sdm.engine.session_state import SessionState
 
-from .conftest import run_async
+from .async_guard import run_with_timeout
 from .link_server import LinkServer
 
 # 256KB 的文件、2 个初始分片 → 每个分片 128KB。
@@ -158,7 +158,7 @@ def test_resume_continues_from_breakpoint(tmp_path, payload):
                 f"实际只需要 {len(payload) - downloaded} 字节"
             )
 
-        run_async(_inner)
+        run_with_timeout(_inner)
     finally:
         server.stop()
 
@@ -211,7 +211,7 @@ def test_rotating_etag_does_not_break_resume(tmp_path, payload):
                 "ETag 轮换导致已经下过的字节被重下"
             )
 
-        run_async(_inner)
+        run_with_timeout(_inner)
     finally:
         server.stop()
 
@@ -299,7 +299,7 @@ def test_resume_during_task_finalization_still_starts(tmp_path, payload):
             )
             assert dest.read_bytes() == payload
 
-        run_async(_inner)
+        run_with_timeout(_inner)
     finally:
         server.stop()
         new.stop()
@@ -341,7 +341,7 @@ def test_stale_partial_file_does_not_block_a_fresh_download(tmp_path, payload):
                 "合并出来的文件跟源不一致——残留的分片字节被混进去了"
             )
 
-        run_async(_inner)
+        run_with_timeout(_inner)
     finally:
         server.stop()
 
@@ -395,8 +395,15 @@ def test_changed_resource_clears_session_and_restarts(tmp_path, payload):
             )
             assert dest.read_bytes() == changed, "应该下到新的内容"
             assert SessionState.read(destination) is None, "下完了不该留会话文件"
+            # **界面上要能说清楚「进度为什么归零」。**
+            #
+            # 资源真的变了，本来就只能重下——但用户看到进度从 90%
+            # 掉回 0% 会有疑问。引擎要给一个标志，界面据此显示
+            # 「已重新开始下载」。
+            assert done.stale_restarted, "重新开始过要留标志，界面才知道怎么解释"
+            assert done.to_dict()["stale_restarted"] is True
 
-        run_async(_inner)
+        run_with_timeout(_inner)
     finally:
         server.stop()
 
@@ -439,6 +446,6 @@ def test_retry_task_clears_an_expired_session(tmp_path, payload):
             )
             assert dest.read_bytes() == server.payload
 
-        run_async(_inner)
+        run_with_timeout(_inner)
     finally:
         server.stop()

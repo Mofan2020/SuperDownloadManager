@@ -1171,6 +1171,9 @@ function renderSpeedCurve(task) {
 // 这里用 get_task_error 的结果拼一行：有错显示错误，没有就显示
 // 「暂无错误」。别去调一个不存在的后端接口。
 function taskErrorSummary(task) {
+  // 「资源变了，已重新开始」——按当前语言说，别把引擎的中文原文
+  // 抖出来（英文界面下那行中文很奇怪）。
+  if (task.stale_restarted) return t("detailRestartedHint");
   const err = State.taskErrors[task.id];
   if (err && err.message) {
     const category = err.category ? `[${err.category}] ` : "";
@@ -1286,7 +1289,13 @@ function renderDetail() {
   if (task.speed_limit_bytes_per_sec > 0) {
     addMeta(t("detailPerTaskLimit"), fmtRate(task.speed_limit_bytes_per_sec));
   }
-  if (task.error_message) {
+  if (task.stale_restarted) {
+    // **「资源变了，已重新开始」不是错误。**
+    //
+    // 它是「进度为什么归零」的说明。放在「错误」栏里会让人以为
+    // 下载出了问题——它其实下完了。
+    addMeta(t("detailRestarted"), t("detailRestartedHint"));
+  } else if (task.error_message) {
     addMeta(t("detailError"), task.error_message);
   }
   // 日志摘要。引擎还没提供按任务的日志接口，这里用

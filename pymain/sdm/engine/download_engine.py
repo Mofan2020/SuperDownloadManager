@@ -127,6 +127,12 @@ class TaskSummary:
     #: 「下载一直卡在 0 KB/s」就是这段。这里的 0 是**还没开始**，
     #: 不是**下了 0 字节还很快**，两者必须区分。
     connecting: bool = False
+    #: **这次是不是「重新开始」过的。**
+    #:
+    #: 服务器上的文件变了 → 旧进度作废 → 从头再下一次。这个标记
+    #: 让界面能说清楚「进度为什么归零」，而不是让用户以为续传又
+    #: 失灵了（他明明看到进度从 90% 掉回 0%）。
+    stale_restarted: bool = False
     #: 完成后行为（规格 §1.7）：none / open_file / open_folder / run_script / sleep。
     on_complete: str = "none"
     #: 任务级代理覆盖（规格 §1.6）。None = 走全局代理。
@@ -167,6 +173,7 @@ class TaskSummary:
             "on_complete": self.on_complete,
             "proxy": self.proxy,
             "connecting": self.connecting,
+            "stale_restarted": self.stale_restarted,
         }
         if with_chunks:
             payload["chunks"] = self.chunks
@@ -236,14 +243,6 @@ class LiveTask:
         self.flow: DownloadFlow | None = None
         self.paused = False
         self.cancelled = False
-        #: 这次跑完之后要不要自动重来一遍。
-        #:
-        #: 用于「资源变了」这种情况：会话文件和分片已经清干净，
-        #: 再跑一次就是从头下载。与其让用户失败后再点一次
-        #: 重试（两次点击、两次等待），不如这一次就跑通——
-        #: 但必须在界面上说清楚「已重新开始」，不能让用户以为
-        #: 续传又失灵了。
-        self.restart_requested = False
 
 
 #: 名字冲突的处理策略（规格 §5.3）。
@@ -922,7 +921,20 @@ class DownloadEngine:
         try:
             outcome = await live.flow.run()
             summary.state = TaskState.COMPLETED.value
-            summary.error_message = None
+            # **「资源变了，重新开始过」要留个痕迹。**
+            #
+            # 资源真的变了，本来就只能重下——但用户必须知道这次是
+            # 从头开始的，不然看着像续传又失灵了（他明明看到进度
+            # 从 90% 掉回 0%）。
+            #
+            # 标志位给界面用（界面按当前语言写这句话）；`error_message`
+            # 也留一份中文原文——通知、历史这些不经过前端的场合靠它。
+            summary.stale_restarted = live.flow.stale_restarted
+            summary.error_message = (
+                "服务器上的文件已变化，无法续传，已重新开始下载"
+                if live.flow.stale_restarted
+                else None
+            )
             summary.bytes_done = summary.total_bytes or summary.bytes_done
             summary.server_supports_ranges = outcome.server_supports_ranges
             if outcome.checksum:
@@ -961,16 +973,16 @@ class DownloadEngine:
             else:
                 summary.state = TaskState.FAILED.value
                 summary.error_message = err.detail or str(err)
-            # **「资源变了」必须把会话和分片清掉，然后自动重来一次。**
+            # **「资源变了」必须把会话和分片清掉。**
             #
             # 会话文件里的 ETag / 长度跟服务器现在的对不上——这个
             # 会话**永久地**不可用了。不清的话，用户每次点「重试」
             # 都撞同一个 stale 会话，永远失败，人就卡死在这儿了。
             #
-            # 清完之后自动从头开始（`restart_requested`），而不是
-            # 让用户失败一次再点一次重试。**界面上必须写清楚
-            # 「已重新开始」**——资源真的变了，本来就只能重下，
-            # 悄悄重下会让用户以为续传又失灵。
+            # 正常情况下流程层自己会处理这件事（判出资源变了就清掉
+            # 会话重新下一次，见 `DownloadFlow.run`）。走到这里说明
+            # 连重新下都失败了——那就把会话和分片清干净，让下一次
+            # 「重试」是干净的。
             if err.kind == FlowFailure.STALE_SESSION.value:
                 SessionState.remove(Path(summary.destination))
                 self._discard_partials(task_id, summary)
@@ -978,12 +990,10 @@ class DownloadEngine:
                 payload = task_error.to_dict()
                 payload["retryable"] = True
                 self._task_errors[task_id] = payload
-                summary.error_message = "服务器上的文件已变化，无法续传，已重新开始下载"
                 log.notice(
                     CAT_ENGINE,
                     f"会话已过期，清掉后重新下载: {summary.filename}",
                 )
-                live.restart_requested = True
             self._zero_speed(summary)
             summary.finished_at = time.time()
             log.error(CAT_ENGINE, f"任务失败 {summary.filename}: {err}")
@@ -1007,21 +1017,6 @@ class DownloadEngine:
             # 超过保留上限就丢最老的。
             self._retire_chunk_states(task_id)
             self._finish_task(task_id)
-            # 「资源变了」——会话和分片已经清干净，这里自动从头
-            # 再跑一遍。
-            #
-            # **必须放在 `self.live.pop` 之后**：`resume()` 会检查
-            # 「这个任务是不是还在跑」，还在跑就直接返回。放在
-            # pop 之前，这次重启会被静默丢掉，任务就停在失败状态。
-            if live.restart_requested:
-                live.restart_requested = False
-                await self.resume(task_id)
-                # `resume()` 会把 error_message 清空，所以通知要
-                # 在它之后再写回去——用户打开详情面板要能看到
-                # 「这次是重新开始的」，而不是莫名其妙进度归零。
-                summary.error_message = (
-                    "服务器上的文件已变化，无法续传，已重新开始下载"
-                )
 
     def _finish_task(self, task_id: str) -> None:
         """任务收尾：释放队列槽位，让下一个排队的开跑。"""
