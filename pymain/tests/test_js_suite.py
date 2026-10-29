@@ -5,6 +5,9 @@
 - `tests/test_connecting_js.mjs` 测的是「连接中」时不能显示 0 KB/s。
 - `tests/test_category_auto_js.mjs` 测的是自动分类（默认「自动」、
   自动时不把分类发给后端）。
+- `tests/test_detail_live_js.mjs` 测的是详情面板的分片明细要
+  跟着轮询实时更新（用户 2026-10-29 报的「首次点开不更新，
+  关掉重开才更新」）。
 
 app.js 是浏览器脚本，pytest 跑不了，所以用 Node 跑独立的
 .mjs 脚本，这里只负责调用 + 转发输出。
@@ -30,6 +33,7 @@ MJS_SUITES = [
     HERE / "test_connecting_js.mjs",
     HERE / "test_category_auto_js.mjs",
     HERE / "test_browser_capture_js.mjs",
+    HERE / "test_detail_live_js.mjs",
 ]
 
 node = shutil.which("node")

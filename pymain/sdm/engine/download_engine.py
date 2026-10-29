@@ -39,6 +39,7 @@ from .http_downloader import DownloadError, HTTPDownloader
 from .progress_channel import ProgressChannel
 from .range_planner import RangeStrategy
 from .resume_state import ResumeState
+from .session_state import SessionState
 from .speed_display import SpeedInput, compute
 from .speed_limiter import SpeedLimiter
 from .speed_policy import SpeedPolicy
@@ -235,6 +236,14 @@ class LiveTask:
         self.flow: DownloadFlow | None = None
         self.paused = False
         self.cancelled = False
+        #: 这次跑完之后要不要自动重来一遍。
+        #:
+        #: 用于「资源变了」这种情况：会话文件和分片已经清干净，
+        #: 再跑一次就是从头下载。与其让用户失败后再点一次
+        #: 重试（两次点击、两次等待），不如这一次就跑通——
+        #: 但必须在界面上说清楚「已重新开始」，不能让用户以为
+        #: 续传又失灵了。
+        self.restart_requested = False
 
 
 #: 名字冲突的处理策略（规格 §5.3）。
@@ -590,11 +599,35 @@ class DownloadEngine:
         """
         return self._task_errors.get(task_id)
 
+    def _task_headers(self, task_id: str) -> dict[str, str]:
+        """任务级的请求头（Referer / Cookie / UA …）。
+
+        浏览器接管派单时会把页面的 Referer 带过来，很多站点没它
+        直接 403。探测和分片请求都要带上，所以单独抽一个方法，
+        免得两处各写一遍、漏了一处。
+        """
+        spec = self._specs.get(task_id)
+        headers: dict[str, str] = {}
+        if spec is None:
+            return headers
+        if spec.referer:
+            headers["Referer"] = spec.referer
+        headers.update(spec.headers or {})
+        return headers
+
     async def retry_task(self, task_id: str) -> None:
         """手动重试：从持久化的进度恢复，不是从头再来（规格 §5.2）。
 
         会话文件还在就按它的布局续传；会话文件没了（用户清理过
         目录）就重新开始。
+
+        **会话过期了怎么办？** 不在这里处理——这里主动探测一遍
+        再判「过期」是危险的：判「过期」只认 ETag，而很多 CDN
+        每次请求都换 ETag，一判就误伤，把好好的续传打成「从头
+        重下」。真正判断资源变没变要走字节比对，那是流程层的事
+        （见 `DownloadFlow._confirm_changed_by_bytes`）。流程层判出
+        「真变了」，引擎会清掉会话并自动从头开始——用户点一次
+        重试就通，不需要这里再探一遍。
         """
         summary = self.tasks.get(task_id)
         if summary is None:
@@ -770,10 +803,7 @@ class DownloadEngine:
 
         # 任务级的请求头（规格 §1.6）。浏览器接管带过来的 Cookie /
         # UA 在这里生效——拿不到登录态就下不动。
-        headers: dict[str, str] = {}
-        if spec.referer:
-            headers["Referer"] = spec.referer
-        headers.update(spec.headers or {})
+        headers = self._task_headers(task_id)
 
         # 探测一次拿真实文件名和总长度。
         # 用共享的 downloader——Swift v1.1.8 在这里另建了一个
@@ -892,6 +922,7 @@ class DownloadEngine:
         try:
             outcome = await live.flow.run()
             summary.state = TaskState.COMPLETED.value
+            summary.error_message = None
             summary.bytes_done = summary.total_bytes or summary.bytes_done
             summary.server_supports_ranges = outcome.server_supports_ranges
             if outcome.checksum:
@@ -930,6 +961,29 @@ class DownloadEngine:
             else:
                 summary.state = TaskState.FAILED.value
                 summary.error_message = err.detail or str(err)
+            # **「资源变了」必须把会话和分片清掉，然后自动重来一次。**
+            #
+            # 会话文件里的 ETag / 长度跟服务器现在的对不上——这个
+            # 会话**永久地**不可用了。不清的话，用户每次点「重试」
+            # 都撞同一个 stale 会话，永远失败，人就卡死在这儿了。
+            #
+            # 清完之后自动从头开始（`restart_requested`），而不是
+            # 让用户失败一次再点一次重试。**界面上必须写清楚
+            # 「已重新开始」**——资源真的变了，本来就只能重下，
+            # 悄悄重下会让用户以为续传又失灵。
+            if err.kind == FlowFailure.STALE_SESSION.value:
+                SessionState.remove(Path(summary.destination))
+                self._discard_partials(task_id, summary)
+                summary.error_retryable = True
+                payload = task_error.to_dict()
+                payload["retryable"] = True
+                self._task_errors[task_id] = payload
+                summary.error_message = "服务器上的文件已变化，无法续传，已重新开始下载"
+                log.notice(
+                    CAT_ENGINE,
+                    f"会话已过期，清掉后重新下载: {summary.filename}",
+                )
+                live.restart_requested = True
             self._zero_speed(summary)
             summary.finished_at = time.time()
             log.error(CAT_ENGINE, f"任务失败 {summary.filename}: {err}")
@@ -953,6 +1007,21 @@ class DownloadEngine:
             # 超过保留上限就丢最老的。
             self._retire_chunk_states(task_id)
             self._finish_task(task_id)
+            # 「资源变了」——会话和分片已经清干净，这里自动从头
+            # 再跑一遍。
+            #
+            # **必须放在 `self.live.pop` 之后**：`resume()` 会检查
+            # 「这个任务是不是还在跑」，还在跑就直接返回。放在
+            # pop 之前，这次重启会被静默丢掉，任务就停在失败状态。
+            if live.restart_requested:
+                live.restart_requested = False
+                await self.resume(task_id)
+                # `resume()` 会把 error_message 清空，所以通知要
+                # 在它之后再写回去——用户打开详情面板要能看到
+                # 「这次是重新开始的」，而不是莫名其妙进度归零。
+                summary.error_message = (
+                    "服务器上的文件已变化，无法续传，已重新开始下载"
+                )
 
     def _finish_task(self, task_id: str) -> None:
         """任务收尾：释放队列槽位，让下一个排队的开跑。"""
@@ -1390,7 +1459,17 @@ class DownloadEngine:
                 await self.remove(summary.id)
 
     async def relink(self, task_id: str, new_url: str) -> dict:
-        """给等待新链接的任务换链接。"""
+        """给等待新链接的任务换链接。
+
+        **判定通过之后必须能续传，而不是从头重下。** 这是这个
+        方法存在的全部意义：链接失效时用户已经下了一半的字节
+        是好的，重新下一遍既慢又浪费。
+
+        续传要成立，会话文件里的 URL 必须改写成新链接——流程层
+        恢复时会检查「会话的 URL 跟本次下载的 URL 一致吗」，
+        不一致就把整个会话丢掉、从零重下。这就是「换链接之后
+        变成重新下载」的根因。
+        """
         from .expired_link import ExpiredLinkHandler, RelinkDecision
 
         summary = self.tasks.get(task_id)
@@ -1398,7 +1477,14 @@ class DownloadEngine:
             return {"decision": "unsafeReject", "reason": "任务不存在"}
 
         destination = Path(summary.destination)
-        # 升级前的 sidecar 还在下载目录旁边，搬过来。
+        # **基准用会话文件，不用 sidecar。**
+        #
+        # sidecar 是**下载成功之后**才写的。链接失效时任务根本没
+        # 下完，sidecar 不存在——早先这里退化成「拿 summary 拼一个
+        # etag=None 的空壳」，「是不是同一个文件」的校验只剩长度
+        # 一项，等于没有校验。会话文件里有真实的 etag / 长度 /
+        # 分片布局，这才是「原来那个文件」的样子。
+        session = SessionState.read(destination)
         sidecar = work_dir.adopt_legacy_sidecar(destination)
         original = None
         if sidecar is not None and sidecar.exists():
@@ -1406,6 +1492,14 @@ class DownloadEngine:
                 original = ResumeState.read(sidecar)
             except Exception:
                 original = None
+        if session is not None:
+            original = ResumeState(
+                url=session.url or summary.url,
+                content_length=session.content_length or summary.total_bytes or 0,
+                etag=session.etag,
+                last_modified=session.last_modified,
+                filename=destination.name,
+            )
         if original is None:
             original = ResumeState(
                 url=summary.url,
@@ -1413,15 +1507,90 @@ class DownloadEngine:
                 filename=destination.name,
             )
 
-        handler = ExpiredLinkHandler(original, self.downloader)
+        # 已经下到盘上的字节——用来跟新链接认亲（最硬的证据）。
+        samples = self._collect_relink_samples(destination, session)
+
+        handler = ExpiredLinkHandler(original, self.downloader, samples=samples)
         result = await handler.evaluate_relink(new_url)
 
+        if result.decision == RelinkDecision.UNSAFE_REJECT:
+            # 判定是「不是同一个文件」——不动任何东西，任务继续
+            # 等着新链接。已下载的字节留着，用户再给一个对的链接。
+            log.notice(CAT_ENGINE, f"拒绝换链: {result.reason}")
+            summary.error_message = result.reason
+            return result.to_dict()
+
+        summary.url = new_url
+        summary.error_message = None
+
         if result.decision == RelinkDecision.SAFE_TO_RESUME:
-            summary.url = new_url
-            summary.state = TaskState.QUEUED.value
-            summary.error_message = None
-            await self.resume(task_id)
+            # 续传：把会话文件的 URL 改成新链接，并同步新链接的
+            # ETag / Last-Modified。
+            #
+            # **ETag 必须一起换。** 不换的话恢复时的「资源是否变化」
+            # 校验会拿旧 ETag 跟新链接的 ETag 比——不同就判成
+            # STALE_SESSION，刚续上的下载又被打回重来。
+            if session is not None:
+                session.url = new_url
+                if result.probe is not None:
+                    session.etag = result.probe.etag
+                    session.last_modified = result.probe.last_modified
+                    if result.probe.content_length:
+                        session.content_length = result.probe.content_length
+                session.write(destination)
+        else:
+            # 放行但没法续（不支持 Range / 没法验证是同一个文件）：
+            # **清掉会话和分片，干净地从头开始。**
+            #
+            # 不清的话，流程层会拿旧分片去续——而旧分片对应的是
+            # 另一个 URL 的字节，续上去就是一份拼接出来的错文件。
+            log.notice(CAT_ENGINE, f"新链接不能续传，从头开始: {result.reason}")
+            SessionState.remove(destination)
+            self._discard_partials(task_id, summary)
+
+        summary.state = TaskState.QUEUED.value
+        await self.resume(task_id)
         return result.to_dict()
+
+    def _collect_relink_samples(
+        self,
+        destination: Path,
+        session: SessionState | None,
+    ) -> list:
+        """把盘上已下载的字节取几段出来，给「是不是同一个文件」做证据。
+
+        只取**头部**的几段，每段最多 4KB——够认亲，又不至于把
+        文件读一遍。取样失败就当没有样本（退回 ETag 判断）。
+        """
+        from .expired_link import RelinkSample
+
+        if session is None:
+            return []
+        samples: list[RelinkSample] = []
+        per_sample = 4096
+        for chunk in sorted(session.chunks, key=lambda c: c.start):
+            if len(samples) >= 3:
+                break
+            path = work_dir.adopt_legacy_partial(destination, chunk.id)
+            try:
+                if not path.exists():
+                    continue
+                # **已下载的字节数以盘上的文件为准，不以会话文件为准。**
+                # 会话文件里的 `bytes_done` 只有分片**整个下完**时
+                # 才是准的（流程层在分片完成时才把它顶到末尾），
+                # 下了一半的分片在会话文件里记的是 0——照它取样会
+                # 一个样本都取不到。
+                on_disk = path.stat().st_size
+                if on_disk <= 0:
+                    continue
+                with path.open("rb") as handle:
+                    data = handle.read(min(per_sample, on_disk))
+            except OSError:
+                continue
+            if not data:
+                continue
+            samples.append(RelinkSample(offset=chunk.start, data=data))
+        return samples
 
     # -- 查询 --------------------------------------------------------
 

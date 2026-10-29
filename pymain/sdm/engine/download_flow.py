@@ -390,6 +390,10 @@ class DownloadFlow:
                 raise FlowError(FlowFailure.PROBE_FAILED.value, str(err)) from err
 
         self._probe = probe
+        # **把探测结果缓存下来。** 回退（不支持 Range / 会话过期）
+        # 会再跑一次 `_run_once`，那时候不该再探一次——探测是整个
+        # 下载里最贵的一步（一次完整 RTT），重复探等于让用户白等。
+        self._probe_hint = probe
         content_length = probe.content_length
         if not content_length or content_length <= 0:
             raise FlowError(FlowFailure.NO_CONTENT_LENGTH.value, "服务器没有返回 Content-Length")
@@ -407,7 +411,7 @@ class DownloadFlow:
             self.server_supports_ranges = False
 
         # 2. 恢复：盘上有会话文件就按它的布局接着下
-        planner, pre_existing = self._prepare_planner(probe, content_length, use_range)
+        planner, pre_existing = await self._prepare_planner(probe, content_length, use_range)
 
         # 3. 合并 + sidecar
         assembler = FileAssembler(self.destination)
@@ -493,7 +497,7 @@ class DownloadFlow:
 
     # -- 恢复 --------------------------------------------------------
 
-    def _prepare_planner(
+    async def _prepare_planner(
         self,
         probe: ContentProbe,
         content_length: int,
@@ -520,6 +524,25 @@ class DownloadFlow:
                 )
             else:
                 stale = session.staleness(probe)
+                # **「ETag 变了但长度一样」先别急着判死。**
+                #
+                # 有些服务器每次请求都给不同的强 ETag（按节点生成、
+                # 按请求时间生成都见过）。这种情况内容其实没变，
+                # 判成 stale 就等于把用户的「继续下载」变成「从头
+                # 重下」——正是最该避免的行为。
+                #
+                # 用字节比对确认：拿盘上已下的那段字节，去服务器取
+                # 同样的偏移，逐字节比。一样 = 资源没变，可以续。
+                if (
+                    stale == "etag"
+                    and session.content_length == content_length
+                    and not await self._confirm_changed_by_bytes(session, probe)
+                ):
+                    stale = None
+                    log.notice(
+                        CAT_STORE,
+                        "服务器的 ETag 变了但内容一致，按可续传处理",
+                    )
                 if stale:
                     log.notice(CAT_STORE, f"会话文件校验不通过（{stale}），需要用户决策")
                     raise FlowError(
@@ -575,6 +598,64 @@ class DownloadFlow:
             f"续传 {self.destination.name}：{len(chunks)} 个分片，已有 {pre_existing} 字节",
         )
         return planner, pre_existing
+
+    async def _confirm_changed_by_bytes(
+        self,
+        session: SessionState,
+        probe: ContentProbe,
+    ) -> bool:
+        """资源是不是真的变了？
+
+        **用盘上已下载的字节跟服务器现在的字节比一比。**
+
+        判「变了」的依据只有 ETag 时，会被服务器「每次请求换 ETag」
+        的行为骗到——那种情况下内容其实一模一样，把用户的续传打成
+        「资源已变化」是最糟的结果。字节比对是内容级的，不会骗人。
+
+        返回 True = 确实变了（维持 stale 判断）；
+        返回 False = 内容一样，可以续传。
+
+        **一段字节都没比成的时候返回 True。** 没有证据不等于
+        「没变」——拿不到样本时必须维持原来的判断，不能因为
+        「没法验证」就放行。
+        """
+        compared = 0
+        for chunk in sorted(session.chunks, key=lambda c: c.start):
+            path = self._partial_path(chunk.id)
+            try:
+                if not path.exists():
+                    continue
+                on_disk = path.stat().st_size
+                if on_disk <= 0:
+                    continue
+                with path.open("rb") as handle:
+                    data = handle.read(min(4096, on_disk))
+            except OSError:
+                continue
+            if not data:
+                continue
+            compared += 1
+            end = chunk.start + len(data) - 1
+            try:
+                remote = await self.downloader.fetch_range(probe.url, chunk.start, end)
+            except Exception as err:
+                # 取不到就没法证明「没变」——保守起见维持「变了」。
+                log.warning(
+                    CAT_ENGINE,
+                    f"取样失败（偏移 {chunk.start}），无法确认资源未变化: {err}",
+                )
+                return True
+            if not remote:
+                return True
+            if remote != data:
+                log.notice(
+                    CAT_ENGINE,
+                    f"偏移 {chunk.start} 处的字节不同，资源确实变了",
+                )
+                return True
+        # **一个字节都没比成**——盘上没东西可比。没有证据就
+        # 不能推翻「资源变了」的判断。
+        return compared == 0
 
     # -- 并发 --------------------------------------------------------
 

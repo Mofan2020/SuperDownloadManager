@@ -40,6 +40,20 @@ SESSION_SUFFIX = ".sdm.session.json"
 SESSION_VERSION = 1
 
 
+def _is_strong_etag(etag: str | None) -> bool:
+    """这个 ETag 能不能用来判断「资源变没变」。
+
+    **弱 ETag（`W/"..."`）不行。** RFC 7232：弱校验器只保证「语义
+    等价」，不保证字节一致，而且明确禁止用于 Range 请求
+    （If-Range 只接受强 ETag）。很多 CDN 每次请求都换弱 ETag——
+    拿它判「资源变了」，用户的每一次「继续下载」都会被打成
+    「从头重下」。
+    """
+    if not etag:
+        return False
+    return not etag.lstrip().startswith("W/")
+
+
 @dataclass
 class SessionChunk:
     """会话文件里的一个分片。"""
@@ -218,10 +232,17 @@ class SessionState:
         定会把每次续传都判成「变了」——所以只有当两边的 ETag
         **都在**、且确实不同时才判定为变化。
 
+        **弱 ETag（W/"..."）直接跳过，不参与判断。** RFC 7232 说得很
+        清楚：弱校验器只保证「语义等价」，不保证字节一致，而且
+        **明确禁止用于 Range 请求**（If-Range 只接受强 ETag）。很多
+        CDN 每次请求都给不同的弱 ETag，拿它判「资源变了」，会把
+        用户的每一次「继续下载」都变成「从头重下」——正是最该避免
+        的行为。跳过后退回 Last-Modified / Content-Length。
+
         三种信号都比不了时返回 None（没法验证就当没变）——
         宁可多下一次，也不要把用户的下载清零。
         """
-        if self.etag and probe.etag:
+        if _is_strong_etag(self.etag) and _is_strong_etag(probe.etag):
             return None if self.etag == probe.etag else "etag"
         if self.last_modified and probe.last_modified:
             return None if self.last_modified == probe.last_modified else "last_modified"

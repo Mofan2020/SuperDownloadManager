@@ -1050,7 +1050,15 @@ function renderBanner() {
       return;
     }
     input.value = "";
-    toast(t("expiredRefresh"), "ok");
+    // **说清楚到底发生了什么。**
+    // safeToResume = 确认是同一个文件，从断点接着下；
+    // unsafeButProceed = 没法确认（或不支持 Range），清掉旧分片
+    // 重新下。用户得知道自己的进度是被保住了还是没了。
+    if (res.decision === "safeToResume") {
+      toast(res.reason || t("expiredRelinkResumed"), "ok");
+    } else {
+      toast(res.reason || t("expiredRelinkRestart"), "info");
+    }
     await refreshTasks();
   };
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
@@ -1183,10 +1191,15 @@ function selectTask(taskId) {
 
 // 取单个任务的详情：分片、错误、速度历史。
 //
+// **分成「取数」和「渲染」两半，是为了让轮询也能刷新详情。**
+// 详情面板每 1.5 秒被列表轮询重画一次，如果分片明细只在「打开
+// 详情时」取一次，面板就会一直重画同一张过期的分片表——用户
+// 看到的现象就是「首次点开不更新，关掉重开才更新」。
+//
 // 用契约里的 get_task_detail 一次拿全——分三次往返的话，详情面板
 // 会一块一块地填出来，看着像卡了。后端还没实现这个接口时退回
 // 旧的 get_task_chunks，至少分片表还在。
-async function loadTaskDetail(taskId) {
+async function fetchTaskDetail(taskId) {
   const backend = api();
   let detail = null;
   if (backend && typeof backend.get_task_detail === "function") {
@@ -1199,15 +1212,23 @@ async function loadTaskDetail(taskId) {
   const task = State.tasks.find((x) => x.id === taskId);
   if (!task) return;
   if (detail) {
-    if (detail.chunks && detail.chunks.length) State.taskChunks[taskId] = detail.chunks;
+    // **分片明细每次都覆盖。**
+    // 早先只在拿到非空数组时才写，于是「一个分片都还没有」的
+    // 时候旧数据会一直挂着；任务结束时分片被清空也更新不掉。
+    if (Array.isArray(detail.chunks)) State.taskChunks[taskId] = detail.chunks;
     if (detail.error !== undefined) State.taskErrors[taskId] = detail.error || null;
     if (detail.speed_history && detail.speed_history.length) {
       State.speedHistory[taskId] = detail.speed_history;
     }
   } else if (backend && typeof backend.get_task_chunks === "function") {
     const chunks = await backend.get_task_chunks(taskId);
-    if (chunks && chunks.length) State.taskChunks[taskId] = chunks;
+    if (Array.isArray(chunks)) State.taskChunks[taskId] = chunks;
   }
+}
+
+// 打开详情时用：取数 + 重画。
+async function loadTaskDetail(taskId) {
+  await fetchTaskDetail(taskId);
   if (State.selectedTaskId === taskId) renderDetail();
 }
 
@@ -1223,6 +1244,11 @@ function renderDetail() {
   }
   detail.hidden = false;
   app.classList.add("with-detail");
+  // **保住滚动位置。** 详情面板每 1.5 秒被重画一次（列表轮询会
+  // 调 render() → renderDetail()），不保住的话用户正看着分片表，
+  // 滚动条每次都被弹回顶部——数据实时了，眼睛却跟不上。
+  const prevBody = detail.querySelector(".detail-body");
+  const prevScroll = prevBody ? prevBody.scrollTop : 0;
   clear(detail);
 
   const meta = stateMetaFor(task);
@@ -1357,6 +1383,8 @@ function renderDetail() {
   }
 
   detail.appendChild(body);
+  // 滚动位置要在挂进 DOM 之后才设得上（没挂载时 scrollTop 会被忽略）。
+  if (prevScroll) body.scrollTop = prevScroll;
 }
 
 // ============ 历史 ============
@@ -2485,13 +2513,21 @@ function openRelinkDialog(task) {
       return;
     }
     closeModal();
-    toast(t("expiredRefresh"));
+    // **说清楚到底发生了什么。**
+    // safeToResume = 确认是同一个文件，从断点接着下；
+    // unsafeButProceed = 没法确认（或不支持 Range），清掉旧分片
+    // 重新下。用户得知道自己的进度是被保住了还是没了。
+    if (res.decision === "safeToResume") {
+      toast(res.reason || t("expiredRelinkResumed"), "ok");
+    } else {
+      toast(res.reason || t("expiredRelinkRestart"), "info");
+    }
     await refreshTasks();
   };
-  openModal("expiredRefresh", [
+  openModal("rowRelink", [
     el("div", { class: "form" }, [
       el("div", { class: "field" }, [
-        el("label", { class: "field-label", text: t("expiredRefresh") }),
+        el("label", { class: "field-label", text: t("rowRelink") }),
         input,
       ]),
       err,
@@ -2519,6 +2555,14 @@ function openContextMenu(event, task) {
   if (isActive) item("rowPause", "pause", () => api()?.pause_task(task.id));
   else item("rowResume", "play", () => api()?.resume_task(task.id));
   if (task.state === "failed") item("rowRetry", "refresh", () => api()?.retry_task(task.id));
+  // **「换链接」要给所有下不动、但可能有救的任务。**
+  //
+  // 链接失效（awaiting_new_link）时顶部横幅里已经有输入框了，
+  // 但失败的任务也得能换——服务器 404、签名过期、临时限流，
+  // 用户手上可能有一条新的有效链接。
+  if (task.state === "failed" || task.state === "awaiting_new_link" || task.state === "paused") {
+    item("rowRelink", "link", () => openRelinkDialog(task));
+  }
   if (isActive) item("rowCancel", "x", () => api()?.cancel_task(task.id));
 
   menu.appendChild(el("div", { class: "ctxmenu-sep" }));
@@ -2634,6 +2678,16 @@ async function refreshTasks() {
   // 轮询是推送不可用时的兜底——顺手把速度采样记上，
   // 详情面板的曲线就不会因为没推送而空着。
   tasks.forEach((task) => recordSpeedSample(task));
+  // **详情面板开着的时候，顺手把分片明细也刷一遍。**
+  //
+  // 不刷的话，面板每 1.5 秒被 render() 重画一次，画的还是
+  // 「打开详情那一刻」的旧分片表——用户看到的现象就是「首次
+  // 点开不实时更新，关掉重开才正常」。
+  //
+  // 先取数再 render()，顺序反了的话还是画旧的。
+  if (State.selectedTaskId) {
+    await fetchTaskDetail(State.selectedTaskId);
+  }
   render();
 }
 

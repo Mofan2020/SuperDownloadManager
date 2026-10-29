@@ -452,6 +452,93 @@ class HTTPDownloader:
             raise last_error
         raise _describe_probe_failure(last_error) if last_error else ProbeError("probe failed")
 
+    async def fetch_range(
+        self,
+        url: str,
+        start: int,
+        end: int,
+        extra_headers: dict[str, str] | None = None,
+    ) -> bytes:
+        """取一段字节（闭区间 `[start, end]`），不做任何落盘。
+
+        **存在的理由：判断「换的新链接是不是同一个文件」，
+        最硬的证据是逐字节比对，而不是长度或 ETag。**
+
+        - 长度只能说明「大小一样」，1MB 的安装包和 1MB 的壁纸长度一样。
+        - ETag 靠不住：很多 CDN 每次请求都换 ETag（弱 ETag 场景），
+          有的还按节点给不同的 ETag。同一个文件两次请求 ETag 不同
+          是常态，拿 ETag 判「换了文件」会误杀。
+        - 字节比对是内容级的：同样的偏移取同样的字节，逐字节相同
+          就说明是两个链接指向同一份内容。
+
+        只取一小段（比如头 4KB）——够用来认亲，又不至于把整个
+        文件拉一遍。
+        """
+        if end < start:
+            return b""
+        rule_headers = await asyncio.to_thread(self.apply_site_rule, url, {})
+        request_headers = merge_headers(extra_headers or {}, rule_headers)
+        request_headers = merge_headers(
+            request_headers, {"Range": f"bytes={start}-{end}"}
+        )
+        # **打个标记**，让服务器（和测试）能认出这是「取样」而不是
+        # 「下载」。取样读的也是文件内容，但它是校验用的，不该被
+        # 当成下载字节统计——不然「新链接有没有重下旧字节」这种
+        # 断言会被自己的校验请求搅浑。
+        request_headers = merge_headers(request_headers, {"X-SDM-Verify": "1"})
+        try:
+            request = self.client.build_request("GET", url, headers=request_headers)
+            response = await self.client.send(request, stream=True)
+        except httpx.TimeoutException as err:
+            raise DownloadError(DownloadFailure.NETWORK, f"timeout: {err}") from err
+        except httpx.HTTPError as err:
+            raise DownloadError(DownloadFailure.NETWORK, str(err)) from err
+
+        status = response.status_code
+        if status in (403, 410, 451):
+            await response.aclose()
+            raise DownloadError(
+                DownloadFailure.FORBIDDEN,
+                f"HTTP {status}",
+                status=status,
+            )
+        if status == 416:
+            await response.aclose()
+            # 范围不合法——请求的区间超出了文件长度。
+            raise DownloadError(
+                DownloadFailure.STATUS,
+                "HTTP 416 请求范围不合法",
+                status=status,
+            )
+        if status >= 400:
+            await response.aclose()
+            raise DownloadError(DownloadFailure.HTTP_ERROR, f"HTTP {status}", status=status)
+
+        # **只读要的那几字节，读完就断开。**
+        #
+        # 服务器可能无视 Range 把整个文件发回来（返回 200）。这时候
+        # 一次性 `response.content` 会把整个文件读进内存——取样是为了
+        # 认亲，不是为了下载，一个 4GB 的文件不该为了取 4KB 把内存
+        # 撑爆。所以按块读、读够就停。
+        expected = end - start + 1
+        body = bytearray()
+        try:
+            async for block in response.aiter_bytes(chunk_size=64 * 1024):
+                body.extend(block)
+                if len(body) >= expected:
+                    break
+        except httpx.HTTPError as err:
+            raise DownloadError(DownloadFailure.NETWORK, str(err)) from err
+        finally:
+            await response.aclose()
+
+        # 服务器无视了 Range，直接把整个文件发回来了——那就取前
+        # `expected` 字节，跟「它返回的就是我们要的那段」
+        # 保持一致（否则比对的是文件头而不是目标偏移）。
+        if len(body) > expected:
+            body = body[:expected]
+        return bytes(body)
+
     # -- 分片传输 ----------------------------------------------------
 
     async def download_chunk(
