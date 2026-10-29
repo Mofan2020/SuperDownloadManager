@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import faulthandler
+import hashlib
 import os
 import shutil
 import sys
@@ -116,6 +117,42 @@ def pytest_runtest_call(item):
         return (yield)
     finally:
         faulthandler.cancel_dump_traceback_later()
+
+
+#: 超过这么大小的序列，pytest 就别去算 diff 了。
+#:
+#: pytest 比较两个序列失败时会用 `difflib` 算差异——那是平方级的。
+#: 两个 256KB 的 bytes 就是 26 万个元素，`difflib.SequenceMatcher`
+#: 在这种规模上算不出来，**整个 CI 作业挂死**（Windows 上真的挂过
+#: 一次：断言其实早就失败了，pytest 卡在算差异上，日志里一行有用
+#: 的信息都没有）。
+#:
+#: 1KB 是个安全的分界：小于它 difflib 眨眼就算完了，大于它就改成
+#: 报长度和摘要——一样长、只差几个字节的情况一眼就能看出来。
+MAX_DIFF_BYTES = 1024
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_assertrepr_compare(config, op, left, right):
+    """**别让 pytest 给大数组算 diff。**
+
+    返回非 None 就等于接管了这条断言的失败说明。
+
+    **必须返回字符串列表**——pytest 会把它当「多行说明」处理，
+    还会在超长时做截断（`_pytest/assertion/truncate.py` 里按行改
+    内容）。返回单个字符串会让截断那步直接炸掉。
+    """
+    if op != "==":
+        return None
+    if not isinstance(left, bytes | bytearray) or not isinstance(right, bytes | bytearray):
+        return None
+    if max(len(left), len(right)) <= MAX_DIFF_BYTES:
+        return None
+    return [
+        f"{len(left)} 字节 vs {len(right)} 字节，",
+        f"sha256 前 8 位 {hashlib.sha256(bytes(left)).hexdigest()[:8]} / "
+        f"{hashlib.sha256(bytes(right)).hexdigest()[:8]}",
+    ]
 
 
 @pytest.fixture

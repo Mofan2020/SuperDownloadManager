@@ -109,6 +109,41 @@ PermissionError）、崩溃留下的半成品——这些都会在盘上留下�
 | 会话过期了不清也不自动重来 | `test_changed_resource_clears_session_and_restarts` |
 | 收尾期间调「继续下载」直接返回 | `test_resume_during_task_finalization_still_starts` |
 | 残留的分片文件被当成已下好的字节 | `test_stale_partial_file_does_not_block_a_fresh_download` |
+| 下载器把动态分段新切出来的分片当成续传 | `test_leftover_split_chunks_do_not_corrupt_a_new_download` |
+
+### 顺带修的：动态分段新切出来的分片，会把上次的残留当已下好的字节
+
+**这是 Windows 上的真 bug（内容损坏），不只是平台差异。**
+
+动态分段会把大分片对半切开，新切出来的那一片有自己的分片文件。
+这些新分片是下载器自己打开的，原来用的是 `resume=True`（默认值）：
+盘上同名文件里残留的字节被当成「已经下好的字节」，新字节**接在旧
+字节后面**写。合并出来的是「旧内容 + 新内容」的拼接——**长度看着
+差不多，内容全乱**。
+
+为什么只有 Windows 上出问题：上一轮下载的分片文件在 Windows 上删不掉
+（文件被句柄占着，`unlink` 抛 PermissionError），残留活到了下一次
+下载。macOS 能删掉残留，所以不复现。
+
+现在下载器打开分片一律从头开始（`resume=False`）——走到那里的分片
+一定是新切出来的，流程层已经把要续传的分片按 `chunk.bytes_done > 0`
+打开过了。
+
+### Windows CI 挂死：真凶是 pytest 在给 256KB 的数组算 diff
+
+前两次 CI 在 Windows 上挂死 12～18 分钟。这次加上看门狗之后，作业
+在 120 秒时自己失败并甩出所有线程的栈——栈上写着：`difflib` 的
+`find_longest_match`。
+
+**挂死的不是下载，是 pytest 在算差异。** 断言
+`assert dest.read_bytes() == changed` 失败时，pytest 要调
+`difflib.SequenceMatcher` 比较两个 26 万元素的序列——平方级，
+算不出来，整个作业挂死。**挂死把真正的失败盖住了**：那条断言本来
+就是红的。
+
+- `conftest.py` 接管 `pytest_assertrepr_compare`：大数组直接报
+  「长度 + sha256 前 8 位」，不碰 difflib。
+- 修掉那个红断言（见上一节）之后，Windows 上就没有挂死了。
 
 ### 一处契约变化：资源真的变了，不再把失败甩给用户
 
@@ -125,13 +160,13 @@ PermissionError）、崩溃留下的半成品——这些都会在盘上留下�
 新契约——**改的是契约，不是把测试改绿**：撤掉内部回退，这两条
 会立刻变红。）
 
-### Windows CI 挂死：加了看门狗，但根因还没抓到
+### Windows CI 挂死：看门狗 + 真凶都找到了
 
 v2.2.3 的前两次 CI 在 Windows 上挂死了 12～18 分钟，macOS / Ubuntu 全绿。
-从作业日志能确定：卡在 `test_resume_continuity.py`（3.11 那次第 6 个用例
-还先失败了），是**时序相关**的问题。
+第三次加了看门狗之后，作业在 120 秒时自己失败并甩出所有线程的栈——
+真凶见上一节（pytest 在算 diff）。
 
-这一版先解决「查不了」：
+这一版做的是「让挂死不再查不了」：
 
 - **看门狗不会自己挂死。** 协程跑在独立线程里，主线程 `join` 有上限；
   超时就把所有线程的栈转储出来判失败。原来的写法在 Python 3.11 上

@@ -1448,6 +1448,66 @@ worker 卡在不可中断的地方（系统调用、没响应的 socket）时，
 说明是**时序相关**的，不是某个用例的确定性问题。
 「点号在哪一行」是 flush 时机的快照，「F 在第几个」才是真证据。
 
+## 教训：Windows 挂死 12 分钟，真凶是「pytest 给 256KB 的数组算 diff」
+
+v2.2.3 的第三次 CI 加上了看门狗，Windows 3.11 作业**没有再挂满 20 分钟**——
+它在 120 秒时自己失败了，并甩出一份所有线程的栈。栈上写着：
+
+```
+File "test_resume_continuity.py", line 396 in _inner
+  → _pytest/assertion/util.py  assertrepr_compare
+  → difflib.py  SequenceMatcher.ratio → find_longest_match
+```
+
+**挂死的不是下载，是 pytest 在算差异。**
+
+### 教训十一：断言失败时 pytest 会去算 diff，大数组上那是平方级的。
+
+`assert dest.read_bytes() == changed` 失败时，pytest 要给出「哪里不一样」，
+于是调 `difflib.SequenceMatcher` 比较两个序列。两个 256KB 的 bytes
+就是 26 万个元素——`find_longest_match` 在这种规模上算不出来，
+**整个 CI 作业挂死**，日志里一行有用的信息都没有。
+
+**挂死掩盖了真正的失败**：那条断言本来就是失败的（Windows 上），
+只是 pytest 卡在算 diff 上没来得及报出来。
+
+**修法**：`conftest.py` 里接管 `pytest_assertrepr_compare`，
+大数组直接报「长度 + sha256 前 8 位」，不碰 difflib。
+
+（注意：hook 必须返回**字符串列表**——pytest 拿它当多行说明，
+还要按行做截断。返回单个字符串会让截断那步直接抛
+`TypeError: 'str' object does not support item assignment`。）
+
+### 教训十二：真正的 bug 是「动态分段新切出来的分片」被当成续传。
+
+Windows 上那条断言为什么失败？查下来是**真的内容损坏**：
+
+1. 动态分段会把大分片对半切开，**新切出来的那一片有自己的分片文件**
+   （id 更大）。
+2. 这些新分片**不是流程层打开的**——流程层只打开初始那几片，
+   而且它按 `chunk.bytes_done > 0` 判断该不该续传（对的）。
+   新分片是**下载器**自己打开的，而下载器原来用的是 `resume=True`
+   （默认值）：盘上同名文件里残留的字节被当成「已经下好的字节」，
+   新字节**接在旧字节后面**写。
+3. 合并出来的是「旧内容 + 新内容」的拼接，**长度看着差不多，内容全乱**。
+
+**为什么只有 Windows 中招**：上一轮下载的分片文件在 Windows 上删不掉
+（文件被句柄占着，`unlink` 抛 PermissionError），残留活到了下一次
+下载。macOS 能删掉残留，所以不复现——**但这不是平台差异，是 Windows
+上的真 bug**。
+
+**修法**：下载器打开分片时一律 `resume=False`——走到那里的分片一定
+是「从头开始」的（流程层已经把要续传的分片打开过了）。
+
+**怎么在 macOS 上验证 Windows 的 bug**：把 `Path.unlink` 换成
+「对 `.sdm.partial-` 抛 PermissionError」的假实现，模拟「删不掉」。
+撤掉修复时正好 3 条测试变红（和 CI 上看到的 3 个 F 一一对应），
+加上修复后全绿。
+
+> **通用教训：平台差异是线索，不是借口。** 「只有 Windows 出问题」
+> 往往说明**别的平台只是恰好躲过了**——这里的躲法是「能删掉文件」。
+> 要问的是「什么条件下会出事」，而不是「为什么这里没事」。
+
 ## v2.2.3 换链接与续传
 
 **「是不是同一个文件」用字节比对判，不用 ETag。**

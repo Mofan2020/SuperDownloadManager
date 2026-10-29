@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import sys
 from pathlib import Path
 
@@ -344,6 +345,98 @@ def test_stale_partial_file_does_not_block_a_fresh_download(tmp_path, payload):
         run_with_timeout(_inner)
     finally:
         server.stop()
+
+
+def test_leftover_split_chunks_do_not_corrupt_a_new_download(tmp_path, payload, monkeypatch):
+    """**动态分段新切出来的分片，不能把上次的残留当已下好的字节。**
+
+    这个 bug 只在 Windows 上出现过，但它是**真的内容损坏**，不是
+    平台差异：
+
+    1. 动态分段会把大分片对半切开，**新切出来的那一片有自己的分片
+       文件**（id 更大）。
+    2. 这些新分片**不是流程层打开的**——流程层只打开初始那几片。
+       新分片是下载器自己打开的，而下载器原来用的是 `resume=True`
+       （默认）：盘上同名文件里残留的字节被当成「已经下好的字节」，
+       新字节**接在旧字节后面**写。
+    3. 合并出来的是「旧内容 + 新内容」的拼接，**长度看着差不多，
+       内容全乱**。
+
+    **为什么只有 Windows 中招**：上一轮下载的分片文件在 Windows 上
+    删不掉（文件被句柄占着，`unlink` 抛 PermissionError），残留活
+    到了下一次下载；macOS 能删掉残留，所以不复现。
+
+    初始分片（id 0、1）是流程层打开的，它按 `chunk.bytes_done > 0`
+    判断续传——所以初始分片没问题（见上面那条测试）。**出问题的是
+    拆分出来的新分片。**
+
+    这条测试还**把「删不掉」也模拟出来**（`unlink` 对分片文件抛
+    PermissionError）——Windows 上就是这个样子。macOS 能删掉残留，
+    所以这条路径在 macOS 上永远测不到，**不模拟就没人能提前发现**。
+    """
+    import pathlib
+
+    from sdm.engine import work_dir
+    from sdm.engine.download_flow import DownloadFlow
+
+    dest = tmp_path / "payload.bin"
+    server = LinkServer(payload)
+    try:
+        # **模拟 Windows：分片文件被句柄占着，删不掉。**
+        real_unlink = pathlib.Path.unlink
+
+        def _fake_unlink(self, missing_ok=False):
+            if ".sdm.partial-" in self.name:
+                raise PermissionError(
+                    13, "另一个进程正在使用此文件，进程无法访问它"
+                )
+            return real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(pathlib.Path, "unlink", _fake_unlink)
+
+        # 造出「上一轮下载」留下的分片文件。
+        #
+        # 初始分片是 0、1，动态分段切出来的往后排——这里多留几个，
+        # 不去猜具体切了几刀（切法跟并发调度有关，会变）。
+        for chunk_id in range(8):
+            leftover = work_dir.partial_path(dest, chunk_id)
+            leftover.parent.mkdir(parents=True, exist_ok=True)
+            leftover.write_bytes(b"OLD-CONTENT" * 64)
+
+        async def _inner():
+            flow = DownloadFlow(url=server.url, destination=dest)
+            await asyncio.wait_for(flow.run(), timeout=40)
+            got = dest.read_bytes()
+            assert len(got) == len(payload), (
+                f"长度不对：{len(got)} != {len(payload)}"
+            )
+            assert _digest(got) == _digest(payload), (
+                "内容不对——残留的分片字节被混进去了"
+                f"（第一处不同的偏移：{_first_diff(got, payload)}）"
+            )
+
+        run_with_timeout(_inner)
+    finally:
+        server.stop()
+
+
+def _digest(data: bytes) -> str:
+    """内容的短摘要。
+
+    **不要直接断言两个几百 KB 的 bytes 相等**——断言失败时 pytest
+    会去算 `difflib` 差异，26 万个元素的序列算差异是平方级的，能把
+    CI 作业直接挂死（Windows 上真的挂过一次）。比摘要快得多，
+    失败信息也读得懂。
+    """
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def _first_diff(left: bytes, right: bytes) -> int:
+    """第一处不同的偏移（都一样时返回 -1）。"""
+    for index, (a, b) in enumerate(zip(left, right, strict=False)):
+        if a != b:
+            return index
+    return len(left) if len(left) != len(right) else -1
 
 
 # -- 3. 资源真的变了：不能死循环 --------------------------------

@@ -711,7 +711,23 @@ class HTTPDownloader:
             )
 
         # 分片文件在字节流动前就打开并定位好。
-        assembler.open_chunk(chunk.id, chunk.start)
+        #
+        # **必须 `resume=False`：这里打开的分片一定是「从头开始」的。**
+        #
+        # 流程层已经把「要续传的分片」按 `chunk.bytes_done > 0` 打开过了
+        #（见 `DownloadFlow._run_once`）。走到这里还没被打开过的分片，
+        # 只可能是**动态分段新切出来的那一片**——它对应的是一个全新的
+        # 区间，盘上同名文件里残留的字节属于**上一次下载**，跟这次
+        # 没关系。
+        #
+        # 按 `resume=True` 打开的后果：残留的旧字节被当成「已经下好的
+        # 字节」，新字节接在旧字节后面 → 合并出来的是「旧内容 + 新
+        # 内容」的拼接，**长度看着差不多，内容全乱**。
+        #
+        # **Windows 上这个坑必现**：上一次下载的分片文件删不掉（文件
+        # 被句柄占着，`unlink` 抛 PermissionError），残留活到下一次
+        # 下载。macOS 能删掉残留，所以只在 Windows 上复现。
+        assembler.open_chunk(chunk.id, chunk.start, resume=False)
 
         started = time.monotonic()
         first_byte_at: float | None = None
