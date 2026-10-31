@@ -163,13 +163,41 @@ def _run_tail_download(tmp_path: Path, *, legacy_cap: bool = False) -> dict:
     original_split = DynamicPlanner.split_largest
 
     def capped_split(self):
-        """把分片数上限临时压到目标分片数（模拟旧行为）。"""
+        """模拟**旧行为**：分片数封顶 + 两个 worker 抢同一分片。
+
+        两件事一起模拟，缺一不可：
+
+        1. **分片数封顶**（`max_chunks` 压到 `target`）——这是长尾
+           最主要的根因：分片数被卡住之后，空闲 worker 切不出新
+           分片，只能下班。
+
+        2. **抢分片**——旧实现里 `split_largest()` 把新切出来的分片
+           **既**放进 `_pending`（别的 worker 会取走）**又**交给调用
+           方（当前 worker 直接用）。两个 worker 同时下载同一个分
+           片，抢同一把分片锁，传输互相阻塞。
+
+        **第 2 件事必须一起模拟。** 它会让服务端看到的连接数虚高
+        （两条连接在抢一个分片，真实吞吐只有一条），而时间加权
+        的平均并发度因为传输被拖慢而**变低**。
+
+        不模拟它的话，「旧行为」那一档的数值会随别的实现细节浮动
+        ——2026-10-31 修「两个 worker 抢同一分片」那个 bug 之后，
+        这一档的并发度从 0.21 涨到 0.52，比值从 3.8 倍压到 1.4 倍，
+        差分测试就红了。但那不是长尾没治，是**分母的假并发被揭穿
+        了**。
+
+        基准必须是**稳定的坏实现**，不然差分比较没有意义。
+        """
         if not legacy_cap:
             return original_split(self)
         saved = self.strategy.max_chunks
         self.strategy.max_chunks = self.target
         try:
-            return original_split(self)
+            result = original_split(self)
+            if result is not None:
+                # **旧行为：新分片既进队列、又交给调用方。**
+                self._pending.append(result.chunk.id)
+            return result
         finally:
             self.strategy.max_chunks = saved
 
