@@ -38,6 +38,10 @@ IDM does it on Windows. macOS had no good equivalent. This one runs on both.
 
 Download the archive for your platform from [Releases](https://github.com/Mofan2020/SuperDownloadManager/releases), then extract it.
 
+Releases come in two flavours. The **Latest** tag is the tested one. Anything
+marked **Pre-release** is a newer version that is still being put through its
+paces — it gets promoted to Latest once testing is done.
+
 macOS:
 
 ```sh

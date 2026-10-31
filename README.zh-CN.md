@@ -38,6 +38,9 @@ IDM 的开源替代品。多线程下载器，支持 macOS 与 Windows。
 
 从 [Releases](https://github.com/Mofan2020/SuperDownloadManager/releases) 下载对应平台的压缩包，解压即可。
 
+Release 分两种。标着 **Latest** 的是测过的版本，标着 **Pre-release** 的是更新的版本，
+还在测，测完了会转成 Latest。
+
 macOS：
 
 ```sh
