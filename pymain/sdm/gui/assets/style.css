@@ -1007,3 +1007,13 @@ table.data td.num { font-variant-numeric: tabular-nums; }
 .cell-stale {
   color: var(--danger, #d42d2d);
 }
+
+/* **卡住的分片：整行标出来。**
+   判据是「下载中但 15 秒没进字节」——不是「耗时长的分片」。
+   一个分片下了 3 分钟但一直在进字节，那是正常的慢，不是卡住。 */
+.chunk-table tr.row-stale td {
+  background: color-mix(in srgb, var(--danger, #d42d2d) 8%, transparent);
+}
+.chunk-table tr.row-stale td:first-child {
+  box-shadow: inset 2px 0 0 var(--danger, #d42d2d);
+}

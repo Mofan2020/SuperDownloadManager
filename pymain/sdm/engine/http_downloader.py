@@ -54,6 +54,23 @@ class DownloadFailure(enum.Enum):
     TOO_MANY_REDIRECTS = "too_many_redirects"
     NETWORK = "network"              # 超时 / 连接重置 / DNS 失败
     DECODING = "decoding"
+    #: **服务器给的数据跟它自己承诺的对不上。**
+    #:
+    #: 头说 `Content-Range: bytes 100-200`，body 却是文件开头；
+    #: 或者 body 长度跟区间长度不符。
+    #:
+    #: **跟 `NOT_PARTIAL_CONTENT` 分开是有原因的。** 后者是
+    #: 「服务器不支持分块」——退回单流下载是对的，服务器对整个
+    #: 文件的响应通常没问题。
+    #:
+    #: 这一类是**服务器在骗人**：它给的数据根本不是它承诺的那一段。
+    #: 退回单流也救不了——同一个服务器对整个文件的响应同样可能
+    #: 是错的（CDN 边缘节点缓存了别的响应就是这种）。而且这正是
+    #: 「文件大小正常但内容全错」那种损坏的来源（实测 2026-10-30：
+    #: 用户下的 4 个文件全部损坏，每个分片的开头都等于文件开头）。
+    #:
+    #: 所以这类**直接失败，不回退**。
+    CONTENT_MISMATCH = "content_mismatch"
     UNKNOWN = "unknown"
 
     def __str__(self) -> str:
@@ -71,6 +88,7 @@ _CATEGORY_BY_FAILURE: dict[DownloadFailure, ErrorCategory] = {
     DownloadFailure.TOO_MANY_REDIRECTS: ErrorCategory.CLIENT_ERROR,
     DownloadFailure.NETWORK: ErrorCategory.NETWORK,
     DownloadFailure.DECODING: ErrorCategory.CLIENT_ERROR,
+    DownloadFailure.CONTENT_MISMATCH: ErrorCategory.SERVER_ERROR,
     DownloadFailure.UNKNOWN: ErrorCategory.UNKNOWN,
 }
 
@@ -97,10 +115,15 @@ class DownloadError(Exception):
 
         `NOT_PARTIAL_CONTENT` 也不重试：服务器无视 Range，重试一万次
         还是无视。它是给上层的**回退信号**，不是错误。
+
+        `CONTENT_MISMATCH` 同样不重试：服务器给的数据跟它承诺的
+        对不上，重试一万次还是对不上——而且每次重试都要把已经
+        下好的部分重新拉一遍，纯浪费带宽。
         """
         return self.kind not in (
             DownloadFailure.FORBIDDEN,
             DownloadFailure.NOT_PARTIAL_CONTENT,
+            DownloadFailure.CONTENT_MISMATCH,
             DownloadFailure.DECODING,
         )
 
@@ -572,6 +595,26 @@ class HTTPDownloader:
             if start >= chunk.end:
                 return ChunkResult(chunk_id=chunk.id, bytes_written=already, elapsed=0.0)
 
+            # **重试不能从头开始。**
+            #
+            # 已经落盘的字节是对的（它们来自服务器的正确区间），
+            # 从头重下会把它们**覆盖**成同一段数据的另一次拷贝——
+            # 分片文件里出现「重放」，合并出来的文件大小正常、
+            # 内容全错。
+            #
+            # `already` 就是「已经落盘了多少」，`start` 由此推出。
+            # 这里的检查是**第二道闸**：万一上游把 `already` 算错
+            # （比如分片被拆分后重新调度），宁可明确失败，也不
+            # 让它静默覆盖已有数据。
+            if attempt > 0:
+                on_disk = assembler.chunk_bytes_on_disk(chunk.id)
+                if on_disk != already:
+                    raise DownloadError(
+                        DownloadFailure.CONTENT_MISMATCH,
+                        f"重试时盘上字节数（{on_disk}）跟记录的对不上"
+                        f"（{already}）——不能从头重下，会覆盖已下载的数据",
+                    )
+
             try:
                 return await self._stream_chunk(
                     url=url,
@@ -727,7 +770,14 @@ class HTTPDownloader:
         # **Windows 上这个坑必现**：上一次下载的分片文件删不掉（文件
         # 被句柄占着，`unlink` 抛 PermissionError），残留活到下一次
         # 下载。macOS 能删掉残留，所以只在 Windows 上复现。
-        assembler.open_chunk(chunk.id, chunk.start, resume=False)
+        assembler.open_chunk(
+            chunk.id,
+            chunk.start,
+            resume=False,
+            # 记下「这个分片应该有多长」——合并前要拿它核对盘上的
+            # 分片文件，长度不对就是坏数据。
+            end_offset=chunk.end,
+        )
 
         started = time.monotonic()
         first_byte_at: float | None = None
@@ -785,14 +835,6 @@ class HTTPDownloader:
                     "服务器不支持分块请求（对 Range 请求返回 200）",
                     status=status,
                 )
-            if not use_range and status == 206:
-                # 单流模式却拿到 206——服务器主动切了分块。
-                # 206 的 body 只是文件的一部分，按单流写会得到残缺文件。
-                raise DownloadError(
-                    DownloadFailure.NOT_PARTIAL_CONTENT,
-                    "单流请求却收到 206 响应",
-                    status=status,
-                )
             if status == 206:
                 # 服务器声称支持 Range，但返回的区间跟我们要的对不上。
                 # 典型场景：CDN 边缘节点缓存了别的 Range 响应，
@@ -803,24 +845,80 @@ class HTTPDownloader:
                 #
                 # 比的是**这次请求实际要的范围**，不是分片现在的
                 # 结束位置——分片可能在请求发出之后被拆短。
+                #
+                # **这一段必须排在「单流却收到 206」的检查前面。**
+                # 单流是分块下载失败之后的退路，服务器这时候还
+                # 返回错的区间——真正的问题是「Content-Range 对不上」，
+                # 不是「单流收到了 206」。先说清楚根因，用户看到的
+                # 错误信息才指向正确的地方。
                 content_range = response.headers.get("content-range", "")
                 if not self._content_range_matches(content_range, start, requested_end):
+                    # **硬失败，不回退单流。**
+                    #
+                    # 服务器给的数据不是它承诺的那一段——同一个服务器
+                    # 对整个文件的响应同样可能是错的。退回单流只是
+                    # 换个姿势再被它骗一次。
+                    #
+                    # 这是「文件大小正常但内容全错」那种损坏的直接
+                    # 来源：分片拿到的全是文件开头，合并之后大小
+                    # 完美、内容全乱。实测（2026-10-30）：用户下的
+                    # 4 个文件全部损坏，每个分片的前 64KB 都等于
+                    # 文件开头。
                     raise DownloadError(
-                        DownloadFailure.NOT_PARTIAL_CONTENT,
+                        DownloadFailure.CONTENT_MISMATCH,
                         f"Content-Range 不匹配：请求 bytes={start}-{requested_end}，"
                         f"收到 {content_range or '(缺失)'}",
                     )
+            if not use_range and status == 206:
+                # 单流模式却拿到 206——服务器主动切了分块。
+                # 206 的 body 只是文件的一部分，按单流写会得到残缺文件。
+                #
+                # Content-Range 已经对上了（上面查过），说明服务器
+                # 确实按范围给了数据——但单流模式不能处理这种情况，
+                # 因为它按「整个文件」来写。
+                raise DownloadError(
+                    DownloadFailure.NOT_PARTIAL_CONTENT,
+                    "单流请求却收到 206 响应",
+                    status=status,
+                )
 
             log.notice(
                 CAT_CHUNK,
                 f"chunk {chunk.id} GET {url} range=bytes={start}-{requested_end} status={status}",
             )
 
+            # **本次请求应该收到的字节数。**
+            #
+            # **必须按「这次请求的范围」算，不能按分片当前区间算。**
+            #
+            # 分片区间会变——动态分段会在传输途中把它拆短。
+            # 但**服务器是按我们发出去的 Range 头发的**，它不知道
+            # 我们内部把分片拆了。所以「应该收到多少」永远由
+            # **请求头**决定，不由内部状态决定。
+            #
+            # 拿 `chunk.end - chunk.start` 算会出大问题：分片被拆短
+            # 之后这个数变小，而服务器照样按原来的范围发——收到的
+            # 远多于「应该收到的」，于是校验被误判成「服务器多发」。
+            #
+            # `start` 已经含了续传的偏移（`chunk.start + already`），
+            # 所以 `requested_end - start + 1` 正好是这次请求的字节数。
+            expected_bytes = requested_end - start + 1
+            received = 0
+            truncated = False
+
             async for block in response.aiter_bytes(chunk_size=64 * 1024):
                 if first_byte_at is None:
                     first_byte_at = time.monotonic() - started
                 if limiter is not None and limiter.is_enabled():
                     await limiter.consume(len(block))
+
+                # **服务器实际发来的字节数。**
+                #
+                # **必须统计这个，不能统计写入量。** 写入量会被
+                # `append_limited` 按分片上限截断——服务器多发的那部分
+                # 正好被截掉，写入量看起来「正好是区间长度」，校验就
+                # 白做了。服务器发来的字节数才是它真正承诺的东西。
+                received += len(block)
 
                 # **写入是有上限的。** 动态分段会在下载途中把在途分片
                 # 对半拆开，分片的区间随之缩短。传**取值函数**而不是
@@ -843,6 +941,71 @@ class HTTPDownloader:
                         f"chunk {chunk.id} 因分片拆分停止于 {chunk.start + written}",
                     )
                     break
+
+            # **校验实际收到的字节数。**
+            #
+            # 这是**文件损坏最隐蔽的一条路**：服务器的头完全正常
+            # （206 + Content-Range 对得上），但**响应体不是它承诺
+            # 的那一段**——CDN 边缘节点缓存了别的 Range 响应、代理
+            # 把整个文件塞了回来。
+            #
+            # 后果：每个分片拿到的都是**文件开头**的内容（而不是
+            # 自己区间的内容），写进分片、合并之后——**文件大小完全
+            # 正常，内容却全是错的**。用户看到的现象是「文件损坏但
+            # 大小对」，最难查的那种。实测（2026-10-30）：用户下的
+            # 4 个文件全部损坏，7z/apk/dmg 三个格式的校验工具一致
+            # 报「数据已损坏」，而每个分片的前 64KB 都等于文件开头。
+            #
+            # 所以必须当场比对。
+            #
+            # **分三种情况：**
+            #
+            # - **收到的比请求的多** → 服务器无视了 Range，把别的
+            #   内容塞过来了。这是**服务器的问题**，重试没用
+            #   （重试一万次它还是无视）——直接失败。
+            #
+            # - **收到的比请求的少，但 `truncated` 为真** → **分片
+            #   被拆了**，这是合法的提前结束。剩下的字节归新分片。
+            #
+            #   **这一条是关键，判错它就会毁掉整个下载。**
+            #
+            #   动态分段会在传输途中把在途分片对半拆开。写入被上限
+            #   挡住 → `truncated=True` → 传输提前结束。这时候收到
+            #   的字节数**必然**少于请求量（服务器还在按原始 Range
+            #   发，我们不收了）。
+            #
+            #   把它当成「连接中断」会怎样？抛可重试错误 → 传输
+            #   重试 → **重试从头开始**（`already` 算的是分片已写
+            #   字节数，但重试时的写入起点和已有数据对不上）→ 新写的
+            #   字节**覆盖**掉已经下好的部分 → 分片文件里出现
+            #   「同一段数据从头重放」→ 合并出来的文件大小正常、
+            #   内容全错。
+            #
+            #   实测（2026-10-30）：13MB 的 dmg 下载，7 个分片内容
+            #   全错，错位量正好是 64KB（一个数据块）的整数倍。
+            #
+            # - **收到的比请求的少，且 `truncated` 为假** → 连接
+            #   中途断了。httpx 在 chunked 传输中断时**不一定抛
+            #   异常**，body 就是短的。这是**网络问题**，正常做法是
+            #   重试续传（已落盘的字节还在，重连后从断点接着下）。
+            if received > expected_bytes:
+                # 服务器给了**更多**——它无视了 Range。
+                #
+                # 硬失败，不回退单流：这跟 Content-Range 不匹配
+                # 是同一类问题——服务器给的不是我们要的那一段。
+                raise DownloadError(
+                    DownloadFailure.CONTENT_MISMATCH,
+                    f"服务器无视了 Range：请求 bytes={start}-{requested_end}"
+                    f"（{expected_bytes} 字节），实际收到 {received} 字节",
+                )
+            if received < expected_bytes and not truncated:
+                # 收到的**少了**，而且不是分片被拆导致的提前结束
+                # ——连接中途断了。重试续传。
+                raise DownloadError(
+                    DownloadFailure.NETWORK,
+                    f"连接提前断开：请求 bytes={start}-{requested_end}"
+                    f"（{expected_bytes} 字节），只收到 {received} 字节",
+                )
 
             elapsed = time.monotonic() - started
             log.notice(CAT_CHUNK, f"chunk {chunk.id} 完成 bytes={written} elapsed={elapsed:.2f}s")

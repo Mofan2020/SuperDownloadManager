@@ -1164,12 +1164,29 @@ class DownloadEngine:
         summary = self.tasks.get(task_id)
         last = summary.bytes_done if summary is not None else 0
         last_time = time.monotonic()
+        # **第一帧不算速度。**
+        #
+        # 上面那个「起点用快照里的字节数」的防御有个漏洞：快照里的
+        # `bytes_done` 是**任务摘要**里的值，而进度流的第一帧报的是
+        # **盘上已落盘的字节**（`pre_existing`）。两者不一定相等——
+        # 续传任务刚创建时摘要还是 0，但盘上已经有 2 GB 了。
+        #
+        # 于是第一帧的 delta = 2 GB - 0 = 2 GB，elapsed 却只有几毫秒
+        # （这一帧是「补报」，不是真的传输），算出来是 **几 TB/s**。
+        # 用户看到的就是速度曲线瞬间飙到「几万 MB/s」。
+        #
+        # 实测（2026-10-30）：复现出的假速度是 39292 MB/s，跟用户
+        # 报的量级一致。
+        #
+        # 所以第一帧只用来对齐计数（更新 `last`），**不参与速度
+        # 计算**。之后每一帧都是真实的增量。
+        first_frame = True
         async for total in channel.stream():
             summary = self.tasks.get(task_id)
             if summary is None:
                 return
             summary.bytes_done = total
-            # 收到字节了——不再是「连接中」。从这一刻起速度才有意义。
+            # 收到字节了——不再是「连接中」。
             if total > 0 and summary.connecting:
                 summary.connecting = False
             # 分片状态跟着进度一起更新（节流：每次进度都算一次
@@ -1180,6 +1197,16 @@ class DownloadEngine:
                 live.flow._notify_chunk_progress()
             now = time.monotonic()
             elapsed = now - last_time
+            if first_frame:
+                # **第一帧只对齐计数，不算速度。**
+                #
+                # 这一帧报的是「盘上已落盘的字节」（`pre_existing`），
+                # 不是「这一瞬间传输了多少」。拿它算 delta 会得到
+                # 一个几 TB/s 的假值。
+                first_frame = False
+                last = total
+                last_time = now
+                continue
             if elapsed > 0:
                 delta = total - last
                 last = total

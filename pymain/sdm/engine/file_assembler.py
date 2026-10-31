@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import threading
 import time
 from collections.abc import Callable
@@ -59,8 +58,20 @@ class FileAssembler:
         self._partial_paths: dict[int, Path] = {}
         self._chunk_starts: dict[int, int] = {}
         self._chunk_written: dict[int, int] = {}
+        #: 每个分片**应该**有多长（区间长度）。
+        #:
+        #: 合并前要拿它核对盘上的分片文件——长度不对说明这个分片
+        #: 没下完（空洞）或者下多了（溢出覆盖邻居）。两种都产出
+        #: 「大小正常、内容全错」的文件。
+        #:
+        #: 动态分段会改分片的长度，`shrink_chunk` 负责同步这个值。
+        self._chunk_lengths: dict[int, int] = {}
         #: 每个分片最后一次写入的时刻
         self._chunk_updated: dict[int, float] = {}
+        #: 每个分片**首次**写入的时刻——「这个分片从什么时候开始下」
+        self._chunk_started: dict[int, float] = {}
+        #: 每个分片**写满**的时刻——「这个分片什么时候下完的」
+        self._chunk_finished: dict[int, float] = {}
         self._queue_lock = threading.Lock()
 
     # -- 分片文件命名 ------------------------------------------------
@@ -75,7 +86,13 @@ class FileAssembler:
 
     # -- 打开 / 写入 ------------------------------------------------
 
-    def open_chunk(self, chunk_id: int, start_offset: int, resume: bool = True) -> None:
+    def open_chunk(
+        self,
+        chunk_id: int,
+        start_offset: int,
+        resume: bool = True,
+        end_offset: int | None = None,
+    ) -> None:
         """打开分片文件，记录它在最终文件里的起始位置。
 
         以追加模式打开——v1.0.x 用覆盖模式，每次打开都把文件截断，
@@ -97,6 +114,9 @@ class FileAssembler:
         这不是假想：Windows 上分片文件被句柄占着时删不掉（`unlink`
         抛 PermissionError），旧文件就留在那儿了。所以**不靠删除，
         靠截断**——文件开着也能截。
+
+        `end_offset` 是这个分片在最终文件里的结束位置。给了就记下
+        「这个分片应该有多长」，合并前拿它核对盘上的分片文件。
         """
         with self._queue_lock:
             if chunk_id in self._handles:
@@ -122,6 +142,8 @@ class FileAssembler:
             self._partial_paths[chunk_id] = path
             self._chunk_starts[chunk_id] = start_offset
             self._chunk_written[chunk_id] = pre_existing
+            if end_offset is not None:
+                self._chunk_lengths[chunk_id] = max(0, end_offset - start_offset)
 
     def append(self, data: bytes, chunk_id: int) -> int:
         """往分片文件追加字节，返回写入量。"""
@@ -186,9 +208,19 @@ class FileAssembler:
         n = len(data)
         with self._queue_lock:
             self._chunk_written[chunk_id] = self._chunk_written.get(chunk_id, 0) + n
+            now = time.monotonic()
             # 每个分片自己的最后写入时刻。详情页的「耗时」列用它——
             # 所有分片显示同一个值是没意义的。
-            self._chunk_updated[chunk_id] = time.monotonic()
+            self._chunk_updated[chunk_id] = now
+            # **首次写入 = 这个分片开始下载的时刻。**
+            # 详情页的「耗时」列要的是「这个分片下了多久」，
+            # 不是「距上次写入多久」——后者对已完成的分片会一直涨，
+            # 越老的分片数字越大，看着像卡住了。
+            self._chunk_started.setdefault(chunk_id, now)
+            # **写满 = 这个分片下完的时刻。**
+            length = self._chunk_lengths.get(chunk_id)
+            if length is not None and self._chunk_written[chunk_id] >= length:
+                self._chunk_finished.setdefault(chunk_id, now)
         return n, truncated
 
 
@@ -210,27 +242,86 @@ class FileAssembler:
             handle = self._handles.get(chunk_id)
             start = self._chunk_starts.get(chunk_id, 0)
         if lock is None or handle is None:
+            # 分片没打开（还没开始下就被拆了）——区间照样变短了，
+            # 「应该有多长」也得更新。
+            self.set_chunk_length(chunk_id, new_end)
             return 0
         with lock:
             keep = max(0, new_end - start)
             pos = handle.tell()
             if pos <= keep:
+                # **没砍掉字节，但区间还是变短了。**
+                # 「应该有多长」必须更新——否则合并前拿旧长度去核对
+                # 新内容，误判成「分片损坏」，好端端的下载合并失败。
+                self.set_chunk_length(chunk_id, new_end)
                 return 0
             try:
                 handle.truncate(keep)
                 handle.seek(keep)
             except OSError:
+                self.set_chunk_length(chunk_id, new_end)
                 return 0
             removed = pos - keep
         with self._queue_lock:
             self._chunk_written[chunk_id] = keep
+            # **区间变短了，「应该有多长」也要跟着变。**
+            # 合并前要拿它核对盘上的分片文件——不更新的话，
+            # 合并时会拿「旧长度」去核对「已截短的文件」，误判成损坏。
+            self._chunk_lengths[chunk_id] = keep
         return removed
 
+
+    def set_chunk_length(self, chunk_id: int, end_offset: int) -> None:
+        """更新「这个分片应该有多长」。
+
+        动态分段把一个**不在途**的分片拆开时用：区间缩短了，
+        但盘上的 partial 文件内容仍然有效（那部分区间没变），
+        只是「应该有多长」这个记录要跟着改。
+
+        不改的话，合并前核对长度时会拿旧长度去核对新内容，
+        误判成「分片损坏」，好端端的下载合并失败。
+        """
+        with self._queue_lock:
+            start = self._chunk_starts.get(chunk_id, 0)
+            self._chunk_lengths[chunk_id] = max(0, end_offset - start)
 
     def chunk_updated_at(self, chunk_id: int) -> float | None:
         """这个分片最后一次写入的时刻（monotonic 秒）。"""
         with self._queue_lock:
             return self._chunk_updated.get(chunk_id)
+
+    def chunk_started_at(self, chunk_id: int) -> float | None:
+        """这个分片**首次**写入的时刻（monotonic 秒）。
+
+        没有就是「还没开始写」。详情页的「耗时」列用它算
+        「还在下载中的分片已经花了多久」。
+        """
+        with self._queue_lock:
+            return self._chunk_started.get(chunk_id)
+
+    def chunk_finished_at(self, chunk_id: int) -> float | None:
+        """这个分片**写满**的时刻（monotonic 秒）。
+
+        没有就是「还没下完」。
+        """
+        with self._queue_lock:
+            return self._chunk_finished.get(chunk_id)
+
+    def chunk_bytes_on_disk(self, chunk_id: int) -> int:
+        """这个分片的临时文件在盘上实际有多少字节。
+
+        **跟 `bytes_written()` 的区别**：后者是「我们认为自己写了
+        多少」——内存里的计数。这个是「盘上真的有多少」。
+
+        两者对不上说明出了问题（文件被别的东西动了、或者计数漏
+        更新）。重试的时候必须用这个核对：重试要从断点继续，
+        断点算错就会把已下载的数据**覆盖**成同一段的重放——
+        文件大小正常，内容全错。
+        """
+        try:
+            return self.partial_path(chunk_id).stat().st_size
+        except OSError:
+            return 0
 
     def bytes_written(self, chunk_id: int) -> int:
         """这个分片已经落盘多少字节。
@@ -301,12 +392,66 @@ class FileAssembler:
             if total_size > 0:
                 out.truncate(total_size)
             for chunk_id, start in ordered:
-                out.seek(start)
+                # **分片内容的长度必须正好等于它的区间长度。**
+                #
+                # 少了 → 那个区间留一段零（空洞），文件大小看着对，
+                #        内容全错。
+                # 多了 → `copyfileobj` 会一路拷到 EOF，**溢出覆盖
+                #        相邻分片的数据**——下一个分片还没写就被盖掉，
+                #        或者反过来它盖掉下一个分片。
+                #
+                # 两种都必须在合并前拦住。合并完再去查就晚了——
+                # 已经被 `os.replace` 换成用户的最终文件了。
+                expected = self._chunk_lengths.get(chunk_id, 0)
                 partial = partial_paths.get(chunk_id) or self.partial_path(chunk_id)
                 if not partial.exists():
-                    continue
+                    # **分片文件不见了 → 失败，不是跳过。**
+                    #
+                    # 跳过的话，这一段在最终文件里就是一段零——文件
+                    # 大小看着完全正常，内容却缺了一块。跟「分片
+                    # 长度不对」是同一类损坏，只是更难发现。
+                    raise AssemblerError(
+                        f"分片 {chunk_id} 的临时文件不见了：{partial}"
+                    )
+                try:
+                    on_disk = partial.stat().st_size
+                except OSError as err:
+                    raise AssemblerError(
+                        f"分片 {chunk_id} 读不了：{partial}（{err}）"
+                    ) from err
+                if not expected:
+                    # **没记录过长度 → 没法核对 → 跳过。**
+                    #
+                    # `end_offset` 是可选参数。生产路径（`download_flow`
+                    # 和 `http_downloader`）一定会传，所以核对照常生效。
+                    #
+                    # 但直接用 assembler 的调用方（测试、将来的别的
+                    # 使用者）可能不传——那时候拿「分片应该有多长」
+                    # 去核对就是瞎猜，会把好好的下载判成失败。
+                    #
+                    # 宁可少一道核对，也不要把正常的东西判成坏的。
+                    # 分片文件不在的情况仍然报错——那个是真的丢了数据。
+                    pass
+                elif on_disk != expected:
+                    raise AssemblerError(
+                        f"分片 {chunk_id} 的长度不对："
+                        f"应为 {expected} 字节，盘上是 {on_disk} 字节"
+                    )
+                out.seek(start)
                 with open(partial, "rb") as src:
-                    shutil.copyfileobj(src, out, length=256 * 1024)
+                    # **限长拷贝。** 分片文件的长度已经核对过，
+                    # 这里再加一道保险：最多拷 expected 字节，
+                    # 溢出不了下一个分片。
+                    #
+                    # 没记录长度时（`end_offset` 没传）就按盘上的实际
+                    # 大小拷——那种情况下没有「应该有多长」可比。
+                    remaining = expected if expected else on_disk
+                    while remaining > 0:
+                        block = src.read(min(256 * 1024, remaining))
+                        if not block:
+                            break
+                        out.write(block)
+                        remaining -= len(block)
 
         # 原子替换——用户不会看到一个写了一半的目标文件。
         #
@@ -348,6 +493,16 @@ class FileAssembler:
         Windows 上正在被写的文件删不掉——unlink 抛 PermissionError。
         所以要重试：分片任务收到取消信号后会停下，句柄随之释放，
         删就能成功。
+
+        **按工作目录里的文件名模式扫，不只看已登记的路径。**
+        动态分段切出来的新分片可能还没被 open 过（worker 还没
+        抢到它），它的残留文件就不在 `_partial_paths` 里——
+        只清登记过的会漏掉它们。
+
+        漏掉的后果很严重：**脏分片留在盘上**，下次续传会拿它
+        当「已经下好的字节」接着下，产出的是一个大小正常、
+        内容全错的文件。实测（2026-10-30）：用户下的 4 个文件
+        全部损坏，每个分片的前 64KB 都等于文件开头。
         """
         with self._queue_lock:
             for handle in self._handles.values():
@@ -357,7 +512,22 @@ class FileAssembler:
                     pass
             self._handles.clear()
             self._chunk_locks.clear()
-            paths = list(self._partial_paths.values())
+            to_delete = list(self._partial_paths.values())
             self._partial_paths.clear()
-        for path in paths:
+        # **扫工作目录，把这个任务的分片文件全找出来。**
+        # 文件名形如 `<key>.sdm.partial-<id>`，key 由目标路径哈希
+        # 算出来——所以只匹配这个任务自己的文件。
+        #
+        # 局部变量不叫 `paths`——`sdm.paths` 是本项目的一个模块，
+        # 静态检查器会把 `paths.xxx` 当成跨模块引用来查。
+        try:
+            key = work_dir.task_key(self.destination)
+            root = work_dir.work_root()
+            if root.is_dir():
+                for found in root.glob(f"{key}{work_dir.PARTIAL_INFIX}*"):
+                    if found not in to_delete:
+                        to_delete.append(found)
+        except OSError:
+            pass
+        for path in to_delete:
             _unlink_with_retry(path)

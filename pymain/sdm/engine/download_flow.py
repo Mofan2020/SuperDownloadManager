@@ -32,7 +32,7 @@ from . import work_dir
 from .content_sniffer import ContentProbe, ProbeError
 from .errors import RETRYABLE_BY_DEFAULT, ErrorCategory, TaskError
 from .file_assembler import FileAssembler
-from .http_downloader import DownloadError, HTTPDownloader
+from .http_downloader import DownloadError, DownloadFailure, HTTPDownloader
 from .progress_channel import ChunkProgress, ProgressChannel
 from .range_planner import Chunk, ConnectionGovernor, DynamicPlanner, RangeStrategy
 from .resume_state import ResumeState
@@ -253,6 +253,8 @@ class DownloadFlow:
         #: 最近一次收到字节的时刻。连接数放开要看它——卡住的时候
         #: 加连接没有意义。
         self._last_progress_at = time.monotonic()
+        #: 每个分片实际下载耗时（秒）。详情页的「耗时」列用它。
+        self._chunk_elapsed: dict[int, float] = {}
         #: 退避过一次的标记——单流回退只做一次。
         self._fell_back = False
         #: 「资源变了」之后自动从头开始过。
@@ -480,7 +482,14 @@ class DownloadFlow:
             # 盘上残留的旧字节清掉**，否则它们会被当成「已经下好的
             # 字节」——分片被跳过、下载卡死，合并出来的文件还是旧
             # 内容。见 `FileAssembler.open_chunk`。
-            assembler.open_chunk(chunk.id, chunk.start, resume=chunk.bytes_done > 0)
+            assembler.open_chunk(
+                chunk.id,
+                chunk.start,
+                resume=chunk.bytes_done > 0,
+                # 记下「这个分片应该有多长」——合并前要拿它核对
+                # 盘上的分片文件，长度不对就是坏数据。
+                end_offset=chunk.end,
+            )
 
         if pre_existing > 0:
             self.progress_channel.report(pre_existing)
@@ -500,6 +509,38 @@ class DownloadFlow:
             if err.is_expired_link:
                 # 链接失效：分片文件要留着，用户换新链接后能接着下。
                 raise FlowError(FlowFailure.EXPIRED_LINK.value, err.detail) from err
+            if err.kind is DownloadFailure.NOT_PARTIAL_CONTENT:
+                # **服务器不支持分块 —— 走单流回退。**
+                #
+                # 规格 §1.2.4 的回退信号。这里必须**原样传上去**，
+                # 上面 `run()` 才能接住它、改用单流重下一次。
+                #
+                # 原来这里把它一律转成 PARTIAL，回退信号就丢了：
+                # 任务直接判失败，用户拿到的是「下载失败」；而且
+                # **更糟的是分片里的脏数据还留在盘上**——下次续传
+                # 会拿它接着下，产出的是一个大小正常但内容全错的文件。
+                #
+                # 实测（2026-10-30）：用户下的 4 个文件全部损坏，
+                # 每个分片的前 64KB 都等于文件开头，就是这条路径。
+                raise FlowError(
+                    FlowFailure.RANGE_UNSUPPORTED.value, err.detail
+                ) from err
+            if err.kind is DownloadFailure.CONTENT_MISMATCH:
+                # **服务器给的数据跟它承诺的不符 —— 硬失败，不回退。**
+                #
+                # 这跟「服务器不支持分块」是两回事：
+                #
+                # - 不支持分块 → 服务器对**整个文件**的响应通常是好的，
+                #   退回单流能下对。
+                # - 内容不符 → 服务器给的根本不是它承诺的那一段，
+                #   同一个服务器对整个文件的响应**同样可能是错的**。
+                #   退回单流只是换个姿势再被它骗一次。
+                #
+                # 这条路径上**一个字节都不能写进最终文件**。分片里
+                # 已经写下的脏数据必须清掉——留着的话下次续传会拿它
+                # 接着下，产出大小正常、内容全错的文件。
+                self._cleanup_partials()
+                raise FlowError(FlowFailure.PARTIAL.value, err.detail) from err
             raise FlowError(FlowFailure.PARTIAL.value, str(err)) from err
         except asyncio.CancelledError:
             # 取消要原样往上抛，不能转成 FlowError。
@@ -769,12 +810,37 @@ class DownloadFlow:
                 if chunk is None:
                     split = planner.split_largest()
                     if split is not None:
+                        # 被拆的分片区间缩短了。
+                        #
+                        # **在途的**要砍掉已经写超的部分——那些字节
+                        # 属于新分片的区间，留着会重叠。
+                        #
+                        # **不在途的**（盘上已有一些字节、等着续传）
+                        # partial 文件的内容仍然有效——那部分区间
+                        # 没变——但**区间长度变了**，必须同步记下来，
+                        # 否则合并前核对长度时会误判成「分片损坏」。
                         if split.was_inflight:
-                            # 被拆的分片正在传输：它的区间缩短了，
-                            # 已经写超的部分要砍掉——那些字节属于
-                            # 新分片的区间，留着会重叠。
                             assembler.shrink_chunk(split.source.id, split.split_at)
-                        chunk = split.chunk
+                        else:
+                            assembler.set_chunk_length(
+                                split.source.id, split.split_at
+                            )
+                        # **从队列里取新分片，不要直接用 `split.chunk`。**
+                        #
+                        # 新分片已经进了 `_pending`，谁先取到谁下。
+                        # 这里直接用它的话，**两个 worker 会同时下载
+                        # 同一个分片**——一个从开头写、一个从中途写，
+                        # 后者覆盖前者写好的部分。合并出来的文件
+                        # **大小正常、内容全错**（2026-10-30 实测：
+                        # 用户下的 4 个文件全损，错位量是 64KB 的
+                        # 整数倍）。
+                        #
+                        # 从队列取是互斥的（popleft）——这个分片就归
+                        # 当前 worker 独占，别的 worker 拿不到它。
+                        #
+                        # 取到的可能是别的分片（新分片在队尾），
+                        # 也可能是刚切出来的那个——都行。
+                        chunk = planner.take_pending()
 
                 if chunk is None:
                     # 2) 没活干。
@@ -863,7 +929,7 @@ class DownloadFlow:
             planner.update_progress(chunk.id, delta)
             self._last_progress_at = time.monotonic()
 
-        await self.downloader.download_chunk(
+        result = await self.downloader.download_chunk(
             url=url,
             chunk=chunk,
             assembler=assembler,
@@ -872,6 +938,17 @@ class DownloadFlow:
             limiter=self.limiter,
             use_range=use_range,
         )
+
+        # **记下这个分片实际花了多久。**
+        #
+        # 详情页的「耗时」列要的是「这个分片下了多久」——从开始
+        # 请求到收完字节。下载器测的正是这个（`_stream_chunk` 里
+        # 的 `time.monotonic() - started`）。
+        #
+        # **不能用「距上次写入多少秒」代替。** 那是另一个意思：
+        # 对已完成的分片它会一直涨，越早完成的数字越大，看着
+        # 像卡住了。用户报的「分片耗时显示不对」就是这个错位。
+        self._chunk_elapsed[chunk.id] = result.elapsed
 
         # 分片完成：把 bytes_done 顶到末尾。
         planner.update_progress(chunk.id, chunk.size)
@@ -1029,12 +1106,44 @@ class DownloadFlow:
                 "end": c.end,
                 "size": c.size,
                 "bytes_done": c.bytes_done,
+                # **「耗时」列：真实下载这个分片花了多久。**
+                #
+                # 下完了 = 完整耗时；还在下 = 已经花的时间（会继续涨）。
+                # 没开始 = None（显示「—」）。
+                #
+                # **不是 idle_seconds。** 那是「距上次写入多少秒」，
+                # 语义完全不同：已完成的分片它会一直涨，越早完成的
+                # 数字越大，看着像卡住了。
+                "elapsed_seconds": self._chunk_elapsed_seconds(c, now),
+                # 保留「距上次写入」——用来发现**卡住**的分片。
+                # 下载中但长时间没进字节的分片，就是真正有问题的那种。
                 "idle_seconds": self._chunk_idle_seconds(c.id, now),
             })
         try:
             self.on_chunk_progress(states)
         except Exception:
             pass
+
+    def _chunk_elapsed_seconds(self, chunk: Chunk, now: float) -> float | None:
+        """某个分片已经花掉的下载时间（秒）。
+
+        已完成 = 完整耗时（固定不变）。
+        进行中 = 已经花的时间（继续涨）。
+        没开始 = None。
+        """
+        chunk_id = chunk.id
+        done = self._chunk_elapsed.get(chunk_id)
+        if done is not None:
+            return done
+        # 还在下：已经写了字节，但还没下完——用「首次写入到现在」
+        # 估算已经花了多久。
+        assembler = self._assembler
+        if assembler is None:
+            return None
+        started = assembler.chunk_started_at(chunk_id)
+        if started is None:
+            return None
+        return max(0.0, now - started)
 
     def _chunk_idle_seconds(self, chunk_id: int, now: float) -> float | None:
         """某个分片距上次写入过了多少秒。

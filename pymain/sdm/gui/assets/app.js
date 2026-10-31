@@ -1088,7 +1088,24 @@ function renderChunkSegments(chunks) {
     let cls = "chunk-seg";
     if (size > 0 && done >= size) cls += " done";
     else if (done > 0) cls += " partial";
-    wrap.appendChild(el("span", { class: cls }));
+    // **悬停看这个分片的详情。**
+    //
+    // 光靠一条彩色进度条看不出「哪个分片卡住了」「哪个特别慢」——
+    // 悬停给出：状态、已下字节、耗时、速率。
+    const elapsed = c.elapsed_seconds;
+    const rate = elapsed > 0 && done > 0 ? done / elapsed : null;
+    const bits = [
+      `#${c.id}`,
+      size > 0 && done >= size ? t("taskDetailChunkDone")
+        : (done > 0 ? t("taskDetailChunkDownloading") : t("taskDetailChunkPending")),
+      `${fmtSize(done)} / ${fmtSize(size)}`,
+    ];
+    if (elapsed != null) bits.push(`${t("taskDetailChunkElapsed")} ${fmtChunkElapsed(elapsed)}`);
+    if (rate != null) bits.push(fmtRate(rate));
+    if (c.idle_seconds != null && c.idle_seconds > 15) {
+      bits.push(`${Math.round(c.idle_seconds)}s ${t("taskDetailChunkStalled")}`);
+    }
+    wrap.appendChild(el("span", { class: cls, title: bits.join(" · ") }));
   });
   return wrap;
 }
@@ -1344,20 +1361,37 @@ function renderDetail() {
         el("th", { text: t("taskDetailChunkBytes") }),
         el("th", { text: t("taskDetailChunkStatus") }),
         el("th", { text: t("taskDetailChunkElapsed") }),
+        el("th", { text: t("taskDetailChunkRate") }),
       ])]),
     ]);
     const tbody = el("tbody");
     visible.forEach((c) => {
       const st = c.bytes_done >= c.size ? "done" : (c.bytes_done > 0 ? "downloading" : "pending");
-      tbody.appendChild(el("tr", {}, [
+      // **卡住的分片：整行标出来。**
+      //
+      // 判据是「距上次写入超过 15 秒」——分片下载中但长时间没进
+      // 字节，就是真有问题的那种（连接被掐、服务器卡住）。
+      //
+      // **这一行标的是「有问题的分片」，不是「耗时长的分片」。**
+      // 一个分片下了 3 分钟但一直在进字节，那是正常的慢，不是卡住。
+      const stale = st === "downloading" && c.idle_seconds > 15;
+      const elapsed = c.elapsed_seconds;
+      // **速率 = 这片下了多少 / 花了多久。**
+      //
+      // 「耗时」列单独看意义有限——耗时长可能是因为分片大。
+      // 有了速率才能一眼看出「哪片拖后腿」。
+      const rate = elapsed > 0 && c.bytes_done > 0 ? c.bytes_done / elapsed : null;
+      tbody.appendChild(el("tr", { class: stale ? "row-stale" : "" }, [
         el("td", { class: "mono", text: `#${c.id}` }),
         el("td", { class: "mono", text: `${fmtSize(c.bytes_done)} / ${fmtSize(c.size)}` }),
         el("td", {}, [
           el("span", { class: "chunk-dot chunk-" + st }),
           el("span", { text: t("taskDetailChunk" + st.charAt(0).toUpperCase() + st.slice(1)) }),
         ]),
-        el("td", { class: "mono cell-muted" + (c.idle_seconds > 15 ? " cell-stale" : ""),
-                   text: c.idle_seconds != null ? fmtChunkElapsed(c.idle_seconds) : "—" }),
+        el("td", { class: "mono cell-muted",
+                   text: elapsed != null ? fmtChunkElapsed(elapsed) : "—" }),
+        el("td", { class: "mono cell-muted",
+                   text: rate != null ? fmtRate(rate) : "—" }),
       ]));
     });
     table.appendChild(tbody);

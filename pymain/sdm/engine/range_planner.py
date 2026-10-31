@@ -209,13 +209,39 @@ class DynamicPlanner:
     def take_pending(self) -> Chunk | None:
         """取一个待下载的分片。没有就返回 None。"""
         with self._lock:
+            # **只扫一遍。**
+            #
+            # 在途的分片要**跳过但保留**（不能从队列里丢掉——丢掉
+            # 就永远没人下它了，那段区间留个空洞）。
+            #
+            # 不能用「放回队列再继续」的写法：队列里在途的分片会
+            # 一直排在前面，无限循环。
+            skipped: list[int] = []
+            result: Chunk | None = None
             while self._pending:
                 chunk_id = self._pending.popleft()
                 chunk = self._chunks.get(chunk_id)
-                if chunk is None or chunk.complete or chunk_id in self._inflight:
+                if chunk is None or chunk.complete:
                     continue
-                return chunk
-            return None
+                if chunk_id in self._inflight:
+                    # 在途——别的 worker 正在下它，跳过但**保留**。
+                    #
+                    # 动态分段切出来的新分片会同时「在途」和「在队列
+                    # 里」：在途是防别人抢它（两个 worker 抢同一个
+                    # 分片会写坏文件），在队列是让它能被接手。
+                    #
+                    # 以前这里直接 `continue`（弹出的 id 就没了），
+                    # 于是「在途的分片」如果被别人在它完成之前碰到，
+                    # 就**永远不会被下载**——那段区间留个空洞，合并
+                    # 出来的文件大小正常、内容缺一块。
+                    skipped.append(chunk_id)
+                    continue
+                result = chunk
+                break
+            # 在途的那些放回队列尾部——等它们跑完了自然会被跳过。
+            for chunk_id in skipped:
+                self._pending.append(chunk_id)
+            return result
 
     def split_largest(self) -> SplitResult | None:
         """把当前**最大的未完成分片**对半拆开。
@@ -273,7 +299,44 @@ class DynamicPlanner:
             new_chunk = Chunk(id=self._next_id, start=mid, end=old_end, bytes_done=0)
             self._next_id += 1
             self._chunks[new_chunk.id] = new_chunk
-            self._pending.append(new_chunk.id)
+            # **新分片进 `_pending`，交给 whoever 先取到谁下。**
+            #
+            # 调用方（worker）**不要**直接用返回值里的 `chunk`——
+            # 那会让两个 worker 同时下载同一个分片（见下面）。
+            #
+            # 以前这里是「既放进 `_pending`、又让调用方直接用」，
+            # 结果**两个 worker 同时下载同一个分片**：
+            #
+            # - worker A：`split_largest()` 切出新分片，直接开始下
+            # - worker B：`take_pending()` 从队列里把**同一个**分片
+            #   取走，也开始下
+            #
+            # 两个协程写**同一个分片文件**。A 从分片开头写，B 从
+            # 中途写（它看到盘上已经有字节了），B 的写入**覆盖**掉
+            # A 已经写好的部分——而 B 拿到的数据起点比 A 的靠后。
+            #
+            # 结果就是分片文件里出现「同一段数据错位重放」，
+            # 合并出来的文件**大小完全正常、内容全是错的**。
+            #
+            # 实测（2026-10-30）：13MB 的 dmg，7 个分片内容全错，
+            # 错位量正好是 64KB（一个数据块）的整数倍。
+            #
+            # **不能改成「不进队列」。** 尾段只剩一两个分片时，
+            # 靠「切出新分片再让别人接手」才能把并发拉满（规格
+            # §1.2 的核心）。不进队列的话尾段并发直接掉到 1，
+            # 「下到 96% 就不动了」那个老毛病就回来了。
+            #
+            # 所以：**只进队列，由取到它的那个 worker 独占。**
+            # `take_pending()` 是互斥的（popleft），一个分片只会被
+            # 一个 worker 拿到。
+            #
+            # **放队首，不放队尾。** 拆分的那个 worker 接下来第一
+            # 次 `take_pending()` 就会拿到它——刚切出来的分片正是
+            # 它最该干的活（从拆点接着往末尾下）。放队尾的话，
+            # 中间隔着别的分片，它可能要等——尾段并发就上不来了
+            # （尾段只剩一两个分片可拆，队列里通常空的，但顺序
+            # 还是按「谁拆谁先干」更合理）。
+            self._pending.appendleft(new_chunk.id)
             return SplitResult(
                 chunk=new_chunk,
                 source=source,
