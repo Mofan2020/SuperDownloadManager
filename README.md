@@ -1,12 +1,12 @@
 # Super Download Manager (SDM)
 
-> An open-source cross-platform alternative to Internet Download Manager (IDM). macOS, Windows and Linux. One Python core, one web UI, no Electron, no bundled browser runtime.
+> An open-source alternative to Internet Download Manager (IDM) for macOS and Windows. One Python core, one web UI, no Electron, no bundled browser runtime.
 
-IDM does it on Windows. macOS had no good equivalent. This is the cross-platform one.
+IDM does it on Windows. macOS had no good equivalent. This one runs on both.
 
 [中文文档](./README.zh-CN.md)
 
-![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue.svg)
+![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-blue.svg)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
@@ -31,7 +31,7 @@ IDM does it on Windows. macOS had no good equivalent. This is the cross-platform
 
 ## Requirements
 
-- macOS 12 or later, Windows 22H2 or later, or a recent Linux
+- macOS 12 or later, or Windows 22H2 or later
 - Python 3.11 or later when running from source
 
 ## Install

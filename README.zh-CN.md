@@ -2,11 +2,11 @@
 
 > **[English README](./README.md)** | 中文
 
-![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue.svg)
+![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-blue.svg)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-IDM 的开源跨平台替代品。多线程下载器，支持 macOS、Windows、Linux。
+IDM 的开源替代品。多线程下载器，支持 macOS 与 Windows。
 
 - 单个 Python 内核，Web UI，不带 Electron，不内置浏览器运行时
 - **动态分段**：分片布局在下载过程中会长，不是开跑前一次性切死；从 2 条连接起步，
@@ -31,7 +31,7 @@ IDM 的开源跨平台替代品。多线程下载器，支持 macOS、Windows、
 
 ## 系统要求
 
-- macOS 12+ / Windows 22H2+ / 较新的 Linux
+- macOS 12+ / Windows 22H2+
 - 从源码运行需要 Python 3.11+
 
 ## 安装
