@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Super Download Manager",
-  "version": "2.2.3",
+  "version": "2.2.4",
   "description": "把浏览器下载交给 Super Download Manager 接管：多线程、断点续传、限速。",
   "icons": {
     "16": "icons/icon-16.png",

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Super Download Manager",
-  "version": "2.2.3",
+  "version": "2.2.4",
   "description": "手动把链接发送到 Super Download Manager（试验性：Safari 不支持自动接管下载）。",
   "icons": {
     "16": "icons/icon-16.png",
