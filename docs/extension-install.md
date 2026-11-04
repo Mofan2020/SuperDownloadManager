@@ -99,13 +99,27 @@ Firefox 的清单多一个 `allowed_extensions`（写 gecko id `sdm-firefox@mofa
 
 ## 2. 装扩展
 
-扩展文件跟着应用一起打包：
+扩展文件**跟着应用一起打包**，但用户加载的是**持久副本**：
 
-- macOS：`SuperDownloadManager.app/Contents/Resources/extensions/<浏览器>/`
-- Windows：GUI 是 onefile，解包到临时目录，路径由 `sys._MEIPASS/extensions/`
+| | 位置 |
+|---|---|
+| **包内副本**（素材） | macOS：`SuperDownloadManager.app/Contents/Resources/extensions/<浏览器>/`<br>Windows：GUI 是 onefile，解包到临时目录 `sys._MEIPASS/extensions/` |
+| **持久副本**（用户加载这个） | macOS：`~/Library/Application Support/SuperDownloadManager/extensions/<浏览器>/`<br>Windows：`%LOCALAPPDATA%\SuperDownloadManager\extensions\<浏览器>\` |
+
+**为什么必须是持久副本**：Windows 的 onefile 把资源解到临时目录，
+**进程一退就被 PyInstaller 删掉**——浏览器加载的是「长期指向那个
+目录」的扩展，指向临时目录的话，退出应用扩展就没了。
+
+应用会在启动时把包内副本装到持久目录，用 **SHA-256 内容指纹**判断
+是不是最新版：指纹一致就什么都不做，不一致就整体替换（先拷到临时
+目录再 rename，原子替换，不会留下半个目录）。
+
+> 指纹算的是「相对路径 + 文件内容」，不是 mtime——重新解压一遍的
+> 同一个扩展，指纹必须一样。
 
 **别去源码仓库里找**——应用「设置 → 浏览器接管 → 打开扩展目录」直接
-在访达/资源管理器里打开正确的那个目录，从那儿选。
+在访达/资源管理器里打开正确的那个目录，从那儿选。点那个按钮会先
+自动装/更新扩展，再打开目录。
 
 ### Chrome / Edge
 

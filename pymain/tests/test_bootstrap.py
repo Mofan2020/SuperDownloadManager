@@ -161,15 +161,18 @@ def test_install_cli_missing_binary(tmp_path, monkeypatch):
 class _FakeRun:
     """记录调用并返回可控结果的 subprocess.run 替身。"""
 
-    def __init__(self, print_returncode: int = 0):
+    def __init__(self, print_returncode: int = 0, print_stdout: str = ""):
         self.calls: list[list[str]] = []
         self.print_returncode = print_returncode
+        self.print_stdout = print_stdout
 
     def __call__(self, cmd, *args, **kwargs):
         self.calls.append(list(cmd))
         code = subprocess.CompletedProcess(cmd, 0, "", "")
         if "print" in cmd:
-            code = subprocess.CompletedProcess(cmd, self.print_returncode, "", "")
+            code = subprocess.CompletedProcess(
+                cmd, self.print_returncode, self.print_stdout, ""
+            )
         return code
 
 
@@ -213,7 +216,12 @@ def test_register_daemon_does_not_restart_when_loaded(tmp_path, monkeypatch):
     monkeypatch.setattr(bootstrap.Path, "home", staticmethod(lambda: home))
     monkeypatch.setattr(bootstrap.os, "getuid", lambda: 501)
 
-    fake = _FakeRun(print_returncode=0)  # print 说已加载
+    expected_plist = home / "Library" / "LaunchAgents" / f"{bootstrap.LAUNCH_AGENT_LABEL}.plist"
+    # print 说已加载，而且加载的**就是**我们要注册的那份 plist。
+    fake = _FakeRun(
+        print_returncode=0,
+        print_stdout=f"\tpath = {expected_plist}\n",
+    )
     monkeypatch.setattr(bootstrap.subprocess, "run", fake)
 
     result = bootstrap.register_daemon(resources)
@@ -223,6 +231,44 @@ def test_register_daemon_does_not_restart_when_loaded(tmp_path, monkeypatch):
     verbs = [c[1] for c in fake.calls if c[0] == "launchctl"]
     assert "kickstart" not in verbs
     assert "bootstrap" not in verbs
+
+
+@macos_only
+def test_register_daemon_reloads_when_loaded_plist_is_stale(tmp_path, monkeypatch):
+    """加载着**别的一份** plist 时必须重新注册。
+
+    launchd 按 label 认 job：同名 job 一旦加载着，`launchctl print`
+    就成功，哪怕它指向的是另一个路径（比如一个已经被删掉的临时
+    目录）。这时候如果只看「有没有加载」就返回「已加载」，
+    daemon 永远注册不上——launchd 每 10 秒崩一次重启，机器一直响。
+
+    实测踩过：`gui/501/com.skyc8266.superdownloadmanager.daemon`
+    指向 `/private/tmp/.../fakehome3/...`，那个目录早没了，
+    job 一直 EX_CONFIG。
+    """
+    resources = _fake_resources(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(bootstrap.Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(bootstrap.os, "getuid", lambda: 501)
+
+    # print 说「已加载」，但加载的是另一份（已被删掉的）plist。
+    fake = _FakeRun(
+        print_returncode=0,
+        print_stdout="\tpath = /private/tmp/sdmprobe/fakehome3/x.plist\n",
+    )
+    monkeypatch.setattr(bootstrap.subprocess, "run", fake)
+
+    result = bootstrap.register_daemon(resources)
+
+    assert result["ok"] is True
+    assert result["reason"] == "reloaded"
+
+    verbs = [c[1] for c in fake.calls if c[0] == "launchctl"]
+    assert "bootstrap" in verbs, "stale job 没被重新注册"
+    assert "kickstart" in verbs
+    # 旧的那份要先踢掉，不然 bootstrap 会报 service already loaded。
+    assert "bootout" in verbs
 
 
 @macos_only

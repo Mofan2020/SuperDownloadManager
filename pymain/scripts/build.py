@@ -230,6 +230,29 @@ MACOS_HELPER_DIRS = {
     "sdmd-native-host": "native-host",
 }
 
+#: macOS 上辅助程序共享 GUI 的 Python runtime 时用的软链目标。
+#:
+#: PyInstaller 给 GUI 打的 .app 里，onedir 的 runtime 落在
+#: Contents/Frameworks（纯数据文件落在 Contents/Resources，两边
+#: 互相软链）。辅助程序放在 Contents/Resources/<目录>/ 下，它
+#: 自己的 bootloader 找的是「可执行文件同级的 _internal/」。
+#:
+#: 所以给辅助程序的 _internal 建一个指向 ../../Frameworks 的**相对**
+#: 软链就行——GUI + CLI + daemon + native host 共用同一份 runtime。
+#: 原来三份各带完整 runtime，.app 有 162MB；共享后约 42MB。
+#:
+#: 必须用相对路径：.app 会被拷进 /Applications、塞进 DMG、换机器
+#: 都得继续能用，绝对路径一换地方就断。
+SHARED_RUNTIME_TARGET = "../../Frameworks"
+
+#: Windows 上辅助程序共享 runtime 用的目录名。
+#:
+#: Windows 没有软链（建目录软链要管理员权限），所以改成一个
+#: 目录里放三个 exe + 一份合并后的 _internal，打成**一个** zip。
+#: GUI 的 onefile 里就只剩两份 runtime（它自己那份 + 这一份），
+#: 原来是四份。
+WINDOWS_RUNTIME_DIR = "sdm-runtime"
+
 
 def build_entrypoint(name: str, module: str, func: str) -> Path:
     """生成入口脚本。
@@ -247,6 +270,95 @@ def build_entrypoint(name: str, module: str, func: str) -> Path:
         encoding="utf-8",
     )
     return entry
+
+
+def _merge_runtime_dirs(sources: list[Path], dest: Path) -> list[str]:
+    """把多个 onedir 产物的 _internal/ 合并成一份。
+
+    Windows 上没有目录软链可用（建软链要管理员权限），所以走
+    「合并」的路子：三个 helper 的 _internal 合到同一个目录，
+    三个 exe 也放这个目录里，一份 runtime 服务三个程序。
+
+    合并规则：先到的先占位，后面只补缺的文件。同名文件内容
+    不一致时记下来（base_library.zip 的 zip 时间戳不同就会
+    触发，内容其实一样，不用管）。
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    conflicts: list[str] = []
+    for source in sources:
+        if not source.is_dir():
+            continue
+        for dirpath, _dirnames, filenames in os.walk(source):
+            for filename in filenames:
+                src = Path(dirpath) / filename
+                rel = src.relative_to(source)
+                target = dest / rel
+                if target.exists():
+                    if target.stat().st_size != src.stat().st_size:
+                        conflicts.append(str(rel))
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, target)
+    return conflicts
+
+
+def _verify_shared_runtime(app: Path, helper_runtimes: list[tuple[str, Path]]) -> bool:
+    """检查 GUI 的 runtime 是否覆盖辅助程序需要的全部文件。
+
+    macOS 上辅助程序的 _internal/ 是指向 Contents/Frameworks/ 的
+    软链，四份程序共用一份 Python runtime。共享的前提是 GUI 的
+    runtime 里已经有 helper 需要的每个文件——现在成立，但以后有人
+    给 CLI 加了个 GUI 用不到的依赖，软链就会在运行时才炸
+    （ModuleNotFoundError / dlopen 失败）。这里在打包阶段就查
+    出来，缺文件直接让构建失败。
+
+    查两样：
+    - 文件：helper 的 _internal 里每个文件，Frameworks 下都得有
+      对应路径（软链会跟着解，算存在）。
+    - 模块：helper 的 base_library.zip 里的模块，Frameworks 的
+      base_library.zip（跟过去是 Resources/base_library.zip）
+      必须全都有。
+    """
+    frameworks = app / "Contents" / "Frameworks"
+    ok = True
+    for name, internal in helper_runtimes:
+        if not internal.is_dir():
+            print(f"共享 runtime 校验：{name} 没有 _internal 目录，跳过")
+            continue
+        missing: list[str] = []
+        for dirpath, _dirnames, filenames in os.walk(internal, followlinks=False):
+            for filename in filenames:
+                path = Path(dirpath) / filename
+                rel = path.relative_to(internal)
+                if not (frameworks / rel).exists():
+                    missing.append(str(rel))
+        if missing:
+            ok = False
+            print(f"共享 runtime 缺 {len(missing)} 个文件（{name} 的 _internal）：")
+            for item in missing[:20]:
+                print(f"    {item}")
+            if len(missing) > 20:
+                print(f"    …… 还有 {len(missing) - 20} 个")
+            continue
+        print(f"共享 runtime 覆盖检查通过：{name}")
+
+        # base_library.zip 的模块集合也要覆盖。
+        helper_zip = internal / "base_library.zip"
+        shared_zip = frameworks / "base_library.zip"
+        if helper_zip.is_file() and shared_zip.is_file():
+            import zipfile
+
+            with zipfile.ZipFile(helper_zip) as zf:
+                need = {item.filename for item in zf.infolist()}
+            with zipfile.ZipFile(shared_zip) as zf:
+                have = {item.filename for item in zf.infolist()}
+            lack = sorted(need - have)
+            if lack:
+                ok = False
+                print(f"共享 runtime 的 base_library.zip 缺 {len(lack)} 个模块（{name}）：")
+                for item in lack[:20]:
+                    print(f"    {item}")
+    return ok
 
 
 def build_macos() -> bool:
@@ -373,6 +485,8 @@ def build_macos() -> bool:
     # 已经有 Resources/sdm 软链（指向 ../Resources/sdm），同名会
     # 撞上，变成自指软链。
     resources = app / "Contents" / "Resources"
+    # helper 各自打出来的 runtime 目录，留着做覆盖校验
+    helper_runtimes: list[tuple[str, Path]] = []
     for name, module, func, imports, with_assets, onefile in TARGETS[1:]:
         entry = build_entrypoint(name, module, func)
         args = [
@@ -385,18 +499,48 @@ def build_macos() -> bool:
             return False
         # 把产物挪进 .app。
         # onedir 的产物是目录：可执行文件 + 同级 _internal/。
-        # 整个目录搬进去，_internal 要跟可执行文件平级。
         built = DIST / "macos" / name
         dest = resources / MACOS_HELPER_DIRS.get(name, name)
         if built.is_file():
+            dest.mkdir(parents=True, exist_ok=True)
             shutil.copy2(built, dest / name)
         elif built.is_dir():
+            # **只搬可执行文件，不搬 _internal/。**
+            #
+            # onedir 的 _internal/ 是一整份 Python runtime（~40MB：
+            # Python.framework + lib-dynload/*.so + base_library.zip）。
+            # 三个辅助程序各带一份，.app 就膨胀到 162MB。
+            #
+            # GUI 那份 runtime 在 Contents/Frameworks/，里面已经有
+            # 辅助程序需要的全部文件（base_library.zip 的模块集合、
+            # lib-dynload 里的 .so、Python.framework、libssl/libcrypto）。
+            # 所以辅助程序的 _internal 换成指向 Frameworks 的相对软链，
+            # 四份程序共用一份 runtime，.app 回到 ~42MB。
+            #
+            # 必须是**相对**软链：.app 会被拷进 /Applications、塞进
+            # DMG、换机器都得继续能用。
+            exe = built / name
+            if not exe.is_file():
+                print(f"找不到 {name} 的可执行文件：{exe}")
+                return False
             if dest.exists():
                 shutil.rmtree(dest)
-            shutil.copytree(built, dest)
+            dest.mkdir(parents=True)
+            shutil.copy2(exe, dest / name)
+            os.symlink(SHARED_RUNTIME_TARGET, dest / "_internal")
+            helper_runtimes.append((name, built / "_internal"))
         else:
             print(f"找不到 {name} 的产物")
             return False
+
+    # 共享 runtime 的覆盖校验。
+    #
+    # 软链共享的前提是 GUI 的 runtime 里已经有 helper 需要的每个
+    # 文件——现在成立，但以后有人给 CLI 加了个 GUI 用不到的依赖，
+    # 软链就会在运行时才炸（ModuleNotFoundError）。这里在打包阶段
+    # 就查出来，缺文件直接让构建失败。
+    if not _verify_shared_runtime(app, helper_runtimes):
+        return False
 
     # 安装脚本放进 Resources。
     #

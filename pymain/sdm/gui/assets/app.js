@@ -54,6 +54,12 @@ const State = {
   // 浏览器接管的现状（配对 token、扩展目录、各浏览器装没装）。
   // null = 还没问过后端。
   browserCapture: null,
+  // 仪表盘统计（后端 get_dashboard_stats() 的返回值）。
+  // null = 还没取到 / 取不到——界面显示「暂无数据」。
+  dashboard: null,
+  // 扩展安装结果：browser id -> {path, updated}。
+  // 装完把扩展装到哪了要让人看见，不然用户只能自己去翻目录。
+  browserInstalls: {},
 };
 
 const api = () => window.pywebview?.api;
@@ -356,8 +362,9 @@ function renderSidebar() {
   // 其它
   nav.appendChild(el("div", { class: "nav-group-label", text: t("sidebarOther") }));
   [
-    { id: "history",  icon: "clock", key: "sidebarHistory" },
-    { id: "schedule", icon: "alarm", key: "sidebarSchedule" },
+    { id: "dashboard", icon: "gauge",   key: "sidebarDashboard" },
+    { id: "history",  icon: "clock",   key: "sidebarHistory" },
+    { id: "schedule", icon: "alarm",   key: "sidebarSchedule" },
   ].forEach((item) => {
     nav.appendChild(el("button", {
       class: "nav-item" + (State.view === item.id ? " active" : ""),
@@ -443,6 +450,14 @@ function renderToolbar() {
       },
     }, [icon("clipboard"), el("span", { class: "btn-label", text: t("toolbarClipboardMonitor") })]));
 
+    actions.appendChild(settingsBtn);
+    actions.appendChild(themeBtn);
+  } else if (State.view === "dashboard") {
+    title.appendChild(el("span", { class: "toolbar-title", text: t("sidebarDashboard") }));
+    actions.appendChild(el("button", {
+      class: "btn", title: t("dashboardRefresh"),
+      onclick: async () => { await refreshDashboard(); },
+    }, [icon("refresh"), el("span", { class: "btn-label", text: t("dashboardRefresh") })]));
     actions.appendChild(settingsBtn);
     actions.appendChild(themeBtn);
   } else if (State.view === "history") {
@@ -1493,6 +1508,126 @@ function renderHistory() {
   view.appendChild(el("div", { class: "table-wrap" }, [table]));
 }
 
+// ============ 仪表盘 ============
+
+// 数据来自后端 get_dashboard_stats()——后端把引擎快照和历史揉成
+// 一张表，前端只管画。后端方法还没接上时 State.dashboard 是 null，
+// 界面显示「暂无数据」，不报错、不刷屏。
+function dashStatTile(iconName, labelKey, value, sub) {
+  return el("div", { class: "card dash-stat" }, [
+    el("div", { class: "dash-stat-top" }, [
+      el("span", { class: "dash-stat-icon" }, [icon(iconName, "icon-sm")]),
+      el("span", { text: t(labelKey) }),
+    ]),
+    el("div", { class: "dash-stat-value num", text: value }),
+    sub ? el("div", { class: "dash-stat-sub", text: sub }) : null,
+  ]);
+}
+
+function renderDashboard() {
+  const view = document.getElementById("viewDashboard");
+  const prevScrollTop = captureScrollTop(view);
+  clear(view);
+
+  const data = State.dashboard;
+  if (!data) {
+    view.appendChild(el("div", { class: "empty" }, [
+      el("div", { class: "empty-icon" }, [icon("gauge", "icon-xl")]),
+      el("div", { class: "empty-title", text: t("dashboardNoData") }),
+      el("div", { class: "empty-hint", text: t("dashboardNoDataHint") }),
+    ]));
+    return;
+  }
+
+  const active = data.active || {};
+  const today = data.today || {};
+  const totals = data.totals || {};
+  const recent = Array.isArray(data.recent) ? data.recent : [];
+  const categories = Array.isArray(totals.by_category) ? totals.by_category : [];
+
+  const wrap = el("div", { class: "list-wrap dash-wrap" });
+
+  // -- 四个统计卡 --------------------------------------------------
+  wrap.appendChild(el("div", { class: "dash-stats" }, [
+    dashStatTile("download", "dashboardStatActive", String(active.count || 0), t("dashboardUnitTasks")),
+    dashStatTile("gauge", "dashboardStatSpeed", fmtRate(active.speed || 0), t("dashboardSpeedSub")),
+    dashStatTile("layers", "dashboardStatTodayBytes", fmtSize(today.bytes || 0), t("dashboardTodaySub")),
+    dashStatTile("check", "dashboardStatTodayCount", String(today.downloads || 0), t("dashboardUnitTasks")),
+  ]));
+
+  // -- 分类统计 + 累计统计 -----------------------------------------
+  const maxBytes = categories.reduce((max, item) => Math.max(max, Number(item.bytes) || 0), 0);
+  const barRows = categories.length
+    ? categories.map((item) => {
+        const catId = item.id || "other";
+        const meta = CATEGORY_META[catId] || CATEGORY_META.other;
+        const bytes = Number(item.bytes) || 0;
+        const percent = maxBytes > 0 ? Math.max(2, Math.round((bytes / maxBytes) * 100)) : 0;
+        return el("div", { class: "dash-bar-row" }, [
+          el("div", { class: "dash-bar-label" }, [
+            icon(meta.icon, "icon-sm"),
+            el("span", { text: categoryLabel(catId) }),
+          ]),
+          el("div", { class: "dash-bar-track" }, [
+            el("div", { class: "dash-bar-fill", style: `width:${percent}%;background:${meta.color}` }),
+          ]),
+          el("div", { class: "dash-bar-value num", text: tf("dashboardCategoryMeta", item.count || 0, fmtSize(bytes)) }),
+        ]);
+      })
+    : [el("div", { class: "dash-empty-note", text: t("dashboardNoCategory") })];
+
+  const categorySection = el("div", { class: "setting-section" }, [
+    el("div", { class: "setting-section-title", text: t("dashboardByCategory") }),
+    el("div", { class: "card" }, [el("div", { class: "dash-bars" }, barRows)]),
+  ]);
+
+  const totalsSection = el("div", { class: "setting-section" }, [
+    el("div", { class: "setting-section-title", text: t("dashboardAllStats") }),
+    el("div", { class: "card" }, [
+      el("div", { class: "dash-kpis" }, [
+        el("div", { class: "dash-kpi" }, [
+          el("div", { class: "dash-kpi-label", text: t("dashboardTotalTasks") }),
+          el("div", { class: "dash-kpi-value num", text: String(totals.downloads || 0) }),
+        ]),
+        el("div", { class: "dash-kpi" }, [
+          el("div", { class: "dash-kpi-label", text: t("dashboardTotalBytes") }),
+          el("div", { class: "dash-kpi-value num", text: fmtSize(totals.bytes || 0) }),
+        ]),
+        el("div", { class: "dash-kpi" }, [
+          el("div", { class: "dash-kpi-label", text: t("dashboardFailed") }),
+          el("div", { class: "dash-kpi-value num", text: String(totals.failed || 0) }),
+        ]),
+      ]),
+    ]),
+  ]);
+
+  wrap.appendChild(el("div", { class: "dash-cols" }, [categorySection, totalsSection]));
+
+  // -- 最近完成 ----------------------------------------------------
+  const recentRows = recent.length
+    ? recent.map((item) => {
+        const meta = CATEGORY_META[item.category] || CATEGORY_META.other;
+        return el("div", { class: "dash-item" }, [
+          el("span", { class: "row-cat", style: `color:${meta.color}` }, [icon(meta.icon)]),
+          el("div", { class: "dash-item-main" }, [
+            el("div", { class: "dash-item-name trunc", text: item.filename || "" }),
+            el("div", { class: "dash-item-cat", text: categoryLabel(item.category) }),
+          ]),
+          el("div", { class: "dash-item-size num", text: fmtSize(item.bytes || 0) }),
+          el("div", { class: "dash-item-time num", text: fmtDate(item.finished_at) }),
+        ]);
+      })
+    : [el("div", { class: "dash-empty-note", text: t("dashboardNoRecent") })];
+
+  wrap.appendChild(el("div", { class: "setting-section" }, [
+    el("div", { class: "setting-section-title", text: t("dashboardRecent") }),
+    el("div", { class: "card" }, [el("div", { class: "dash-items" }, recentRows)]),
+  ]));
+
+  view.appendChild(wrap);
+  restoreScrollTop(wrap, prevScrollTop);
+}
+
 // ============ 计划任务 ============
 
 function renderSchedule() {
@@ -1985,16 +2120,33 @@ function renderBrowserCaptureSection() {
   // -- 每个浏览器一行 ------------------------------------------------
   const browsers = Array.isArray(info.browsers) ? info.browsers : [];
   browsers.forEach((b) => {
+    // 「打开扩展目录」**永远显示**。
+    //
+    // 原来按 extension_dir 有没有来决定显不显示——扩展还没装上的
+    // 浏览器就少一个按钮，用户看着像「这个浏览器不支持」。
+    // 按钮常在：点一下不管装没装都有明确反馈（装到哪了 / 为什么装不上）。
     const buttons = [];
-    if (b.extension_dir) {
-      buttons.push(el("button", {
-        class: "btn btn-sm", type: "button",
-        onclick: async () => {
-          const res = await api()?.open_browser_extension_folder(b.id);
-          if (!res?.ok) toast(res?.error || t("browserCaptureFolderMissing"), "err");
-        },
-      }, [icon("folder"), el("span", { text: t("browserCaptureOpenFolder") })]));
-    }
+    buttons.push(el("button", {
+      class: "btn btn-sm", type: "button",
+      onclick: async () => {
+        // 先装/更新扩展。装了才知道装到哪了——路径要给用户看见。
+        const res = await api()?.install_browser_extension?.(b.id);
+        if (res && res.ok) {
+          State.browserInstalls[b.id] = { path: res.path || "", updated: !!res.updated };
+          toast(res.updated ? t("browserCaptureUpdated") : t("browserCaptureInstallDone"));
+          // 装完重新读一次状态——「有新版本」的提示要跟着消失。
+          await refreshBrowserCapture();
+        } else if (res) {
+          // 装不上就把原因说清楚，别再往下调打开目录——
+          // 目录多半也不存在，两个错叠在一起更看不懂。
+          toast(res.message || t("commonFailed"), "err");
+          return;
+        }
+        // 目录还是打开一下——用户点这个按钮就是想看扩展在哪。
+        const opened = await api()?.open_browser_extension_folder(b.id);
+        if (opened && !opened.ok) toast(opened.error || t("browserCaptureFolderMissing"), "err");
+      },
+    }, [icon("folder"), el("span", { text: t("browserCaptureOpenFolder") })]));
     if (b.extensions_url) {
       buttons.push(el("button", {
         class: "btn btn-sm", type: "button",
@@ -2027,6 +2179,36 @@ function renderBrowserCaptureSection() {
       ]),
       el("div", { style: "display:flex;gap:8px;flex:none" }, buttons),
     ]));
+
+    // 扩展装在哪、版本新不新。用户问「装到哪了」的时候不用自己去翻目录。
+    const installed = State.browserInstalls[b.id] || {};
+    const detailRows = [];
+    if (b.persistent_dir) {
+      detailRows.push(el("div", { class: "capture-detail-row" }, [
+        el("span", { class: "capture-detail-label", text: t("browserCapturePersistentDir") }),
+        el("span", { class: "capture-path", text: b.persistent_dir }),
+      ]));
+    }
+    if (installed.path) {
+      detailRows.push(el("div", { class: "capture-detail-row" }, [
+        el("span", { class: "capture-detail-label", text: t("browserCaptureInstallPath") }),
+        el("span", { class: "capture-path", text: installed.path }),
+      ]));
+    }
+    if (b.needs_update) {
+      detailRows.push(el("div", { class: "capture-detail-row" }, [
+        el("span", { class: "capture-detail-label", text: t("browserCaptureVersion") }),
+        el("span", { class: "capture-stale", text: t("browserCaptureUpdateAvailable") }),
+      ]));
+    } else if (b.installed) {
+      detailRows.push(el("div", { class: "capture-detail-row" }, [
+        el("span", { class: "capture-detail-label", text: t("browserCaptureVersion") }),
+        el("span", { class: "capture-fresh", text: t("browserCaptureUpToDate") }),
+      ]));
+    }
+    if (detailRows.length) {
+      card.appendChild(el("div", { class: "capture-detail" }, detailRows));
+    }
 
     // Safari 的安装流程跟别的浏览器完全不同（开发者模式 + 未签名），
     // 得单独把步骤写出来，不能让用户去猜。
@@ -2673,6 +2855,7 @@ function setView(view) {
   document.querySelectorAll(".view").forEach((v) => {
     v.hidden = v.dataset.view !== view;
   });
+  if (view === "dashboard") refreshDashboard();
   if (view === "history") refreshHistory();
   if (view === "schedule") refreshSchedules();
   // 浏览器接管的状态要扫扩展目录、查 pluginkit，不便宜——
@@ -2694,6 +2877,7 @@ function render() {
   renderBanner();
   renderStatusBar();
   if (State.view === "downloads") renderDownloads();
+  else if (State.view === "dashboard") renderDashboard();
   else if (State.view === "history") renderHistory();
   else if (State.view === "schedule") renderSchedule();
   else if (State.view === "settings") renderSettings();
@@ -2737,6 +2921,25 @@ async function refreshTasks() {
 async function refreshHistory() {
   const h = await api()?.get_history(500);
   if (h) State.history = h;
+}
+
+// 拉仪表盘统计。
+//
+// **后端方法还没接上时不能炸。** 前端先上、后端方法后补是常态，
+// 这里的写法保证：方法不存在 / 调用抛错 / 返回值不对，
+// 一律退化成「暂无数据」，页面照常能开。
+async function refreshDashboard() {
+  try {
+    const res = await api()?.get_dashboard_stats?.();
+    // ok 字段缺失也认——只要有统计内容就是有效数据。
+    State.dashboard = (res && res.ok !== false && (res.active || res.totals || res.recent))
+      ? res
+      : null;
+  } catch (err) {
+    console.error("get_dashboard_stats failed", err);
+    State.dashboard = null;
+  }
+  if (State.view === "dashboard") render();
 }
 
 async function refreshSchedules() {
@@ -3020,4 +3223,14 @@ document.addEventListener("DOMContentLoaded", () => {
     if (document.hidden) return;
     refreshTasks();
   }, 1500);
+
+  // 仪表盘单独一个慢一点的节拍。
+  //
+  // 统计要翻整个历史表，不跟下载列表共用 1.5 秒的节拍——
+  // 那个节拍是给「下载中」用的，仪表盘 3 秒刷一次足够。
+  setInterval(() => {
+    if (State.view !== "dashboard") return;
+    if (document.hidden) return;
+    refreshDashboard();
+  }, 3000);
 });

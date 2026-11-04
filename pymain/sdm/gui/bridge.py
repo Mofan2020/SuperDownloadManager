@@ -175,9 +175,67 @@ class GuiBridge:
             return
         try:
             args = json.dumps(payload, ensure_ascii=False)
-            self._window.evaluate_js(f"{func}({args})")
+            self._run_js(f"{func}({args})")
         except Exception as err:
             log.debug(CAT_GUI, f"调用前端 {func} 失败: {err}")
+
+    def _run_js(self, script: str) -> None:
+        """往前端跑一段 JS。**不用 `evaluate_js`。**
+
+        `evaluate_js` 每调一次都会往 `window._callbacks` 里塞一条
+        `uuid → None`，而同步路径（不带 callback）**永远不会删它**
+        ——只有异步 promise 的回调回来时才会 del。推送循环每 0.7 秒
+        一次，跑两天就是 24 万多条，**只增不减**，几十 MB 白扔。
+
+        `run_js` 走的是同一条 cocoa 通路，但**不碰 `_callbacks`**，
+        也没有返回值——推送本来就不需要返回值。
+
+        **别改回 `evaluate_js`。**
+        """
+        window = self._window
+        if window is None:
+            return
+        runner = getattr(window, "run_js", None)
+        if runner is None:  # 老版本 pywebview 没有 run_js
+            window.evaluate_js(script)
+            return
+        runner(script)
+
+    def _prune_pywebview_callbacks(self) -> int:
+        """清掉 pywebview `window._callbacks` 里没人认领的记录。
+
+        **这是兜底，不是主修法。** 主修法是推送走 `run_js`
+        （见 `_run_js`）。
+
+        但还有一条我们控制不了的路径：前端每次调后端 API，
+        pywebview 的 `util.js_bridge_call` 内部也会调
+        `window.evaluate_js` 把结果送回前端（util.py:264）——
+        那次调用同样留下一条永不复用的记录。前端每 1.5 秒轮询
+        一次任务列表，一天就是 5 万多条。
+
+        那条记录的特征是 **value 是 None**——同步路径就是这么写的
+        （`self._callbacks[unique_id] = callback`，callback 默认
+        None）。异步路径存的是真正的函数，删掉会打断还没回来的
+        promise 回调。
+
+        所以：**只删 value 为 None 的**，异步的那些一根手指都不碰。
+
+        返回删掉的条数。窗口没挂或者 pywebview 换了实现（没有
+        `_callbacks` 属性）就返回 0。
+        """
+        window = self._window
+        if window is None:
+            return 0
+        callbacks = getattr(window, "_callbacks", None)
+        if not isinstance(callbacks, dict):
+            return 0
+        try:
+            stale = [key for key, value in callbacks.items() if value is None]
+            for key in stale:
+                callbacks.pop(key, None)
+        except RuntimeError:  # 别的线程正在改这个 dict
+            return 0
+        return len(stale)
 
     def _emit_event(self, kind: str, payload: Any = None) -> None:
         """按契约 §3.2 推一个事件给前端。
@@ -196,7 +254,7 @@ class GuiBridge:
         try:
             kind_json = json.dumps(kind)
             payload_json = json.dumps(payload, ensure_ascii=False)
-            self._window.evaluate_js(f"sdmEvent({kind_json},{payload_json})")
+            self._run_js(f"sdmEvent({kind_json},{payload_json})")
         except Exception as err:
             # 前端没注册 sdmEvent（老页面 / 白屏）时不能把后端带崩——
             # 轮询还在，界面照样能用。
@@ -300,6 +358,14 @@ class GuiBridge:
                     self._emit_event("task_removed", {"id": task_id})
 
             self._emit_event("global_speed_updated", self._global_speed_payload(tasks))
+
+            # **顺手清一下 pywebview 的回调表。**
+            #
+            # 推送已经走 `run_js` 不漏了，但前端调后端 API 时，
+            # pywebview 内部的 `js_bridge_call` 还是会调
+            # `window.evaluate_js` —— 那条路径我们改不了，只能事后清。
+            # 详见 `_prune_pywebview_callbacks`。
+            self._prune_pywebview_callbacks()
 
             await asyncio.sleep(0.7)
 
@@ -1248,6 +1314,47 @@ class GuiBridge:
             return {"ok": True, "token": token}
         except Exception as err:
             log.warning(CAT_GUI, f"重置配对 token 失败: {err}")
+            return {"ok": False, "error": str(err)}
+
+    def install_browser_extension(self, browser_id: str) -> dict:
+        """把浏览器扩展装到持久目录，保证是最新版本。
+
+        前端「打开扩展所在位置」按钮点一下就先调这个——用户点的
+        时候往往还没装过，直接开目录会打开一个空文件夹（浏览器
+        直接拒绝加载），或者打开一份过期版本。
+
+        返回 `extension_store.ensure_persisted()` 的结果：
+        `{"ok", "path", "updated", "fingerprint", "message"}`。
+        """
+        try:
+            from ..ipc.extension_store import ensure_persisted
+
+            return ensure_persisted(browser_id)
+        except Exception as err:
+            log.warning(CAT_GUI, f"安装浏览器扩展失败: {err}")
+            return {
+                "ok": False,
+                "path": "",
+                "updated": False,
+                "fingerprint": "",
+                "message": str(err),
+            }
+
+    def get_dashboard_stats(self) -> dict:
+        """仪表盘的统计。给前端画图用。
+
+        统计口径全在 `sdm.gui.dashboard` 里（纯函数，能单测）。
+        这里只负责取数据 + 兜底——取不到就返回 `{"ok": False}`，
+        前端会显示「暂无数据」，不会白屏。
+        """
+        try:
+            from .dashboard import build_dashboard
+
+            tasks = [task.to_dict() for task in self.engine.snapshot()]
+            history = [entry.to_dict() for entry in self.history.all(limit=500)]
+            return build_dashboard(tasks, history)
+        except Exception as err:
+            log.warning(CAT_GUI, f"算仪表盘统计失败: {err}")
             return {"ok": False, "error": str(err)}
 
     def open_browser_extension_folder(self, browser_id: str) -> dict:

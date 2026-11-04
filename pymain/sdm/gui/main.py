@@ -767,7 +767,10 @@ def main(argv: list[str] | None = None) -> int:
     def on_loaded() -> None:
         """页面加载完：把初始状态推给前端。"""
         state = bridge.bootstrap()
-        window.evaluate_js(f"onBootstrap({json.dumps(state, ensure_ascii=False)})")
+        # **走 bridge 的 `_run_js`**：`evaluate_js` 会往 pywebview 的
+        # `_callbacks` 里塞一条永不回收的记录（见 bridge._run_js 的
+        # 注释）。这里虽然只跑一次，但同一个坑没必要踩。
+        bridge._run_js(f"onBootstrap({json.dumps(state, ensure_ascii=False)})")
         # 首次启动把 CLI 装进 PATH、注册 daemon。放后台线程里做——
         # launchctl 那几步要读写系统目录，不能挡着窗口起不来。
         threading.Thread(

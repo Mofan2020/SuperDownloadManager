@@ -160,8 +160,15 @@ def install_cli(resources: Path) -> dict:
     return {"ok": True, "reason": "installed", "path": str(link), "in_path": in_path}
 
 
-def _launch_agent_plist(daemon_bin: Path) -> Path:
-    agents = Path.home() / "Library" / "LaunchAgents"
+def _launch_agent_plist(daemon_bin: Path, agents_dir: Path | None = None) -> Path:
+    """写 LaunchAgent 的 plist，返回它的路径。
+
+    `agents_dir` 默认是用户真实的 `~/Library/LaunchAgents`。
+    **测试必须传临时目录**——写用户真实的目录会留下一个
+    `com.test.sdm.daemon` 之类的垃圾 plist，还会被 launchd 认走
+    （KeepAlive=true 的坏 job 会每 10 秒崩一次重启）。
+    """
+    agents = agents_dir or (Path.home() / "Library" / "LaunchAgents")
     agents.mkdir(parents=True, exist_ok=True)
     target = agents / f"{LAUNCH_AGENT_LABEL}.plist"
     payload = {
@@ -180,28 +187,54 @@ def _launch_agent_plist(daemon_bin: Path) -> Path:
     return target
 
 
-def register_daemon(resources: Path) -> dict:
-    """注册并加载 daemon 的 LaunchAgent。返回状态字典。"""
+def register_daemon(resources: Path, agents_dir: Path | None = None) -> dict:
+    """注册并加载 daemon 的 LaunchAgent。返回状态字典。
+
+    `agents_dir` 传临时目录时**不碰 launchd**——只写 plist。
+    测试用这个，别去动用户真实的 launchd 域。
+    """
     daemon_bin = resources / "sdmd-daemon" / "sdmd"
     if not daemon_bin.is_file():
         return {"ok": False, "reason": "bundle_missing_daemon", "path": ""}
 
-    target = _launch_agent_plist(daemon_bin)
+    target = _launch_agent_plist(daemon_bin, agents_dir)
+    if agents_dir is not None:
+        # 测试路径：只写 plist，不 bootstrap 到真实 launchd 域。
+        return {"ok": True, "reason": "plist_written", "path": str(target)}
+
     uid = os.getuid()
     domain = f"gui/{uid}"
 
     # launchctl 的 target 必须是 gui/<uid>/<label>。只传 label 会报
     # "Unrecognized target specifier"（exit 64）。
-    loaded = subprocess.run(
+    #
+    # **只看「有没有加载」不够——还得看加载的是哪一份 plist。**
+    # launchd 是按 label 认 job 的：同名 job 一旦加载着，
+    # `launchctl print` 就成功，哪怕它指向的是别的路径（比如
+    # 一个已经被删掉的临时目录）。这时候直接返回「已加载」，
+    # daemon 就永远注册不上，launchd 每 10 秒崩一次重启。
+    probe = subprocess.run(
         ["launchctl", "print", f"{domain}/{LAUNCH_AGENT_LABEL}"],
         capture_output=True,
-    ).returncode == 0
+        text=True,
+    )
+    loaded = probe.returncode == 0
+    # launchd 打印的 plist 路径。跟我们要注册的那份不一致 = 得重装。
+    stale = loaded and str(target) not in probe.stdout
 
     # plist 变了才重启 daemon。内容没变时 launchctl bootstrap 会
     # 报 "service already loaded"，而 kickstart 会把正在跑的
     # daemon 打断一下。
-    if loaded:
+    if loaded and not stale:
         return {"ok": True, "reason": "already_loaded", "path": str(target)}
+
+    # 加载着别的一份（路径不对）——先把它踢掉，不然 bootstrap 会
+    # 报 "service already loaded"。
+    if loaded:
+        subprocess.run(
+            ["launchctl", "bootout", f"{domain}/{LAUNCH_AGENT_LABEL}"],
+            capture_output=True,
+        )
 
     subprocess.run(
         ["launchctl", "bootout", domain, str(target)],
@@ -222,7 +255,7 @@ def register_daemon(resources: Path) -> dict:
         ["launchctl", "kickstart", "-k", f"{domain}/{LAUNCH_AGENT_LABEL}"],
         capture_output=True,
     )
-    return {"ok": True, "reason": "loaded", "path": str(target)}
+    return {"ok": True, "reason": "reloaded" if stale else "loaded", "path": str(target)}
 
 
 def _windows_appdata() -> Path:

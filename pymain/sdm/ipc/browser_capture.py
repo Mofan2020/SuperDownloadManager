@@ -6,16 +6,20 @@
 
 这个模块补的就是这一段：
 
-- **扩展目录在哪**：打包版在 `Contents/Resources/extensions/<浏览器>`，
-  源码运行时在仓库根的 `Extensions/<浏览器>`。用户要在浏览器的
-  「加载已解压的扩展程序」里选这个目录——所以路径必须能直接给出去。
+- **扩展目录在哪**：**持久目录**（`config_dir()/extensions/<浏览器>`）。
+  用户要在浏览器的「加载已解压的扩展程序」里选这个目录——所以路径
+  必须能直接给出去，而且**必须活得比应用久**。
+  包内那份（`Contents/Resources/extensions/<浏览器>`）只是素材：
+  Windows 的 onefile 会把它解到临时目录，进程一退就没了。
+  定位和安装的事交给 `extension_store`。
 - **装没装**：扫各浏览器的扩展安装目录，看有没有名字对得上的
   manifest。Safari 走 `pluginkit`（临时扩展不进普通目录）。
 - **配对 token**：Safari 没有原生消息宿主，只能手动粘；Chrome /
   Firefox 装了宿主就会自动配对。
 
-**只读，不改用户的东西。** 这个模块只回答「现在是什么状态」，
-安装动作全在 GUI 层（用户点了才做）。
+**这个模块只回答「现在是什么状态」**，不主动改用户的浏览器。
+唯一会写盘的地方是 `extension_dir()`——它保证用户要加载的那个
+目录真的存在（第一次运行时是空的，浏览器不认空目录）。
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..logging_setup import CAT_IPC, get_logger
+from . import extension_store
 
 log = get_logger()
 
@@ -36,7 +41,9 @@ log = get_logger()
 EXTENSION_NAME = "Super Download Manager"
 
 #: 打包版里扩展目录的名字（build.py 拷进 Resources 时用）。
-BUNDLE_EXTENSIONS_DIRNAME = "extensions"
+#:
+#: 真身在 `extension_store`——这里保留是为了不破坏引用它的地方。
+BUNDLE_EXTENSIONS_DIRNAME = extension_store.BUNDLE_EXTENSIONS_DIRNAME
 
 
 @dataclass(frozen=True)
@@ -78,6 +85,14 @@ BROWSERS: tuple[BrowserSpec, ...] = (
         auto_capture=True,
     ),
     BrowserSpec(
+        id="edge",
+        label="Edge",
+        dirname="Edge",
+        extensions_url="edge://extensions/",
+        needs_manual_pairing=False,
+        auto_capture=True,
+    ),
+    BrowserSpec(
         id="firefox",
         label="Firefox",
         dirname="Firefox",
@@ -106,59 +121,51 @@ def browser_spec(browser_id: str) -> BrowserSpec | None:
 # -- 扩展目录定位 ---------------------------------------------------
 
 
-def _bundle_resources() -> Path | None:
-    """打包版的资源目录。源码运行时返回 None。
+def extension_root() -> Path | None:
+    """应用包内随包分发的扩展根目录。找不到返回 None。
 
-    **Windows/Linux 的 onefile 走 `sys._MEIPASS`**——那种打包把资源
-    解到临时目录里，`sys.executable` 旁边什么都没有。
+    逐个浏览器探测 `extension_store.bundle_dir()`，取第一个命中的
+    目录的**上一级**——那就是扩展根目录（`Resources/extensions`
+    或者仓库根的 `Extensions/`）。
 
-    macOS 的 .app 走 `Contents/Resources`：onefile 打包时
-    `sys.executable` 指向的是临时解包目录里的二进制，Resources
-    根本不在那儿。
+    **不是只认 `sys._MEIPASS`。** macOS 的 onedir .app 里
+    `_MEIPASS` 指向 `Contents/Frameworks`，那儿根本没有 extensions；
+    扩展在 `Contents/Resources/extensions`。认死 `_MEIPASS` 的话，
+    整个扩展功能在 macOS 上是静默失效的。
     """
-    import sys
-
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        return Path(meipass)
-    if not getattr(sys, "frozen", False):
-        return None
-    exe = Path(sys.executable).resolve()
-    candidate = exe.parent.parent / "Resources"
-    if candidate.is_dir():
-        return candidate
+    for spec in BROWSERS:
+        directory = extension_store.bundle_dir(spec.id)
+        if directory is not None:
+            return directory.parent
     return None
 
 
-def _repo_extensions_root() -> Path | None:
-    """源码运行时仓库根的 `Extensions/`。
-
-    `sdm/ipc/browser_capture.py` → 上三级是仓库根。
-    """
-    root = Path(__file__).resolve().parents[3] / "Extensions"
-    return root if root.is_dir() else None
-
-
-def extension_root() -> Path | None:
-    """扩展根目录。找不到返回 None。"""
-    resources = _bundle_resources()
-    if resources is not None:
-        bundled = resources / BUNDLE_EXTENSIONS_DIRNAME
-        if bundled.is_dir():
-            return bundled
-    return _repo_extensions_root()
-
-
 def extension_dir(browser_id: str) -> Path | None:
-    """某个浏览器的扩展目录。"""
-    spec = browser_spec(browser_id)
-    if spec is None:
+    """某个浏览器的**持久**扩展目录——用户加载的就是这个。
+
+    返回 `config_dir()/extensions/<浏览器>`，不是包内那份：
+    Windows 的 onefile 把包内资源解到临时目录，进程一退就没了；
+    用户在浏览器里加载的是**长期指向那个目录**的扩展，得活得比
+    应用久。
+
+    目录不存在或者跟包内那份不是同一份时**顺手装上/更新**（从包内
+    复制），否则前端给的「打开扩展目录」按钮会打开一个空文件夹
+    （浏览器直接拒绝加载），或者打开的是一份过期版本。
+    装不上（包内没有这份扩展）就返回 None——让前端把按钮藏起来，
+    别给用户一个点开是空的东西。
+    """
+    if browser_spec(browser_id) is None:
         return None
-    root = extension_root()
-    if root is None:
+    target = extension_store.persistent_dir(browser_id)
+    if target is None:
         return None
-    candidate = root / spec.dirname
-    return candidate if candidate.is_dir() else None
+    persistent_fingerprint = extension_store.persisted_fingerprint(browser_id)
+    bundle_fingerprint = extension_store.bundle_fingerprint(browser_id)
+    if persistent_fingerprint is None or (
+        bundle_fingerprint and persistent_fingerprint != bundle_fingerprint
+    ):
+        extension_store.ensure_persisted(browser_id)
+    return target if target.is_dir() else None
 
 
 # -- 装没装 ---------------------------------------------------------
@@ -296,7 +303,12 @@ def native_host_installed() -> list[str]:
 
 
 def capture_info() -> dict:
-    """浏览器接管的整体状态。给 GUI 的设置页用。"""
+    """浏览器接管的整体状态。给 GUI 的设置页用。
+
+    **只读**：报告「持久目录在哪、跟包内那份是不是同一份」。
+    要装/更新由 `extension_store.ensure_persisted()` 负责——那是
+    写盘的动作，不能藏在体检里。
+    """
     from .native_host import ensure_pair_token
 
     root = extension_root()
@@ -305,7 +317,15 @@ def capture_info() -> dict:
 
     browsers: list[dict] = []
     for spec in BROWSERS:
-        directory = extension_dir(spec.id)
+        bundle = extension_store.bundle_dir(spec.id)
+        persistent = extension_store.persistent_dir(spec.id)
+        persistent_fingerprint = extension_store.persisted_fingerprint(spec.id)
+        bundle_fingerprint = extension_store.bundle_fingerprint(spec.id)
+        needs_update = bool(
+            persistent_fingerprint
+            and bundle_fingerprint
+            and persistent_fingerprint != bundle_fingerprint
+        )
         if spec.id == "safari":
             installed = is_safari_extension_installed()
         else:
@@ -317,10 +337,17 @@ def capture_info() -> dict:
                 "extensions_url": spec.extensions_url,
                 "needs_manual_pairing": spec.needs_manual_pairing,
                 "auto_capture": spec.auto_capture,
-                "extension_dir": str(directory) if directory else "",
-                "available": directory is not None,
+                # 用户要加载的是**持久目录**——包内那份在 Windows 上
+                # 是临时目录，退出就没了。
+                "extension_dir": str(persistent) if persistent else "",
+                "available": bundle is not None or persistent_fingerprint is not None,
                 "installed": installed,
                 "native_host": spec.id in hosts,
+                "persistent_dir": str(persistent) if persistent else "",
+                "bundle_dir": str(bundle) if bundle else "",
+                "fingerprint": persistent_fingerprint or "",
+                "bundle_fingerprint": bundle_fingerprint or "",
+                "needs_update": needs_update,
             }
         )
 
@@ -328,6 +355,7 @@ def capture_info() -> dict:
         "ok": True,
         "token": token,
         "extension_root": str(root) if root else "",
+        "persistent_root": str(extension_store.persistent_root()),
         "browsers": browsers,
         "host_browsers": hosts,
     }

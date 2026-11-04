@@ -798,6 +798,95 @@ body.hide-toolbar-labels .btn { width: 29px; padding: 0; }
   margin-bottom: 11px; min-width: 0;
 }
 
+/* ============ 仪表盘 ============ */
+/* 四个统计卡排成一行，窄了自动折行。 */
+.dash-wrap { padding: 14px 18px 24px; }
+.dash-stats {
+  display: grid; gap: 11px; margin-bottom: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+.dash-stat { margin-bottom: 0; display: flex; flex-direction: column; gap: 3px; }
+.dash-stat-top {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; color: var(--text-tertiary);
+}
+.dash-stat-icon {
+  display: grid; place-items: center; width: 20px; height: 20px; flex: none;
+  border-radius: var(--radius-sm); background: var(--cat-bg); color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--edge-line), inset 0 1px 0 var(--edge-outer);
+}
+.dash-stat-value { font-size: 23px; font-weight: 600; letter-spacing: -.01em; }
+.dash-stat-sub { font-size: 11px; color: var(--text-tertiary); }
+
+/* 两栏：左边分类条形图，右边累计数字。窄窗口下并成一栏。 */
+.dash-cols {
+  display: grid; gap: 18px; align-items: start;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+}
+@media (max-width: 879px) { .dash-cols { grid-template-columns: minmax(0, 1fr); } }
+
+.dash-bars { display: flex; flex-direction: column; gap: 9px; }
+.dash-bar-row {
+  display: grid; gap: 8px; align-items: center;
+  grid-template-columns: minmax(0, 92px) minmax(0, 1fr) minmax(0, auto);
+}
+.dash-bar-label {
+  display: flex; align-items: center; gap: 5px; min-width: 0;
+  font-size: 12px; color: var(--text-secondary);
+}
+.dash-bar-label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dash-bar-track {
+  height: 7px; border-radius: var(--radius-pill); background: var(--track-bg); overflow: hidden;
+  box-shadow: inset 0 0 0 0.5px rgba(13,21,38,.05);
+}
+.dash-bar-fill {
+  height: 100%; border-radius: var(--radius-pill);
+  transition: width .25s ease;
+  box-shadow: 0 0 6px -1px rgba(13,21,38,.35);
+}
+.dash-bar-value { font-size: 11px; color: var(--text-tertiary); text-align: right; white-space: nowrap; }
+
+.dash-kpis { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(78px, 1fr)); }
+.dash-kpi {
+  display: flex; flex-direction: column; gap: 2px; min-width: 0;
+  padding: 9px 10px; border-radius: var(--radius-md); background: var(--cat-bg);
+  box-shadow: inset 0 0 0 1px var(--edge-line), inset 0 1px 0 var(--edge-inner);
+}
+.dash-kpi-label { font-size: 11px; color: var(--text-tertiary); }
+.dash-kpi-value { font-size: 16px; font-weight: 600; }
+
+.dash-items { display: flex; flex-direction: column; }
+.dash-item {
+  display: grid; gap: 10px; align-items: center; padding: 8px 0;
+  grid-template-columns: 26px minmax(0, 1fr) auto auto;
+  border-bottom: 1px solid var(--edge-line);
+}
+.dash-item:last-child { border-bottom: 0; }
+.dash-item .row-cat { width: 24px; height: 24px; }
+.dash-item-main { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.dash-item-name { font-size: 12.5px; }
+.dash-item-cat { font-size: 10.5px; color: var(--text-tertiary); }
+.dash-item-size { font-size: 12px; color: var(--text-secondary); text-align: right; white-space: nowrap; }
+.dash-item-time { font-size: 11px; color: var(--text-tertiary); text-align: right; white-space: nowrap; }
+.dash-empty-note { font-size: 12px; color: var(--text-tertiary); padding: 4px 0; }
+
+/* 浏览器接管：扩展装在哪、版本新不新。路径可能很长——要能换行，
+   不能把整行撑破。 */
+.capture-detail {
+  display: flex; flex-direction: column; gap: 3px;
+  margin: 6px 0 0 0; padding-left: 2px;
+}
+.capture-detail-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.capture-detail-label {
+  flex: none; font-size: 11px; color: var(--text-tertiary); min-width: 52px;
+}
+.capture-path {
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--text-secondary);
+  min-width: 0; overflow-wrap: anywhere; word-break: break-all;
+}
+.capture-stale { font-size: 11px; color: var(--warning-strong); font-weight: 600; }
+.capture-fresh { font-size: 11px; color: var(--success); }
+
 /* ============ 模态 ============ */
 .modal-root { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 24px; }
 .modal-root[hidden] { display: none; }

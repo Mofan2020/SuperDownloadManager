@@ -5,12 +5,14 @@
 pluginkit），逻辑一错，用户照着提示做就会失败。
 
 验收要点：
-- 三个浏览器的静态信息对：Safari 必须手动配对、不能自动接管
+- 四个浏览器的静态信息对：Safari 必须手动配对、不能自动接管，
+  Edge 跟 Chrome 一样（Chromium 内核，扩展 ID 相同）
 - 「装没装」靠 manifest 里的**名字**认，不是靠扩展 ID
   （Chrome 的扩展 ID 每个开发者都不一样，靠 ID 认必然认错）
 - `.xpi`（Firefox 装好的包）是 zip，manifest 在里面
 - 重置 token 之后**旧 token 立刻作废**——不然「重新配对」是假的
 - 设置页调得到状态；Safari 没有扩展管理页时老实说没有
+- 扩展目录指向**持久位置**，并且跟包内那份的指纹对得上
 """
 
 from __future__ import annotations
@@ -27,15 +29,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from sdm.ipc import browser_capture as bc
+from sdm.ipc import extension_store as es
 from sdm.ipc import native_host as nh
 
 # -- 浏览器清单 -----------------------------------------------------
 
 
-def test_three_browsers_are_supported() -> None:
-    """Chrome / Firefox / Safari 三个都在。"""
+def test_four_browsers_are_supported() -> None:
+    """Chrome / Edge / Firefox / Safari 四个都在。"""
     ids = [spec.id for spec in bc.BROWSERS]
-    assert ids == ["chrome", "firefox", "safari"]
+    assert ids == ["chrome", "edge", "firefox", "safari"]
 
 
 def test_safari_needs_manual_pairing_and_cannot_auto_capture() -> None:
@@ -85,11 +88,27 @@ def test_extension_root_points_at_the_repository_extensions_folder() -> None:
     assert (root / "Chrome" / "manifest.json").is_file()
 
 
-@pytest.mark.parametrize("browser_id", ("chrome", "firefox", "safari"))
-def test_extension_dir_exists_for_every_browser(browser_id: str) -> None:
+@pytest.mark.parametrize("browser_id", ("chrome", "edge", "firefox", "safari"))
+def test_extension_dir_exists_for_every_browser(
+    browser_id: str, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("SDM_CONFIG_DIR", str(tmp_path / "config"))
     directory = bc.extension_dir(browser_id)
     assert directory is not None
     assert (directory / "manifest.json").is_file()
+
+
+def test_extension_dir_points_at_the_persistent_location(tmp_path: Path, monkeypatch) -> None:
+    """用户加载的是**持久目录**，不是包内那份。
+
+    包内那份在 Windows 的 onefile 里是临时目录——进程一退就没了，
+    浏览器里加载的扩展会跟着消失。
+    """
+    monkeypatch.setenv("SDM_CONFIG_DIR", str(tmp_path / "config"))
+    target = bc.extension_dir("chrome")
+    assert target is not None
+    assert target == tmp_path / "config" / "extensions" / "Chrome"
+    assert (target / "manifest.json").is_file(), "持久目录里得真的有扩展文件"
 
 
 def test_extension_root_resolves_inside_a_mac_app_bundle(tmp_path: Path, monkeypatch) -> None:
@@ -111,7 +130,9 @@ def test_extension_root_resolves_inside_a_mac_app_bundle(tmp_path: Path, monkeyp
     monkeypatch.delattr(sys, "_MEIPASS", raising=False)
 
     assert bc.extension_root() == resources / "extensions"
-    assert bc.extension_dir("chrome") == resources / "extensions" / "Chrome"
+    assert es.bundle_dir("chrome") == resources / "extensions" / "Chrome"
+    # `extension_dir` 指的是持久位置——包内那份只是素材。
+    assert bc.extension_dir("chrome") != resources / "extensions" / "Chrome"
 
 
 def test_extension_root_resolves_in_windows_onefile(tmp_path: Path, monkeypatch) -> None:
@@ -128,7 +149,9 @@ def test_extension_root_resolves_in_windows_onefile(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
 
     assert bc.extension_root() == meipass / "extensions"
-    assert bc.extension_dir("firefox") == meipass / "extensions" / "Firefox"
+    assert es.bundle_dir("firefox") == meipass / "extensions" / "Firefox"
+    # onefile 的资源在临时目录里——不能直接让用户加载那份。
+    assert bc.extension_dir("firefox") != meipass / "extensions" / "Firefox"
 
 
 # -- 装没装 ---------------------------------------------------------
@@ -206,11 +229,12 @@ def test_capture_info_shape(monkeypatch) -> None:
     assert info["ok"] is True
     assert info["token"], "配对 token 不能是空的"
     assert info["extension_root"]
+    assert info["persistent_root"], "持久目录的根要给用户看"
     hosts = info["host_browsers"]
     assert hosts == ["chrome"]
 
     browsers = info["browsers"]
-    assert [b["id"] for b in browsers] == ["chrome", "firefox", "safari"]
+    assert [b["id"] for b in browsers] == ["chrome", "edge", "firefox", "safari"]
     for entry in browsers:
         for key in (
             "id",
@@ -222,6 +246,11 @@ def test_capture_info_shape(monkeypatch) -> None:
             "available",
             "installed",
             "native_host",
+            "persistent_dir",
+            "bundle_dir",
+            "fingerprint",
+            "bundle_fingerprint",
+            "needs_update",
         ):
             assert key in entry, f"{entry.get('id')} 少了字段 {key}"
         assert entry["available"] is True
@@ -231,6 +260,48 @@ def test_capture_info_shape(monkeypatch) -> None:
     assert safari["needs_manual_pairing"] is True
     assert safari["auto_capture"] is False
     assert safari["native_host"] is False, "Safari 用不到原生消息宿主"
+
+
+def test_capture_info_reports_the_persistent_location(tmp_path: Path, monkeypatch) -> None:
+    """设置页给的扩展目录是**持久位置**，不是包内那份。
+
+    包内那份在 Windows onefile 里是临时目录——用户在那儿加载扩展，
+    应用一退扩展就没了。
+    """
+    monkeypatch.setenv("SDM_CONFIG_DIR", str(tmp_path / "config"))
+    info = bc.capture_info()
+    entry = next(b for b in info["browsers"] if b["id"] == "chrome")
+    assert entry["extension_dir"] == str(tmp_path / "config" / "extensions" / "Chrome")
+    assert entry["persistent_dir"] == entry["extension_dir"]
+    assert entry["bundle_dir"], "包内那份的位置也得报上来——更新时要用"
+
+
+def test_capture_info_flags_a_stale_persistent_copy(tmp_path: Path, monkeypatch) -> None:
+    """持久目录跟包内那份不是同一份时，`needs_update` 为 True。
+
+    用户据此知道「该更新了」——不然他加载的是一份过期扩展，
+    症状是「扩展连不上应用」，很难往版本上想。
+    """
+    monkeypatch.setenv("SDM_CONFIG_DIR", str(tmp_path / "config"))
+    stale = tmp_path / "config" / "extensions" / "Chrome"
+    stale.mkdir(parents=True)
+    (stale / "manifest.json").write_text('{"name": "旧版本"}', encoding="utf-8")
+
+    info = bc.capture_info()
+    entry = next(b for b in info["browsers"] if b["id"] == "chrome")
+    assert entry["needs_update"] is True
+    assert entry["fingerprint"] != entry["bundle_fingerprint"]
+
+
+def test_capture_info_says_no_update_when_the_copies_match(tmp_path: Path, monkeypatch) -> None:
+    """两边一致时 `needs_update` 为 False。"""
+    monkeypatch.setenv("SDM_CONFIG_DIR", str(tmp_path / "config"))
+    es.ensure_persisted("chrome")
+
+    info = bc.capture_info()
+    entry = next(b for b in info["browsers"] if b["id"] == "chrome")
+    assert entry["needs_update"] is False
+    assert entry["fingerprint"] == entry["bundle_fingerprint"]
 
 
 # -- 配对 token -----------------------------------------------------
@@ -272,7 +343,7 @@ def test_bridge_exposes_capture_info(bridge) -> None:
     info = bridge.get_browser_capture_info()
     assert info["ok"] is True
     assert info["token"]
-    assert len(info["browsers"]) == 3
+    assert len(info["browsers"]) == 4
 
 
 def test_bridge_reset_pair_token(bridge) -> None:
@@ -320,7 +391,10 @@ def test_frontend_and_bridge_agree_on_the_method_names() -> None:
         "open_browser_extension_folder",
         "open_browser_extensions_page",
     ):
-        assert f"api()?.{name}(" in app_js, f"前端没调 {name}"
+        # 前端可能写成 `api()?.name(...)`，也可能写成可选调用
+        # `api()?.name?.(...)`——两种都算调了它。
+        called = f"api()?.{name}(" in app_js or f"api()?.{name}?.(" in app_js
+        assert called, f"前端没调 {name}"
         assert hasattr(GuiBridge, name), f"桥接层没有 {name}"
 
 

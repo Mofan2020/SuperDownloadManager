@@ -80,10 +80,14 @@ def test_launch_agent_plist_sets_daemon_env(tmp_path, monkeypatch):
     daemon_bin = tmp_path / "sdmd"
     daemon_bin.write_text("#!/bin/sh\n")
 
-    # plist 写到临时目录，别碰真实路径
+    # plist 写到临时目录，别碰用户真实的路径。
+    #
+    # **写用户真实的 `~/Library/LaunchAgents` 会留下垃圾 plist，
+    # 而且 launchd 会把它当真的 job 加载**——KeepAlive=true 的坏
+    # job 每 10 秒崩一次重启，机器一直响。
     monkeypatch.setattr(bootstrap, "LAUNCH_AGENT_LABEL", "com.test.sdm.daemon")
 
-    plist_path = bootstrap._launch_agent_plist(daemon_bin)
+    plist_path = bootstrap._launch_agent_plist(daemon_bin, tmp_path / "agents")
 
     # 读回来验证（plistlib 比 PlistBuddy 稳）
     with plist_path.open("rb") as fh:

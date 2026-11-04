@@ -1842,3 +1842,81 @@ chunk = planner.take_pending()      # 互斥（popleft），独占
 
 改成 SHA-256 派生的非周期数据才测出真问题。同理，用 `find()` 定位
 错位位置时，周期数据会匹配到**任意**位置，得到的偏移全是假的。
+
+## 安装体积：辅助程序共享 GUI 的 Python runtime
+
+**问题**：.app 有 162MB。三个辅助程序（`sdm-cli` / `sdmd-daemon` /
+`native-host`）各带一份完整的 Python runtime，46 + 45 + 40 = 131MB。
+
+**做法**：辅助程序的 `_internal/` 换成指向 `../../Frameworks` 的
+**相对**软链，四个程序共用 GUI 那一份 runtime。
+
+**必须用相对路径**：.app 会被拷进 `/Applications`、塞进 DMG、换机器，
+绝对路径一换地方就断。
+
+**结果**：162MB → 98MB。三个辅助程序 131MB → 15MB。
+
+**验证**（打包后实测，不是推算）：
+
+| 程序 | 结果 |
+|---|---|
+| `sdm` | 能跑，正确报「未知子命令 `--version`」 |
+| `sdmd`（`SDM_DAEMON=1`） | 能跑，正常打印「监听中: .../sdmd.sock」 |
+| `sdmd-native-host` | 能跑，喂 ping 帧回 `{"ok": true, "pong": true}` |
+
+**共享的前提是 GUI 的 runtime 覆盖 helper 需要的一切。** 三个 helper 的
+`base_library.zip` 都是 155 个条目，跟 `Frameworks/base_library.zip`
+完全一致（缺 0 个）。`_internal` 的顶层条目只有
+`base_library.zip` / `libcrypto.3.dylib` / `libssl.3.dylib` / `Python` /
+`Python.framework` / `python3.11`，`Frameworks` 里除了
+`Python.framework` 全都有——而 PyInstaller 6 实际用
+`libpython3.11.dylib`，不用 `Python.framework`，所以三个程序都能跑。
+
+**这个前提会失效。** 以后有人给 CLI 加了个 GUI 用不到的依赖，软链
+就会在**运行时**才炸（`ModuleNotFoundError` / dlopen 失败）。
+`_verify_shared_runtime()` 在打包阶段逐文件比对，缺文件直接让构建
+失败——把运行时故障提前成构建失败。
+
+## 内存：pywebview 的回调表只增不减
+
+**症状**：常驻几天后内存涨上去。
+
+**根因**（pywebview 6.2.1，`webview/window.py:449-450`）：
+
+```python
+unique_id = uuid1().hex
+self._callbacks[unique_id] = callback
+```
+
+每次 `evaluate_js` 都往 `window._callbacks` 塞一条。**同步路径
+（不带 callback）永远不会删它**——只有 `util.py:318` 的
+`pywebviewAsyncCallback`（异步 promise 回调回来时）才会 `del`。
+
+实测代价：`_callbacks` 字典 246,000 条 = 26.3MB，**每条 112 字节**
+（32 字符的 uuid 十六进制串 + dict 条目），永不回收。
+
+推送循环 0.7 秒一轮 = 123,429 次/天 = **13.8MB/天**；前端 1.5 秒
+轮询一次任务列表也走同一条路（`util.js_bridge_call` 内部也调
+`evaluate_js`），一天又是 5 万多条。合计**约 20MB/天**。
+
+**修法**：推送走 `run_js`（同一条 cocoa 通路，但不碰 `_callbacks`，
+也没有返回值——推送本来就不需要返回值）。前端轮询那条在
+pywebview 内部，改不了，所以推送循环里顺手调
+`_prune_pywebview_callbacks()`：**只删 value 为 None 的**（同步路径
+的特征），异步 promise 的回调存的是真函数，一根手指都不碰。
+
+**验证**：用真实 pywebview `Window` 类跑，不是模拟——
+
+| 场景 | `_callbacks` 条数 |
+|---|---|
+| 5 万次 `evaluate_js` | 50,000（只增不减） |
+| 5 万次 `run_js` | 0 |
+
+**没有复现出「两天 1GB」。** 同一台机器上跑满 4 天的实例，
+`vmmap` physical footprint 稳定在 186.3 → 186.9MB（34 分钟采样，
+约 25MB/天），`leaks` 只报 19 处 / 2,656 字节的传统泄漏。按
+20MB/天算，两天涨 40MB，**不是 1GB 量级**。
+
+所以这个泄漏是真的、该修，但它**不是 1GB 那个数字的解释**。
+要么那个观察来自更早的版本，要么量的是别的东西。下次要复现得
+先问清楚：哪个进程、用什么工具量的、当时在不在下载。
