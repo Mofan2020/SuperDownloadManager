@@ -2118,3 +2118,48 @@ fd——进程退出前都不释放。`FileAssembler` 缓存句柄是为了同�
 > **测试报 ResourceWarning 不一定是测试的问题。** 这次是实现真的漏了
 > 清理。`-W error` 把警告变成错误之后才暴露出来——平时它就只是一行
 > 没人看的警告。
+
+## 教训：只在 macOS 上跑过的测试，Windows 上必炸
+
+GUI IPC 那个测试文件，本地全绿就推了。CI 的 Windows job 红了 6 个，
+全在 `test_gui_ipc_endpoint.py`。前后修了三轮才干净，每一轮都是
+新问题：
+
+**第一轮：`/tmp` 写死。** Windows 上没有这个目录，`tempfile` 建目录直接
+`FileNotFoundError`。改用 `tempfile.gettempdir()`，量一下长度，太长再退
+到 `/tmp`（Unix）或盘符根目录（Windows）。
+
+**第二轮：`socket.AF_UNIX` 不存在。** 这个常量是 Python 3.13 才加到
+Windows 的，3.11/3.12 根本没有。之前有个用例把 `is_windows` 强制成
+False，然后真的去建 AF_UNIX socket——必炸。
+
+**第三轮：我自己补的用例又犯了同样的错。** 加了个「绑失败不抛异常」的
+用例，为了造一个 bind 失败，又把 `is_windows` 改成 False。改法是直接
+把 `SocketServer` 换成会抛 OSError 的假实现，测的正是 `GUIIPCServer`
+吞不吞这个异常本身。
+
+**三个教训：**
+
+1. **平台差异要用能力判断，不是靠改个开关。** 两个平台走的是不同传输
+   （Unix 是 unix socket，Windows 是 TCP 回环）。测试里用一个抽象
+   （`_Endpoint`）盖住差异，两边各走各的真实代码路径。把 Windows 硬拗成
+   unix 分支，测出来的就是个假的东西——那个分支在 Windows 上根本走不到。
+
+2. **「造一个失败的场景」在不同平台上机制不同。** Unix 上是「路径指向
+   不存在的目录」，Windows 上是「端口已被占用」。硬造就得写两套。改成
+   直接注入失败更稳，测的也更准。
+
+3. **CI 抓到的失败值得逐个看。** 每次都以为是最后一个问题，实际后面还
+   藏着下一个。Windows job 连续三轮红，每轮都只暴露一个——因为前面的
+   失败把后面的测试挡在后面了（`ERROR at setup` 会中断夹具）。
+
+> **顺带修了一个真 bug**：`paths.gui_socket_path()` 少了 `is_windows()`
+> 判断，而 Windows 上根本没有 `os.getuid()`。配置目录路径长过 100 字节
+> 时会走到那一行，直接 AttributeError。`socket_path()` 本来就有这个判断，
+> 是漏了。
+
+> **查 CI 日志别用 `gh run view --job`。** 同名的 job（`Test (Python
+> 3.11)` 在三个 OS 上各有一个）返回的是同一份日志——我读了半天，看到
+> 的「898 passed」其实是 macOS 的。正确做法是
+> `gh api --allow-escape-sequences repos/<owner>/<repo>/actions/jobs/<id>/logs`，
+> 用 job id 直接取。
