@@ -43,6 +43,7 @@ import pytest
 
 from sdm import paths
 from sdm.engine.download_engine import DownloadEngine
+from sdm.gui.ipc_host import GUIIPCServer
 from sdm.ipc import client as ipc_client
 from sdm.ipc.dispatcher import Dispatcher
 from sdm.ipc.protocol import IPCRequest
@@ -297,10 +298,17 @@ def test_client_prefers_gui_socket_over_daemon(
     assert candidates[1].path == str(daemon_sock)
 
 
+@needs_unix_socket
 def test_client_falls_back_to_daemon_when_gui_is_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """GUI 没跑的时候退回 daemon，不报错。"""
+    """GUI 没跑的时候退回 daemon，不报错。
+
+    **Windows 上没有 unix socket。** `socket.AF_UNIX` 在 Windows 的
+    Python 3.11/3.12 里根本不存在（3.13 才加），所以这里只能跑
+    Unix 分支；Windows 的回退由 `test_windows_cli.py` 里的
+    `test_client_falls_back_to_daemon_when_gui_is_down` 覆盖。
+    """
     monkeypatch.setattr(paths, "is_windows", lambda: False)
     # socket 路径要短——AF_UNIX 有 104 字节上限。
     with _short_tmp_dir("sdm-fb-") as tmp:
@@ -328,6 +336,89 @@ def test_gui_socket_path_is_a_unix_path() -> None:
     result = paths.gui_socket_path()
     assert "npipe" not in result
     assert result.endswith(".sock")
+
+
+@needs_unix_socket
+def test_gui_ipc_server_uses_the_gui_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`GUIIPCServer` 真的绑在 GUI 那个端点上。
+
+    **不能只测 `SocketServer`。** `GUIIPCServer` 才是 GUI 进程里
+    真正跑的那个类——它负责把请求丢到引擎自己的事件循环上。绕开
+    它测底下的 `SocketServer`，测的就不是生产路径了。
+
+    **socket 路径要短。** pytest 的 tmp_path 光目录就 90 多字节，
+    bind 直接抛 "AF_UNIX path too long"——而 `GUIIPCServer.start()`
+    把这个异常吞了（绑不上不能挡 GUI 启动），所以症状是「端点没起来」
+    而不是报错，更难查。
+    """
+    with _short_tmp_dir("sdm-host-") as tmp:
+        sock_path = Path(tmp) / "gui.sock"
+        monkeypatch.setattr(paths, "is_windows", lambda: False)
+        monkeypatch.setattr(paths, "gui_socket_path", lambda: str(sock_path))
+
+        loop = asyncio.new_event_loop()
+        engine = DownloadEngine()
+
+        # 引擎跑在自己的事件循环里（跟真实 GUI 一样）。不跑起来，
+        # `run_coroutine_threadsafe` 排进去的协程永远不会被执行。
+        def _run() -> None:
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+
+        server = GUIIPCServer(engine, loop)
+        try:
+            server.start()
+            assert sock_path.exists(), "端点没起来——socket 文件都没建出来"
+
+            # CLI 能连上
+            client = ipc_client.IPCClient(path=str(sock_path))
+            response = client.send({"id": "q", "method": "ping"})
+            assert response["ok"] is True, f"连不上 GUI 端点: {response}"
+
+            # 而且连的是 GUI 那个引擎
+            added = client.send({
+                "id": "a1",
+                "method": "add",
+                "params": {"url": "https://example.com/host.zip"},
+            })
+            assert added["ok"] is True, added
+            listed = client.send({"id": "l1", "method": "list"})
+            urls = [t.get("url") for t in listed["result"]]
+            assert "https://example.com/host.zip" in urls, urls
+        finally:
+            server.stop()
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=5)
+            loop.close()
+
+
+def test_gui_ipc_server_bind_failure_does_not_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """端点绑不上不能挡 GUI 启动。
+
+    端口被占、socket 路径太长、权限不够——这些都不该让用户开不了
+    窗口。CLI 会自动退回 daemon，功能不丢。
+    """
+    monkeypatch.setattr(paths, "is_windows", lambda: False)
+    # 路径指向一个不存在的目录，bind 一定失败
+    monkeypatch.setattr(
+        paths, "gui_socket_path", lambda: str(tmp_path / "no" / "such" / "dir" / "g.sock")
+    )
+
+    loop = asyncio.new_event_loop()
+    server = GUIIPCServer(DownloadEngine(), loop)
+    try:
+        # 不抛异常就是过了
+        server.start()
+    finally:
+        server.stop()
+        loop.close()
 
 
 @needs_unix_socket
