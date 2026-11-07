@@ -25,6 +25,7 @@ from ..ipc.dispatch_server import DispatchServer
 from ..logging_setup import CAT_GUI, get_logger
 from ..settings import SettingsStore
 from .bridge import GuiBridge
+from .ipc_host import GUIIPCServer
 
 log = get_logger()
 
@@ -578,6 +579,20 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as err:
         log.warning(CAT_GUI, f"扩展 dispatch 服务启动失败（浏览器接管不可用）: {err}")
 
+    # GUI 托管的命令行端点。
+    #
+    # **跟 daemon 的端点不是一回事。** daemon 有自己的引擎，GUI 也
+    # 有自己的引擎——两个进程两份任务表。命令行加的任务进了 daemon
+    # 的话，GUI 的列表里根本看不到，用户会以为命令没生效。
+    #
+    # GUI 自己开一个端点，CLI 优先连它：任务直接进 GUI 这个引擎，
+    # 界面立刻可见。GUI 没跑的时候 CLI 退回 daemon。
+    #
+    # **绑不上不挡启动**——端口被占之类的问题只影响命令行可见性，
+    # 不影响 GUI 本身。GUIIPCServer 自己吞这个异常。
+    gui_ipc = GUIIPCServer(engine, engine_loop)
+    gui_ipc.start()
+
     # 剪贴板监听
     #
     # **无条件起线程。** 「开不开」由监听线程自己每轮读设置决定
@@ -891,6 +906,7 @@ def main(argv: list[str] | None = None) -> int:
         _remove_resident_entries()
         clipboard.stop()
         dispatch.stop()
+        gui_ipc.stop()
         try:
             engine_loop.call_soon_threadsafe(engine_loop.stop)
         except RuntimeError:
@@ -993,6 +1009,7 @@ def main(argv: list[str] | None = None) -> int:
         _remove_resident_entries()
         clipboard.stop()
         dispatch.stop()
+        gui_ipc.stop()
         try:
             engine_loop.call_soon_threadsafe(engine_loop.stop)
         except RuntimeError:

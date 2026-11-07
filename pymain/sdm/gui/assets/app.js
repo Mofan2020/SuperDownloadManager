@@ -15,10 +15,14 @@ const State = {
   schedules: [],
   siteRules: [],
   settings: {},
-  view: "downloads",
+  // 默认视图是仪表盘（首页）——应用一打开就该先看到「现在在干什么」，
+  // 而不是一份空荡荡的下载列表。
+  view: "dashboard",
   filter: "all",
   categoryFilter: null,
   selectedTaskId: null,
+  // 从仪表盘的「最近完成」点进历史时要高亮的那一条（history 条目的 id）。
+  historyHighlightId: null,
   expandedChunks: null,
   clipboardCandidate: null,
   showToolbarLabels: true,
@@ -316,6 +320,17 @@ function renderSidebar() {
   const nav = document.getElementById("sidebarNav");
   clear(nav);
 
+  // 首页（仪表盘）单独一组，排在最上面。
+  //
+  // **它现在是应用的首页**——启动就停在这儿，所以不能埋在「其它」
+  // 分组里，得跟下载列表平级、且在所有分组之前。
+  nav.appendChild(el("div", { class: "nav-group-label", text: t("sidebarHome") }));
+  nav.appendChild(el("button", {
+    class: "nav-item" + (State.view === "dashboard" ? " active" : ""),
+    title: t("sidebarDashboard"),
+    onclick: () => { State.filter = "all"; State.categoryFilter = null; setView("dashboard"); },
+  }, [icon("gauge"), el("span", { class: "nav-text", text: t("sidebarDashboard") })]));
+
   const counts = {
     all: State.tasks.length,
     downloading: State.tasks.filter((x) => x.state === "downloading").length,
@@ -324,6 +339,10 @@ function renderSidebar() {
     completed: State.tasks.filter((x) => x.state === "completed").length,
     failed: State.tasks.filter((x) => x.state === "failed").length,
   };
+
+  // 下载状态筛选。分组标签是首页上提之后加的——不然这一排状态项
+  // 看起来像是首页分组的一部分。
+  nav.appendChild(el("div", { class: "nav-group-label", text: t("sidebarStatus") }));
 
   SIDEBAR_ITEMS.forEach((item) => {
     const btn = el("button", {
@@ -362,7 +381,6 @@ function renderSidebar() {
   // 其它
   nav.appendChild(el("div", { class: "nav-group-label", text: t("sidebarOther") }));
   [
-    { id: "dashboard", icon: "gauge",   key: "sidebarDashboard" },
     { id: "history",  icon: "clock",   key: "sidebarHistory" },
     { id: "schedule", icon: "alarm",   key: "sidebarSchedule" },
   ].forEach((item) => {
@@ -1479,8 +1497,17 @@ function renderHistory() {
     ])]),
   ]);
   const tbody = el("tbody");
+  let highlightedAny = false;
   State.history.forEach((entry) => {
-    tbody.appendChild(el("tr", {}, [
+    // 从首页点进来的那一条要高亮一下。用户是从「最近完成」
+    // 点过来的，眼睛找的是刚才点的那一行——高亮一下省得
+    // 在几十条历史里翻。
+    const highlighted = State.historyHighlightId && entry.id === State.historyHighlightId;
+    if (highlighted) highlightedAny = true;
+    tbody.appendChild(el("tr", {
+      class: highlighted ? "row-highlight" : null,
+      dataset: highlighted ? { historyHighlight: "1" } : null,
+    }, [
       el("td", {}, [
         el("div", { class: "trunc", text: entry.filename }),
         el("div", { class: "trunc row-sub", text: entry.url }),
@@ -1504,17 +1531,148 @@ function renderHistory() {
       ]),
     ]));
   });
+  // 高亮用过一次就清掉——下次进历史页不该还带着旧的高亮。
+  //
+  // **只在真的高亮到了才清。** 数据还没到（第一次进历史页，
+  // `State.history` 还是空的）就清掉的话，高亮请求就丢了——
+  // 等数据到了也没东西可高亮。
+  if (highlightedAny) {
+    State.historyHighlightId = null;
+  }
   table.appendChild(tbody);
   view.appendChild(el("div", { class: "table-wrap" }, [table]));
 }
 
-// ============ 仪表盘 ============
+// ============ 仪表盘（首页） ============
 
 // 数据来自后端 get_dashboard_stats()——后端把引擎快照和历史揉成
 // 一张表，前端只管画。后端方法还没接上时 State.dashboard 是 null，
 // 界面显示「暂无数据」，不报错、不刷屏。
-function dashStatTile(iconName, labelKey, value, sub) {
-  return el("div", { class: "card dash-stat" }, [
+
+// 首页的快速添加区。**整个页面共用一个 DOM 节点**——
+//
+// 用户在输入框里打了一半的链接，界面因为别的原因重画一次
+// （统计刷新、切页面回来），输入框里的字不能丢。重新 new 一个
+// 输入框 = 用户白打一遍。
+//
+// 所以这里缓存 DOM，render 时把它摘下来再挂回去。
+let _dashQuick = null;
+
+// 仪表盘的空态块。同样的理由——空态里也有快速添加区，
+// 快速添加区是共用的那一块。
+let _dashEmpty = null;
+
+// 快速添加区：URL 输入框 + 添加按钮 + 错误行。
+//
+// **只有 URL 一个字段。** 完整的选项（分类、目录、请求头、代理）
+// 在「添加任务」对话框里。首页要的是「贴个链接就走」——
+// 一步到位，不是把用户领到另一个界面再填一遍。
+function quickAddRegion() {
+  if (_dashQuick) return _dashQuick;
+
+  const input = el("input", {
+    class: "input dash-quick-input",
+    placeholder: "https://example.com/file.zip",
+  });
+  const error = el("div", { class: "dash-quick-error" });
+  // 属性直接设在节点上，不走 setAttribute——两种方式在 DOM 里
+  // 等价，但直接设属性在假 DOM 里也一致（测试要读 `.hidden`）。
+  error.hidden = true;
+  const button = el("button", {
+    class: "btn btn-primary",
+    onclick: async () => { await submitQuickAdd(); },
+  }, [el("span", { class: "btn-label", text: t("dashboardQuickAdd") })]);
+
+  // 回车直接提交——从浏览器复制链接过来的人习惯直接回车。
+  input.addEventListener("keydown", async (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      await submitQuickAdd();
+    }
+  });
+
+  const node = el("div", { class: "dash-quick" }, [
+    el("div", { class: "dash-quick-row" }, [
+      el("div", { class: "dash-quick-label", text: t("dashboardQuickTitle") }),
+      input,
+      button,
+    ]),
+    error,
+  ]);
+
+  _dashQuick = { node, input, error, button };
+  return _dashQuick;
+}
+
+// 提交快速添加。
+//
+// **成功后跳到下载列表**——任务已经建了，用户最想看到的是它
+// 在跑、在跑多快。停在首页不动的话，用户会以为没点上，
+// 于是再点一次——那就变成两个任务了。
+async function submitQuickAdd() {
+  const region = quickAddRegion();
+  const url = (region.input.value || "").trim();
+  region.error.textContent = "";
+  region.error.hidden = true;
+  if (!url) {
+    region.error.textContent = t("dashboardQuickNeedUrl");
+    region.error.hidden = false;
+    return;
+  }
+
+  const res = await api()?.create_task(url, {});
+  if (!res || !res.ok) {
+    region.error.textContent = (res && res.error) || t("commonFailed");
+    region.error.hidden = false;
+    return;
+  }
+
+  region.input.value = "";
+  toast(t("dashboardQuickAdded"));
+  goDownloads();
+}
+
+// 跳到下载列表。统计卡、分类条形图都用它。
+function goDownloads(filter, category) {
+  State.filter = filter || "all";
+  State.categoryFilter = category || null;
+  setView("downloads");
+}
+
+// 跳到历史。统计卡和「最近完成」用它。
+//
+// **先把历史拉最新再切。** `setView("history")` 里的
+// `refreshHistory()` 是异步的、没等它——`render()` 会先跑，用的是
+// 上一次的 `State.history`。用户第一次进历史页的话，那份数据根本
+// 是空的，刚点的那一条不在里面，高亮就丢了。
+async function goHistory(highlightId) {
+  State.historyHighlightId = highlightId || null;
+  if (highlightId) {
+    await refreshHistory();
+  }
+  setView("history");
+}
+
+// 统计卡。
+//
+// **能点。** 统计的意义是「看完之后去做点什么」——
+// 点「正在下载」就该看到那些任务，点「今日完成」就该看到历史。
+// 不能点的统计卡只是一张图片。
+//
+// opts 里可以带：
+// - `stat`   —— 标记用的 key（测试和样式都靠它定位这张卡）
+// - `title`  —— 悬停提示，说清楚点了会发生什么
+// - `onclick`—— 点击后跳到哪
+function dashStatTile(iconName, labelKey, value, sub, opts) {
+  const options = opts || {};
+  const attrs = { class: "card dash-stat" };
+  if (options.stat) attrs.dataset = { dashStat: options.stat };
+  if (options.onclick) {
+    attrs.class += " dash-stat-clickable";
+    attrs.onclick = options.onclick;
+  }
+  if (options.title) attrs.title = options.title;
+  return el("div", attrs, [
     el("div", { class: "dash-stat-top" }, [
       el("span", { class: "dash-stat-icon" }, [icon(iconName, "icon-sm")]),
       el("span", { text: t(labelKey) }),
@@ -1529,13 +1687,23 @@ function renderDashboard() {
   const prevScrollTop = captureScrollTop(view);
   clear(view);
 
+  const region = quickAddRegion();
   const data = State.dashboard;
+
+  // 没有数据时的空态。**快速添加区放在空态里面**——
+  // 「什么都没有」正是最需要「加点什么」的时候，
+  // 让用户看见一个空页面加一句「暂无数据」是没用的。
   if (!data) {
-    view.appendChild(el("div", { class: "empty" }, [
-      el("div", { class: "empty-icon" }, [icon("gauge", "icon-xl")]),
-      el("div", { class: "empty-title", text: t("dashboardNoData") }),
-      el("div", { class: "empty-hint", text: t("dashboardNoDataHint") }),
-    ]));
+    if (!_dashEmpty) {
+      _dashEmpty = el("div", { class: "empty dash-empty" }, [
+        el("div", { class: "empty-icon" }, [icon("gauge", "icon-xl")]),
+        el("div", { class: "empty-title", text: t("dashboardNoData") }),
+        el("div", { class: "empty-hint", text: t("dashboardNoDataHint") }),
+      ]);
+    }
+    clear(_dashEmpty);
+    _dashEmpty.appendChild(region.node);
+    view.appendChild(_dashEmpty);
     return;
   }
 
@@ -1547,12 +1715,48 @@ function renderDashboard() {
 
   const wrap = el("div", { class: "list-wrap dash-wrap" });
 
+  // -- 快速添加 ----------------------------------------------------
+  // 放在最上面。首页的第一件事是「加任务」，不是「看统计」。
+  wrap.appendChild(region.node);
+
   // -- 四个统计卡 --------------------------------------------------
   wrap.appendChild(el("div", { class: "dash-stats" }, [
-    dashStatTile("download", "dashboardStatActive", String(active.count || 0), t("dashboardUnitTasks")),
-    dashStatTile("gauge", "dashboardStatSpeed", fmtRate(active.speed || 0), t("dashboardSpeedSub")),
-    dashStatTile("layers", "dashboardStatTodayBytes", fmtSize(today.bytes || 0), t("dashboardTodaySub")),
-    dashStatTile("check", "dashboardStatTodayCount", String(today.downloads || 0), t("dashboardUnitTasks")),
+    dashStatTile(
+      "download", "dashboardStatActive", String(active.count || 0),
+      t("dashboardUnitTasks"),
+      {
+        stat: "active",
+        title: t("dashboardStatActiveHint"),
+        onclick: () => goDownloads("downloading"),
+      },
+    ),
+    dashStatTile(
+      "gauge", "dashboardStatSpeed", fmtRate(active.speed || 0),
+      t("dashboardSpeedSub"),
+      {
+        stat: "speed",
+        title: t("dashboardStatSpeedHint"),
+        onclick: () => goDownloads("downloading"),
+      },
+    ),
+    dashStatTile(
+      "layers", "dashboardStatTodayBytes", fmtSize(today.bytes || 0),
+      t("dashboardTodaySub"),
+      {
+        stat: "todayBytes",
+        title: t("dashboardStatTodayBytesHint"),
+        onclick: () => goHistory(),
+      },
+    ),
+    dashStatTile(
+      "check", "dashboardStatTodayCount", String(today.downloads || 0),
+      t("dashboardUnitTasks"),
+      {
+        stat: "todayCount",
+        title: t("dashboardStatTodayCountHint"),
+        onclick: () => goHistory(),
+      },
+    ),
   ]));
 
   // -- 分类统计 + 累计统计 -----------------------------------------
@@ -1563,7 +1767,13 @@ function renderDashboard() {
         const meta = CATEGORY_META[catId] || CATEGORY_META.other;
         const bytes = Number(item.bytes) || 0;
         const percent = maxBytes > 0 ? Math.max(2, Math.round((bytes / maxBytes) * 100)) : 0;
-        return el("div", { class: "dash-bar-row" }, [
+        // **分类行能点。** 点了就去看这个分类下的下载。
+        return el("div", {
+          class: "dash-bar-row dash-bar-clickable",
+          dataset: { dashCategory: catId },
+          title: t("dashboardCategoryHint"),
+          onclick: () => goDownloads("all", catId),
+        }, [
           el("div", { class: "dash-bar-label" }, [
             icon(meta.icon, "icon-sm"),
             el("span", { text: categoryLabel(catId) }),
@@ -1607,7 +1817,13 @@ function renderDashboard() {
   const recentRows = recent.length
     ? recent.map((item) => {
         const meta = CATEGORY_META[item.category] || CATEGORY_META.other;
-        return el("div", { class: "dash-item" }, [
+        // **条目能点。** 点了跳到历史，并记住要高亮哪一条——
+        // 用户从首页点进来，要能直接看到自己刚点的那个。
+        return el("div", {
+          class: "dash-item dash-item-clickable",
+          dataset: { dashRecent: item.id },
+          onclick: () => goHistory(item.id),
+        }, [
           el("span", { class: "row-cat", style: `color:${meta.color}` }, [icon(meta.icon)]),
           el("div", { class: "dash-item-main" }, [
             el("div", { class: "dash-item-name trunc", text: item.filename || "" }),

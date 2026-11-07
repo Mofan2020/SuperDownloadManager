@@ -150,7 +150,7 @@ def test_a_chunk_is_never_held_by_two_workers_at_once(slow_server, tmp_path):
     original = HTTPDownloader.download_chunk
 
     async def traced(self, url, chunk, assembler, progress=None, headers=None,
-                     limiter=None, use_range=True):
+                     limiter=None, use_range=True, on_transient_error=None):
         with lock:
             concurrent[chunk.id] = concurrent.get(chunk.id, 0) + 1
             if concurrent[chunk.id] > 1:
@@ -159,7 +159,7 @@ def test_a_chunk_is_never_held_by_two_workers_at_once(slow_server, tmp_path):
                 )
         try:
             return await original(self, url, chunk, assembler, progress,
-                                  headers, limiter, use_range)
+                                  headers, limiter, use_range, on_transient_error)
         finally:
             with lock:
                 concurrent[chunk.id] -= 1

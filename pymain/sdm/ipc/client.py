@@ -3,6 +3,14 @@
 对应 Swift 版 CLI/SDMDM.swift 里的 UDSClient。
 
 Windows 没有 Unix socket，用 TCP 回环端口。
+
+**两个端点，不是一个。** GUI 跑着的时候它自己也托管一个 IPC 端点
+（用的是同一个引擎），GUI 没跑的时候才是 daemon。客户端优先连
+GUI 的端点——连上了，CLI 加的任务直接进 GUI 的引擎，界面上立刻
+可见；连不上再退回 daemon。
+
+这不是「多一个备用端口」，是**同一个引擎的两个入口**：GUI 里的
+引擎和 daemon 里的引擎是两个不同的对象，任务进了谁就归谁管。
 """
 
 from __future__ import annotations
@@ -13,7 +21,7 @@ from pathlib import Path
 
 from .. import paths
 from ..logging_setup import get_logger
-from ..version import SOCKET_PORT_WINDOWS
+from ..version import GUI_CLI_PORT_WINDOWS, SOCKET_PORT_WINDOWS
 
 log = get_logger()
 
@@ -31,13 +39,26 @@ class ClientError(Exception):
 
 
 class IPCClient:
-    """IPC 客户端。一次调用 = 一次请求 + 一次响应。"""
+    """IPC 客户端。一次调用 = 一次请求 + 一次响应。
+
+    **默认先连 GUI 的端点，连不上再连 daemon。**
+
+    GUI 跑着的时候它自己托管一个端点，用的是 GUI 那个引擎。命令
+    行加的任务进了它，界面上立刻可见——这是「命令行加的任务在
+    GUI 里看得到」的唯一实现方式。GUI 没跑的时候退回 daemon，
+    命令照样能加任务。
+
+    显式传了 `path` 或 `port` 就只连那一个端点（测试、多实例
+    场景用）。
+    """
 
     def __init__(self, path: str | None = None, port: int | None = None, timeout: float = 30.0) -> None:
         self.path = path or paths.socket_path()
         self.port = port
         self.timeout = timeout
         self._is_windows = paths.is_windows()
+        #: 显式指定了端点就不做 fallback——调用方要的就是这一个。
+        self._explicit = path is not None or port is not None
 
     def send(self, payload: dict) -> dict:
         """发一个请求，返回解析后的响应字典。"""
@@ -49,6 +70,52 @@ class IPCClient:
             raise ClientError(f"响应解析失败: {err}") from err
 
     def _exchange(self, payload: bytes) -> str:
+        """按优先级依次尝试端点。"""
+        errors: list[str] = []
+        for client in self._candidates():
+            try:
+                return client._exchange_one(payload)
+            except ClientError as err:
+                errors.append(f"{client.describe()}: {err}")
+        raise ClientError("；".join(errors) or "没有可用的 IPC 端点")
+
+    def describe(self) -> str:
+        """这个端点的位置。给错误信息用。
+
+        **错误信息里必须说清是哪个端点。** 两个端点都试过了，用户
+        看到「连接失败」不知道该看哪个端口——GUI 端点是 7957，
+        daemon 端点是 7956，差一位数字。
+        """
+        if self._is_windows:
+            return f"127.0.0.1:{self.port or SOCKET_PORT_WINDOWS}"
+        return self.path
+
+    def _candidates(self) -> list[IPCClient]:
+        """要依次尝试的客户端。GUI 优先，daemon 兜底。"""
+        if self._explicit:
+            return [self]
+
+        gui = self._gui_client()
+        daemon = self._daemon_client()
+        if gui is None:
+            return [daemon]
+        return [gui, daemon]
+
+    def _gui_client(self) -> IPCClient | None:
+        """GUI 那个端点的客户端。GUI 没跑就返回 None（不报错）。"""
+        try:
+            if self._is_windows:
+                return IPCClient(port=GUI_CLI_PORT_WINDOWS, timeout=self.timeout)
+            return IPCClient(path=paths.gui_socket_path(), timeout=self.timeout)
+        except Exception:
+            return None
+
+    def _daemon_client(self) -> IPCClient:
+        if self._is_windows:
+            return IPCClient(port=self.port or SOCKET_PORT_WINDOWS, timeout=self.timeout)
+        return IPCClient(path=self.path, timeout=self.timeout)
+
+    def _exchange_one(self, payload: bytes) -> str:
         if self._is_windows:
             return self._exchange_tcp(payload)
         return self._exchange_unix(payload)

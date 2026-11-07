@@ -504,7 +504,9 @@ html, body { height: 100%; margin: 0; overflow: hidden; }
 │ o  Super Download  │  ← .sidebar-head  h=44px, padding 0 12px
 │    Manager         │     折叠态(XS)只显示 28px 应用图标
 ├────────────────────┤
-│ 活动               │  ← .sidebar-section-title  h=26px, 11px 大写 tertiary
+│ 首页               │  ← .sidebar-section-title  h=26px, 11px 大写 tertiary
+│  ◔ 仪表盘          │  ← .sidebar-item  h=30px  [i-gauge]
+│ 下载状态           │
 │  - 全部下载      3 │  ← .sidebar-item  h=30px  [i-list]
 │  # 下载中        2 │                          [i-download]
 │  - 排队中        1 │                          [i-clock]
@@ -527,7 +529,7 @@ html, body { height: 100%; margin: 0; overflow: hidden; }
 └────────────────────┘
 ```
 
-> 上图中的 `o` `#` `-` `=` `^` `$` `>` `@` `v` `x` `!` 只是 **ASCII 占位符**，实际渲染时全部替换为 §4.23 的 Feather SVG 图标（方括号内即对应的 `id`）。**规范内任何位置都不使用 emoji 字符作为界面图标** —— 占位符仅用于本 ASCII 示意图。
+> 上图中的 `o` `#` `-` `=` `^` `$` `>` `@` `v` `x` `!` `◔` `↻` `@` 只是 **ASCII 占位符**，实际渲染时全部替换为 §4.23 的 Feather SVG 图标（方括号内即对应的 `id`）。**规范内任何位置都不使用 emoji 字符作为界面图标** —— 占位符仅用于本 ASCII 示意图。
 
 尺寸：
 - `.sidebar-item`：`height: 30px; padding: 0 10px; border-radius: 8px; margin: 0 8px; gap: 10px;`
@@ -535,8 +537,15 @@ html, body { height: 100%; margin: 0; overflow: hidden; }
 - 计数徽章：`min-width: 20px; height: 18px; padding: 0 6px; border-radius: 999px; background: var(--neutral-soft); color: var(--text-secondary); font: var(--text-micro);` 计数为 0 时不渲染徽章，但失败项为 0 时改为淡红点 `2px` 圆点以示警示。
 - 选中态：`background: var(--accent-soft); color: var(--accent); font-weight: 500;` + 左侧 3px 圆角条 `::before { content:''; position:absolute; left:-8px; top:6px; bottom:6px; width:3px; border-radius:0 3px 3px 0; background:var(--accent); }`（`position: relative` 于 item）。
 - 悬停态：`background: rgba(15,23,42,0.05)`（暗色 `rgba(255,255,255,0.06)`）。
-- 分区标题：11px / 600 / 字距 0.04em / `--text-tertiary` / 大写（仅英文；中文不转大写）/ padding `8px 18px 4px`。三个分组标题固定为 **活动 / 按分类 / 其他**。
+- 分区标题：11px / 600 / 字距 0.04em / `--text-tertiary` / 大写（仅英文；中文不转大写）/ padding `8px 18px 4px`。分组标题固定为 **首页 / 下载状态 / 按分类 / 其他**。
 - 侧栏顶部 44px 与底 40px 用 `position: sticky` 固定，中间列表滚动。
+
+**「首页」组只有一项：仪表盘。** 仪表盘是应用的启动页（默认视图），
+所以它排在所有分组之前——不是「其它」里的一个条目。用户打开应用
+第一眼看到的是「现在在干什么」，不是一个空的下载列表。
+
+「下载状态」组是原来的「活动」组改名。改名是因为「活动」跟
+「首页」放在一起会歧义（首页也是活动的一部分）。
 
 #### 2.2.2 侧栏折叠（用户手动）
 
@@ -1380,6 +1389,63 @@ X=0                                            窗口右边缘
 - 标题：22px/600 `--text-primary`。
 - 说明：13px `--text-secondary`，`max-width: 420px`，`text-align: center`。
 - 提示行：11px `--text-tertiary`。
+
+### 4.11.1 仪表盘（首页）
+
+仪表盘是应用的**默认视图**——启动就停在这儿。它有三块内容：
+顶部的快速添加区、四张统计卡、以及分类/累计/最近完成三块数据。
+
+#### 快速添加区
+
+```
+┌────────────────────────────────────────────────────────┐
+│  添加下载链接  [ https://example.com/file.zip ]  [添加] │
+└────────────────────────────────────────────────────────┘
+```
+
+```css
+.dash-quick {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-bottom: 16px; padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: var(--cat-bg);
+  box-shadow: inset 0 0 0 1px var(--edge-line), inset 0 1px 0 var(--edge-inner);
+}
+.dash-quick-row { display: flex; gap: 9px; align-items: center; }
+.dash-quick-label { font-size: 12px; color: var(--text-secondary); white-space: nowrap; flex: none; }
+.dash-quick-input { flex: 1 1 auto; min-width: 0; }
+.dash-quick-error { font-size: 11.5px; color: var(--danger); }
+```
+
+- **只有一个 URL 字段。** 分类、目录、请求头、代理这些在「添加任务」
+  对话框里。首页要的是「贴个链接就走」——一步到位，不是把用户领到
+  另一个界面再填一遍。
+- 回车提交（从浏览器复制链接过来的人习惯直接回车）。
+- 提交成功后**跳到下载列表**：任务已经建了，用户最想看到的是它在跑。
+  停在首页不动的话，用户会以为没点上，于是再点一次——那就变成两个
+  任务了。
+- 提交失败时错误信息显示在输入框下方，不弹 toast——输入框旁边
+  才是用户眼睛盯着的地方。
+- **这个 DOM 节点在整个页面生命周期里是同一个。** 统计刷新、页面
+  切换都不重建它——用户在输入框里打了一半的链接不能丢。
+
+#### 统计卡
+
+四张卡：正在下载、当前速度、今日已下载、今日完成。
+
+- **每张都能点**，点了跳到对应的列表：
+  - 正在下载 / 当前速度 → 下载列表，筛选「下载中」
+  - 今日已下载 / 今日完成 → 历史
+- 能点的元素必须给悬停反馈（`cursor: pointer` + 背景色变化）。不给
+  反馈的话用户不知道这能点，点了以为是坏了。
+- `title` 属性说明点了会发生什么（「查看正在下载的任务」）。
+
+#### 分类条形图与最近完成
+
+- **分类行能点**：点了跳到下载列表并按该分类筛选。
+- **最近完成的条目能点**：跳到历史，并高亮刚点的那一行（高亮在下次
+  重画时消失）。用户从首页点进来，眼睛找的是刚才点的那一行——
+  不高亮的话得在几十条历史里翻。
 
 ### 4.12 弹层（modal）
 

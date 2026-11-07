@@ -98,6 +98,24 @@ def socket_path() -> str:
     return path
 
 
+def gui_socket_path() -> str:
+    """GUI 托管的 CLI 端点（macOS / Linux）。
+
+    **跟 daemon 的 socket 是两个端点。** CLI 先试这个，连不上再退
+    回 daemon 的——GUI 跑着的时候任务进 GUI 的引擎，界面上立刻可见。
+
+    unix socket 的路径有长度上限（同 `socket_path()`）。超了退回
+    `/tmp/sdm-gui-<uid>.sock`。
+    """
+    override = os.environ.get("SDM_GUI_SOCKET")
+    if override:
+        return override
+    path = str(config_dir() / "sdm-gui.sock")
+    if len(path.encode("utf-8")) >= 100:
+        return f"/tmp/sdm-gui-{os.getuid()}.sock"
+    return path
+
+
 def settings_path() -> Path:
     return config_dir() / "settings.json"
 

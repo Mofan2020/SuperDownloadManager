@@ -61,6 +61,39 @@ def _windows_daemon_command(daemon_exe: Path) -> str:
     return f'cmd /c set SDM_DAEMON=1&&"{daemon_exe}"'
 
 
+def _windows_task_mentions_daemon(task_name: str, daemon_exe: Path) -> bool:
+    """查计划任务的 XML，看它是不是在跑我们要的那个 daemon exe。
+
+    schtasks /XML 输出是英文、不被本地化。
+
+    **比的是完整路径，不是文件名。** 只比文件名的话，旧安装目录里
+    同名的 `sdmd.exe` 会被当成「已经注册」——计划任务还指着那个早就
+    被删掉的路径，daemon 永远起不来。
+
+    判不准的时候宁可当成「不匹配」：那只是重建一次计划任务（daemon
+    重启一下）；判成「匹配」而实际不匹配的话，daemon 根本不会启动。
+
+    **用模块级的 `subprocess`**，不要在函数里 `import subprocess`——
+    那样会绕开 monkeypatch，测试里替换不掉，测出来的是真机上
+    的行为。
+    """
+    try:
+        result = subprocess.run(
+            ["schtasks", "/Query", "/TN", task_name, "/XML"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        if result.returncode != 0:
+            return False
+        xml = result.stdout.lower()
+        # 路径里的引号在 XML 里可能被转义成 &quot;，去掉再比。
+        wanted = str(daemon_exe).lower().strip('"')
+        return wanted in xml
+    except OSError:
+        return False
+
+
 def bundle_resources() -> Path | None:
     """返回打包版的 Resources 目录；源码运行时返回 None。
 
@@ -369,18 +402,43 @@ def _ensure_windows() -> dict:
     shim_dir = base / "bin"
     shim_dir.mkdir(parents=True, exist_ok=True)
     shim = shim_dir / "sdm.cmd"
+    # 相对路径：%~dp0..\runtime\sdm\sdm.exe
+    # %~dp0 = shim 所在目录（以 \ 结尾），后面接相对路径，全程纯 ASCII
+    rel = r"..\runtime\sdm\sdm.exe"
     try:
         shim.write_text(
             '@echo off\r\nREM SDM CLI shim\r\n'
-            f'"{cli_exe}" %*\r\n',
+            '"%~dp0' + rel + '" %*\r\n',
             encoding="ascii",
         )
     except OSError as err:
         result["cli"] = {"ok": False, "reason": f"shim_failed: {err}", "path": "", "in_path": False}
         return result
 
+    # CLI 可执行文件没解出来的话，shim 指向的是空气——写出来也没用。
+    # 不静默成功：用户会以为命令行能用了，跑起来才报「不是有效的
+    # Win32 应用程序」。
+    if not cli_exe.is_file():
+        result["cli"] = {
+            "ok": False,
+            "reason": "cli_exe_missing",
+            "path": str(cli_exe),
+            "in_path": False,
+        }
+        return result
+
     # 把 shim 目录加进用户 PATH。用 winreg 而不是 setx——setx 有
     # 1024 字符截断，老机器的 PATH 经常超。
+    #
+    # **ImportError 也要接。** winreg 是标准库但只在 Windows 上有；
+    # 这里的代码路径理论上只在 Windows 上跑，但打包后的测试、
+    # 交叉环境都可能碰到。接住它，PATH 没配上只影响命令行好不好用，
+    # 不该让 GUI 起不来。
+    #
+    # **失败不能提前 return。** PATH 没配上只是命令行要手敲全路径，
+    # 后面的 daemon 计划任务注册跟它无关——之前这里 return 掉了，
+    # 用户的 daemon 永远注册不上，命令行和后台下载两个都废了。
+    path_ok = True
     try:
         import winreg
 
@@ -398,38 +456,46 @@ def _ensure_windows() -> dict:
                 winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(parts))
         finally:
             winreg.CloseKey(key)
-    except OSError as err:
+    except (OSError, ImportError) as err:
+        path_ok = False
         result["cli"] = {
             "ok": True,
             "reason": f"shim_ok_path_failed: {err}",
             "path": str(shim),
             "in_path": False,
         }
-        return result
 
-    result["cli"] = {"ok": True, "reason": "installed", "path": str(shim), "in_path": True}
+    if path_ok:
+        result["cli"] = {"ok": True, "reason": "installed", "path": str(shim), "in_path": True}
 
-    # daemon 计划任务
+    # daemon 计划任务：幂等注册，不杀正在跑的 daemon
     if daemon_exe.is_file():
         task = "SuperDownloadManagerDaemon"
         try:
-            subprocess.run(
-                ["schtasks", "/Delete", "/TN", task, "/F"],
-                capture_output=True,
-            )
-            subprocess.run(
-                [
-                    "schtasks", "/Create",
-                    "/TN", task,
-                    "/TR", _windows_daemon_command(daemon_exe),
-                    "/SC", "ONLOGON",
-                    "/RL", "LIMITED",
-                    "/F",
-                ],
-                capture_output=True,
-            )
-            subprocess.run(["schtasks", "/Run", "/TN", task], capture_output=True)
-            result["daemon"] = {"ok": True, "reason": "task_registered", "path": task}
+            # 先查现有任务：如果存在且指向同一个 exe，就别动它
+            if _windows_task_mentions_daemon(task, daemon_exe):
+                # 任务已存在且正确，只确保它在跑
+                subprocess.run(["schtasks", "/Run", "/TN", task], capture_output=True)
+                result["daemon"] = {"ok": True, "reason": "task_already_registered", "path": task}
+            else:
+                # 任务不存在或指向旧 exe —— 删除旧的（如果有），创建新的
+                subprocess.run(
+                    ["schtasks", "/Delete", "/TN", task, "/F"],
+                    capture_output=True,
+                )
+                subprocess.run(
+                    [
+                        "schtasks", "/Create",
+                        "/TN", task,
+                        "/TR", _windows_daemon_command(daemon_exe),
+                        "/SC", "ONLOGON",
+                        "/RL", "LIMITED",
+                        "/F",
+                    ],
+                    capture_output=True,
+                )
+                subprocess.run(["schtasks", "/Run", "/TN", task], capture_output=True)
+                result["daemon"] = {"ok": True, "reason": "task_registered", "path": task}
         except OSError as err:
             result["daemon"] = {"ok": False, "reason": f"task_failed: {err}", "path": task}
 

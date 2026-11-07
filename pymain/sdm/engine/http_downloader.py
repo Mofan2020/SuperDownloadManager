@@ -573,6 +573,7 @@ class HTTPDownloader:
         headers: dict[str, str] | None = None,
         limiter: SpeedLimiter | None = None,
         use_range: bool = True,
+        on_transient_error: Callable[[DownloadError], None] | None = None,
     ) -> ChunkResult:
         """把一个分片下完并落盘。
 
@@ -625,10 +626,13 @@ class HTTPDownloader:
                     headers=headers,
                     limiter=limiter,
                     use_range=use_range,
+                    on_transient_error=on_transient_error,
                 )
             except DownloadError as err:
                 if not err.is_retryable:
                     raise
+                if on_transient_error is not None:
+                    on_transient_error(err)
                 last_error = err
             except httpx.ConnectError as err:
                 # 连接建立失败是「瞬时」问题——服务器的 listen backlog
@@ -638,6 +642,8 @@ class HTTPDownloader:
                 #
                 # 必须放在 NetworkError 前面——ConnectError 是它的子类。
                 last_error = DownloadError(DownloadFailure.NETWORK, str(err))
+                if on_transient_error is not None:
+                    on_transient_error(last_error)
                 delay = 0.15 * (attempt + 1)
                 if waited + delay > self.chunk_retry_budget:
                     break
@@ -650,6 +656,8 @@ class HTTPDownloader:
                 # 已落盘的字节还在，重连后从断点继续。
                 # 走 1s/2s/4s 的长退避会让用户以为卡死了。
                 last_error = DownloadError(DownloadFailure.NETWORK, str(err))
+                if on_transient_error is not None:
+                    on_transient_error(last_error)
                 delay = 0.3 * (attempt + 1)
                 if waited + delay > self.chunk_retry_budget:
                     break
@@ -658,6 +666,8 @@ class HTTPDownloader:
                 continue
             except (httpx.TimeoutException, httpx.NetworkError) as err:
                 last_error = DownloadError(DownloadFailure.NETWORK, str(err))
+                if on_transient_error is not None:
+                    on_transient_error(last_error)
             except asyncio.CancelledError:
                 raise
             except Exception as err:
@@ -723,6 +733,7 @@ class HTTPDownloader:
         headers: dict[str, str] | None,
         limiter: SpeedLimiter | None,
         use_range: bool = True,
+        on_transient_error: Callable[[DownloadError], None] | None = None,
     ) -> ChunkResult:
         """一次流式传输尝试。"""
         # 站点规则：按主机名匹配，命中就叠加 Referer / User-Agent /

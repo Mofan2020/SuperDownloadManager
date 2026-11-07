@@ -354,5 +354,16 @@
   "browserCaptureInstallPath": "安装位置",
   "browserCaptureVersion": "版本",
   "browserCaptureUpdateAvailable": "有新版本，点击更新",
-  "browserCaptureUpToDate": "已是最新"
+  "browserCaptureUpToDate": "已是最新",
+  "sidebarHome": "首页",
+  "sidebarStatus": "下载状态",
+  "dashboardQuickTitle": "添加下载链接",
+  "dashboardQuickAdd": "添加",
+  "dashboardQuickNeedUrl": "请输入下载链接",
+  "dashboardQuickAdded": "已加入下载列表",
+  "dashboardStatActiveHint": "查看正在下载的任务",
+  "dashboardStatSpeedHint": "查看正在下载的任务",
+  "dashboardStatTodayBytesHint": "查看历史记录",
+  "dashboardStatTodayCountHint": "查看历史记录",
+  "dashboardCategoryHint": "查看这个分类的下载"
 }

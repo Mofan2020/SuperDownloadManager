@@ -43,6 +43,7 @@ from .session_state import SessionState
 from .speed_display import SpeedInput, compute
 from .speed_limiter import SpeedLimiter
 from .speed_policy import SpeedPolicy
+from .task_queue import ConnectionBudget, TaskQueue
 from .work_dir import PARTIAL_INFIX, task_key, work_root
 
 log = get_logger()
@@ -360,6 +361,14 @@ class DownloadEngine:
     ) -> None:
         self.strategy = strategy or RangeStrategy()
         self.parallelism_cap = parallelism_cap
+        #: 全局连接预算 —— 所有任务共用这一个池子，避免多任务并发时连接数线性膨胀
+        self._slot_queue = TaskQueue(parallelism_cap=parallelism_cap)
+        #: **硬上限**：所有任务加起来同时在传的连接不超过这个数。
+        #:
+        #: 份额（`_slot_queue`）管的是「分得公平」，硬池管的是
+        #: 「总量不超」——份额切换的那一瞬间，已经在传的连接砍不断，
+        #: 只有硬池能兜住那一下溢出。
+        self._budget = ConnectionBudget(cap=parallelism_cap)
         #: 用户在设置页设的「分片上限」。真正生效的是
         #: `_sync_chunk_cap()` 算出来的那个（不小于连接数 × 4）。
         self._user_max_chunks = self.strategy.max_chunks
@@ -440,6 +449,8 @@ class DownloadEngine:
         clamped = max(1, min(128, n))
         self.strategy.default_chunks = clamped
         self.parallelism_cap = clamped
+        self._slot_queue.set_parallelism_cap(clamped)
+        self._budget.set_cap(clamped)
         self._sync_chunk_cap()
 
     def set_chunk_limits(self, initial_connections: int, max_chunks: int) -> None:
@@ -882,11 +893,24 @@ class DownloadEngine:
 
         channel = ProgressChannel()
         channel.bind_loop(asyncio.get_running_loop())
+
+        # 向共享连接池登记、预留名额
+        self._slot_queue.register(task_id, "downloading")
+        slot_limit = self._slot_queue.available_slots(task_id)
+        self._slot_queue.reserve(task_id, slot_limit)
+        # 任务自己想要的连接上限 = 显式指定的 或 引擎默认。
+        #
+        # **这不是当前份额。** 份额会随别的任务进出而变（引擎会
+        # 重新算），任务自己想要的不会。两者混在一起的话，份额缩水
+        # 之后这个任务就再也涨不回去了——别的任务跑完了，它的连接数
+        # 还停在缩水时的水平。
+        task_cap = spec.max_threads_override or self.parallelism_cap
+
         live.flow = DownloadFlow(
             url=spec.url,
             destination=destination,
             strategy=self.strategy,
-            parallelism_cap=spec.max_threads_override or self.parallelism_cap,
+            parallelism_cap=task_cap,
             limiter=self._task_limiters.get(task_id) or self.limiter,
             downloader=self.downloader,
             progress_channel=channel,
@@ -906,7 +930,13 @@ class DownloadEngine:
             # 探测结果复用：流程层不再探第二次。
             probe=probe,
             probe_error=probe_error,
+            # 全局硬池：所有任务从这里拿连接名额。
+            budget=self._budget,
         )
+        # 让流程层知道它能用的连接上限（全局预算分给它的份额）
+        live.flow.set_slot_limit(slot_limit)
+        # 别的任务可能已经在跑了——重新分配一次份额，让它们也让出位置
+        self._rebalance_slots()
 
         # 记录分片布局，供详情面板展示。
         # Swift 版的详情页分片是「合成的」（假的），这里是真的。
@@ -1013,6 +1043,10 @@ class DownloadEngine:
             # 任务结束（成功/失败/取消/暂停）——不再「连接中」。
             summary.connecting = False
             self.live.pop(task_id, None)
+            # 归还共享连接预算
+            self._slot_queue.remove(task_id)
+            # 任务走了，剩下的任务可以多分点
+            self._rebalance_slots()
             # 任务结束：分片明细留一份最终状态，详情面板还能查。
             # 超过保留上限就丢最老的。
             self._retire_chunk_states(task_id)
@@ -1023,6 +1057,22 @@ class DownloadEngine:
         if task_id in self._queue:
             self._queue.remove(task_id)
         self._schedule()
+
+    def _rebalance_slots(self) -> None:
+        """重新分配所有活跃任务的连接份额。
+
+        **份额是动态的。** 一个任务独占时能拿满 32 条，第二个任务
+        进来后它得让出一半——不然两个任务加起来 64 条，服务器开始
+        限流，两个任务一起失败。
+
+        任务开始和结束都要重算一次。
+        """
+        for task_id, live in list(self.live.items()):
+            if live.flow is None:
+                continue
+            share = self._slot_queue.available_slots(task_id)
+            self._slot_queue.reserve(task_id, share)
+            live.flow.set_slot_limit(share)
 
     # -- 磁盘 / 名字冲突 ---------------------------------------------
 
@@ -1664,3 +1714,6 @@ class DownloadEngine:
             if live.task is not None and not live.task.done():
                 live.task.cancel()
         await self.downloader.aclose()
+        # 关闭历史数据库连接，避免 ResourceWarning
+        if self.history_store is not None:
+            self.history_store.close()

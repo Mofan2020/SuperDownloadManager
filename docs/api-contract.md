@@ -449,6 +449,32 @@ Firefox 不需要这一步：它的扩展 ID 是 manifest 里
 `.sdef` 文件放在 `pymain/sdm/gui/applescript/SuperDownloadManager.sdef`，
 打包时放进 `Contents/Resources/`，`Info.plist` 写 `OSAScriptingDefinition`。
 
+### 5.4 命令行的 IPC 端点
+
+CLI 通过 IPC 跟引擎说话。**有两个端点，协议完全一样**（行分隔 JSON，
+走 `sdm/ipc/dispatcher.py` 的 `Dispatcher`）：
+
+| | 端点 | Unix | Windows | 接的是 |
+|---|---|---|---|---|
+| GUI 端点 | `sdm/gui/ipc_host.py` | `sdm-gui.sock` | TCP `7957` | **GUI 那个引擎** |
+| daemon 端点 | `sdm/ipc/server.py` | `sdmd.sock` | TCP `7956` | daemon 那个引擎 |
+
+**客户端优先连 GUI 端点，连不上退回 daemon**（`sdm/ipc/client.py` 的
+`IPCClient._candidates()`）。这样命令行加的任务直接进 GUI 的引擎，
+界面上立刻可见——否则 CLI 和 GUI 是两个进程、两份任务表，用户会以为
+命令没生效。
+
+显式传了 `path` 或 `port` 的客户端**不做 fallback**（测试、多实例场景用）。
+
+**GUI 端点绑不上不能挡 GUI 启动。** 端口被占、socket 路径太长、权限
+不够——CLI 会自动退回 daemon，功能不丢。
+
+**GUI 端点把请求丢到引擎的事件循环上跑**（`run_coroutine_threadsafe`）。
+引擎的方法有一半是协程，在别的循环里 await 会直接坏掉。
+
+> 7955 是给浏览器扩展用的回环 HTTP 服务（有 CORS 头、要配对 token），
+> 协议完全不一样，别混。
+
 ---
 
 ## 6. 设置新增键（`sdm/settings.py`）

@@ -354,5 +354,16 @@
   "browserCaptureInstallPath": "Installed at",
   "browserCaptureVersion": "Version",
   "browserCaptureUpdateAvailable": "A new version is available — click to update",
-  "browserCaptureUpToDate": "Up to date"
+  "browserCaptureUpToDate": "Up to date",
+  "sidebarHome": "Home",
+  "sidebarStatus": "Status",
+  "dashboardQuickTitle": "Add a download link",
+  "dashboardQuickAdd": "Add",
+  "dashboardQuickNeedUrl": "Enter a download link",
+  "dashboardQuickAdded": "Added to downloads",
+  "dashboardStatActiveHint": "Show downloading tasks",
+  "dashboardStatSpeedHint": "Show downloading tasks",
+  "dashboardStatTodayBytesHint": "Show history",
+  "dashboardStatTodayCountHint": "Show history",
+  "dashboardCategoryHint": "Show downloads in this category"
 }

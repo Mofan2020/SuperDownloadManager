@@ -38,6 +38,7 @@ from .range_planner import Chunk, ConnectionGovernor, DynamicPlanner, RangeStrat
 from .resume_state import ResumeState
 from .session_state import SessionChunk, SessionState
 from .speed_limiter import SpeedLimiter
+from .task_queue import ConnectionBudget
 
 log = get_logger()
 
@@ -159,6 +160,7 @@ class DownloadFlow:
         checksum_algorithm: str | None = None,
         probe: ContentProbe | None = None,
         probe_error: ProbeError | None = None,
+        budget: ConnectionBudget | None = None,
     ) -> None:
         self.url = url
         self.destination = Path(destination)
@@ -267,12 +269,36 @@ class DownloadFlow:
         self._stale_fallback = False
         self._probe: ContentProbe | None = None
 
+        #: 全局连接预算分给这个任务的份额（由引擎在启动时计算并设置）。
+        #: Governor 的 limit 不能超过这个值。
+        self._slot_limit = self.parallelism_cap
+        #: 瞬时错误（429/5xx/timeout/网络错误）触发的回退冷却截止时间。
+        self._error_backoff_until = 0.0
+        #: **全局硬池**：所有任务从这里拿连接名额。
+        #:
+        #: 没有它的话，份额切换的那一瞬间会超发——第一个任务独占时
+        #: 已经开了 32 条，第二个任务进来后份额降到 16，但**已经在传
+        #: 的连接砍不断**，总量会冲到 48。硬池保证同时在传的连接数
+        #: 永远不超过全局上限。
+        #:
+        #: 没有传就用一个自己的私有池（上限 = 本任务的 parallelism_cap），
+        #: 行为跟以前一样——独立跑一个 flow 时不该被别的任务影响。
+        self._budget = budget or ConnectionBudget(cap=self.parallelism_cap)
+        #: 真正在传的分片数（占到全局预算的那种）。
+        self._active_transfers = 0
+
     # -- 对外状态 ----------------------------------------------------
 
     @property
     def active_connections(self) -> int:
-        """当前同时在传的分片数。详情面板要显示「连接数」。"""
-        return self._governor.running
+        """当前同时在传的分片数。详情面板要显示「连接数」。
+
+        **数的是「真正在传」的，不是「占着名额等预算」的。**
+        Governor 的 running 把等全局预算的 worker 也算上了——
+        那个连接还没建，只是排队。报出去会让用户看到「32 条连接」
+        而实际只传了 8 条。
+        """
+        return self._active_transfers
 
     @property
     def chunk_count_now(self) -> int:
@@ -293,6 +319,32 @@ class DownloadFlow:
         for task in list(self._chunk_tasks):
             if not task.done():
                 task.cancel()
+
+    def set_slot_limit(self, limit: int) -> None:
+        """引擎给这个任务分配的连接上限。
+
+        运行时可变：引擎会在任务启动/结束、其他任务启动/结束时
+        重新计算并调用。limit 被夹在 [1, parallelism_cap]。
+        """
+        self._slot_limit = max(1, min(int(limit), self.parallelism_cap))
+        if self._governor.limit > self._slot_limit:
+            self._governor.set_limit(self._slot_limit)
+
+    def _on_transient_error(self, err: DownloadError) -> None:
+        """瞬时错误（429/5xx/timeout/网络错误）回调。
+
+        服务器在报错时继续加连接只会让它更糟，所以：
+        1. 立即把连接数减半（至少保留 1）。
+        2. 进入冷却期（默认 5 秒），期间 `_ramp_connections` 不放开连接。
+        """
+        now = time.monotonic()
+        # 立即收回一半连接
+        current = self._governor.limit
+        if current > 1:
+            self._governor.set_limit(max(1, current // 2))
+        # 冷却 5 秒，防止连续错误导致连接数震荡
+        self._error_backoff_until = now + 5.0
+        log.info(CAT_ENGINE, f"下载 {self.destination.name} 遇瞬时错误 ({err.kind.value})，连接数回退至 {self._governor.limit}，冷却 5s")
 
     def close_partial_handles(self) -> None:
         """关掉分片文件的句柄。
@@ -563,6 +615,9 @@ class DownloadFlow:
         finally:
             session_task.cancel()
             self._write_session()
+            # 关掉所有分片文件句柄。Windows 上不关就删不掉，
+            # macOS/Linux 上也会泄露 fd（进程退出前都不释放）。
+            self.close_partial_handles()
 
         # 5. 合并
         chunks = planner.chunks()
@@ -778,7 +833,17 @@ class DownloadFlow:
         未完成分片，从拆分点接着下（规格 §1.2）。
         """
         self._planner = planner
-        self._governor = ConnectionGovernor(self.initial_connections, self.parallelism_cap)
+        # Governor 的硬上限 = 这个任务自己想要的（任务级覆盖 或 引擎默认）。
+        #
+        # **不用当前份额做上限。** 份额会随别的任务进出而变（引擎会
+        # 重新算），Governor 的 maximum 是构造时定死的——用它当上限
+        # 的话，份额缩水之后 Governor 反而涨不回去。
+        #
+        # 实际生效的上限 = min(maximum, _slot_limit)，_ramp_connections
+        # 每次放开连接时都按这个算。
+        self._governor = ConnectionGovernor(
+            min(self.initial_connections, self._slot_limit), self.parallelism_cap
+        )
 
         async def worker() -> None:
             self._live_workers += 1
@@ -871,16 +936,33 @@ class DownloadFlow:
                     await asyncio.sleep(self._idle_poll)
                     continue
 
-                # 3) 有活：占一个连接名额下。
+                # 3) 有活：占两个名额才下。
+                #
+                # - **Governor**：这个任务自己的份额上限。
+                # - **Budget**：全局硬池。所有任务加起来不超过全局上限。
+                #
+                # 两个都要占：只占 Governor 的话，份额切换的那一瞬间
+                # 会超发（第一个任务独占时开了 32 条，第二个任务进来
+                # 后份额降到 16，但已经在传的连接砍不断，总量冲到 48）。
+                #
+                # **顺序有讲究**：先 Governor 后 Budget。反过来的话，
+                # 一个任务可能占着 Budget 的名额却在等 Governor——
+                # 那是白占。占 Governor 等 Budget 才是真在排队。
                 await self._governor.acquire()
                 try:
-                    planner.mark_inflight(chunk.id)
+                    await self._budget.acquire()
+                    self._active_transfers += 1
                     try:
-                        await self._download_one(
-                            url, chunk, planner, assembler, chunk_progress, use_range
-                        )
+                        planner.mark_inflight(chunk.id)
+                        try:
+                            await self._download_one(
+                                url, chunk, planner, assembler, chunk_progress, use_range
+                            )
+                        finally:
+                            planner.mark_finished(chunk.id)
                     finally:
-                        planner.mark_finished(chunk.id)
+                        self._active_transfers -= 1
+                        self._budget.release()
                 finally:
                     self._governor.release()
 
@@ -937,6 +1019,7 @@ class DownloadFlow:
             headers=dict(self.headers),
             limiter=self.limiter,
             use_range=use_range,
+            on_transient_error=self._on_transient_error,
         )
 
         # **记下这个分片实际花了多久。**
@@ -970,6 +1053,9 @@ class DownloadFlow:
 
         **要有进度才放开。** 字节卡住不动的时候加连接只会让情况更糟，
         所以「最近有进度」是放开的前提。
+
+        **错误冷却期内不放开。** 遇到 429/5xx/timeout 时，`_on_transient_error`
+        会把连接数减半并设置 `_error_backoff_until`；冷却期内暂停放开。
         """
         interval = 0.1
         while True:
@@ -979,10 +1065,15 @@ class DownloadFlow:
             try:
                 if planner.all_complete():
                     continue
+                # 错误冷却期内不放开连接
+                if time.monotonic() < self._error_backoff_until:
+                    continue
                 # 最近没有字节流动 → 不加连接。
                 if self._last_progress_at < time.monotonic() - 2.0:
                     continue
-                if self._governor.limit < self.parallelism_cap:
+                # 硬上限 = min(parallelism_cap, _slot_limit)
+                effective_max = min(self.parallelism_cap, self._slot_limit)
+                if self._governor.limit < effective_max:
                     self._governor.set_limit(self._governor.limit + 1)
             except Exception as err:
                 # **后台任务不能静默死掉。** 之前这里抛过一次

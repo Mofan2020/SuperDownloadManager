@@ -286,6 +286,9 @@ def test_engine_marks_task_as_connecting_until_first_byte(
             self.server_supports_ranges = True
             self.on_chunk_progress = None
 
+        def set_slot_limit(self, limit: int) -> None:
+            pass
+
         async def run(self):
             channel = self.kwargs["progress_channel"]
             channel.report(0)
