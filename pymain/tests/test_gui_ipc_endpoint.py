@@ -398,24 +398,41 @@ def test_gui_ipc_server_uses_the_gui_endpoint(
 
 
 def test_gui_ipc_server_bind_failure_does_not_raise(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """端点绑不上不能挡 GUI 启动。
 
     端口被占、socket 路径太长、权限不够——这些都不该让用户开不了
     窗口。CLI 会自动退回 daemon，功能不丢。
+
+    **直接让 bind 失败，不去真的造一个失败的场景。** 真造的话，
+    Unix 上得用「路径指向不存在的目录」，Windows 上得用「端口已被
+    占用」——两边机制不同，而且 Windows 上 socket.AF_UNIX 根本不存在
+    （3.13 才加），硬拗只会测出一个假的东西。这里直接把
+    `SocketServer.start()` 换成会抛 OSError 的假实现，测的正是
+    `GUIIPCServer` 自己吞不吞这个异常。
     """
-    monkeypatch.setattr(paths, "is_windows", lambda: False)
-    # 路径指向一个不存在的目录，bind 一定失败
-    monkeypatch.setattr(
-        paths, "gui_socket_path", lambda: str(tmp_path / "no" / "such" / "dir" / "g.sock")
-    )
+    from sdm.gui import ipc_host
+
+    class _FailingServer:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            raise OSError("端点被占了")
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(ipc_host, "SocketServer", _FailingServer)
 
     loop = asyncio.new_event_loop()
     server = GUIIPCServer(DownloadEngine(), loop)
     try:
         # 不抛异常就是过了
         server.start()
+        # 而且端点没建起来（不能拿着半死的 server 当成功）
+        assert server._server is None
     finally:
         server.stop()
         loop.close()
