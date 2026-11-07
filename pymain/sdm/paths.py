@@ -106,10 +106,17 @@ def gui_socket_path() -> str:
 
     unix socket 的路径有长度上限（同 `socket_path()`）。超了退回
     `/tmp/sdm-gui-<uid>.sock`。
+
+    **Windows 上没有 unix socket，IPC 走 TCP 回环端口（7957）。**
+    这里返回的字符串在 Windows 上不会被真拿去 bind（`SocketServer`
+    认端口不认路径），但它**会被算出来**——`os.getuid()` 在 Windows
+    上不存在，不挡一下就 AttributeError。
     """
     override = os.environ.get("SDM_GUI_SOCKET")
     if override:
         return override
+    if is_windows():
+        return "npipe://sdm-gui"
     path = str(config_dir() / "sdm-gui.sock")
     if len(path.encode("utf-8")) >= 100:
         return f"/tmp/sdm-gui-{os.getuid()}.sock"
