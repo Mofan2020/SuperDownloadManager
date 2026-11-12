@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -460,3 +461,121 @@ def test_enabling_open_at_login_writes_the_launch_agent(
     content = plist.read_text(encoding="utf-8")
     assert "RunAtLoad" in content
     assert "/Applications/SDM.app/Contents/MacOS/SDM" in content
+
+
+def test_windows_reveal_quotes_the_path_and_uses_backslashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows 上「在访达中显示」要能真的定位到文件。
+
+    以前的写法是 `["explorer", f"/select,{target}"]`。路径里有空格时
+    explorer 在空格处截断，解析失败，**不报错**，直接打开「我的文档」
+    ——用户看到的就是「点开下载目录，跳到了 Documents」。
+
+    所以这里钉两件事：路径整体带引号、分隔符全换成反斜杠。
+    """
+    target = tmp_path / "a b" / "x.zip"  # 刻意带空格
+    target.parent.mkdir()
+    target.write_bytes(b"x")
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(system_integration.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(system_integration.subprocess, "run", lambda argv, **kw: calls.append(argv))
+
+    assert system_integration.reveal_in_finder(target) is True
+    assert len(calls) == 1
+    argv = calls[0]
+    assert argv[0] == "explorer"
+    arg = argv[1]
+    assert arg.startswith('/select,"'), f"路径没带引号：{arg}"
+    assert arg.endswith('"'), f"引号没闭合：{arg}"
+    inner = arg[len('/select,"') : -1]
+    assert "/" not in inner, f"explorer 不认正斜杠：{inner}"
+    assert inner.endswith("a b\\x.zip".replace("\\\\", "\\")), inner
+
+
+def test_windows_reveal_falls_back_to_the_folder_when_the_file_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """文件被删了也要能到地方——退回它所在的目录，不是什么都不做。"""
+    folder = tmp_path / "gone"
+    folder.mkdir()
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(system_integration.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(system_integration.subprocess, "run", lambda argv, **kw: calls.append(argv))
+
+    assert system_integration.reveal_in_finder(folder / "missing.zip") is True
+    assert len(calls) == 1
+    assert calls[0][0] == "explorer"
+    assert "/select," not in calls[0][1], "文件不在的时候不该还去 select 它"
+
+
+class _FakeIcon:
+    """够用的假 pystray 图标：只记 `visible` 被写成什么。"""
+
+    def __init__(self) -> None:
+        self._visible = True
+        self.writes: list[bool] = []
+
+    @property
+    def visible(self) -> bool:
+        return self._visible
+
+    @visible.setter
+    def visible(self, value: bool) -> None:
+        self._visible = value
+        self.writes.append(value)
+
+    def stop(self) -> None:  # pragma: no cover - 只是占位
+        return None
+
+
+def test_tray_readds_the_icon_when_the_taskbar_is_rebuilt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explorer 重启之后托盘图标要自己回来。
+
+    任务栏重建时系统会把第三方图标全清掉，进程还在、pystray 也以为
+    自己还挂着——用户看到的是「用一会儿托盘没了」。看门狗发现
+    Shell_TrayWnd 的句柄变了，就把图标重新挂上。
+    """
+    controller = tray.TrayController(bridge=None)
+    controller._icon = _FakeIcon()
+    controller._tray_hwnd = 111
+
+    monkeypatch.setattr(tray, "_shell_tray_hwnd", lambda: 222)
+    controller._watch_tick()
+
+    assert controller._icon.writes == [False, True], "没把图标重新挂上"
+    assert controller._tray_hwnd == 222, "句柄没更新，下一拍会重复挂"
+
+    # 同一块任务栏再问一次：什么都不做，不能每 5 秒抖一下图标
+    controller._watch_tick()
+    assert controller._icon.writes == [False, True]
+
+
+def test_tray_watchdog_ignores_platforms_without_a_taskbar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """拿不到句柄（非 Windows / 调用失败）时什么都不做。"""
+    controller = tray.TrayController(bridge=None)
+    controller._icon = _FakeIcon()
+    controller._tray_hwnd = 111
+
+    monkeypatch.setattr(tray, "_shell_tray_hwnd", lambda: 0)
+    controller._watch_tick()
+    assert controller._icon.writes == []
+
+
+def test_tray_remove_stops_the_watchdog() -> None:
+    """摘图标的时候看门狗要停——不停的话它会把图标又挂回来。"""
+    controller = tray.TrayController(bridge=None)
+    controller._icon = _FakeIcon()
+    controller._start_watchdog()
+    assert controller._watch_thread is not None
+
+    controller.remove()
+    assert controller._watch_stop.is_set()
+    assert controller._watch_thread is None
+    assert controller._icon is None

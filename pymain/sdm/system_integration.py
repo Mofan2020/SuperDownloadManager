@@ -42,9 +42,27 @@ def open_file(path: str | Path) -> bool:
 def reveal_in_finder(path: str | Path) -> bool:
     """在文件管理器里选中文件。"""
     target = Path(path)
-    if not target.exists():
-        return False
     system = platform.system()
+    if not target.exists():
+        # 文件不在了（下完删掉了、或者盘符掉了）。别什么都不做——退回到
+        # 它应该在的那个目录，用户至少能到地方。
+        parent = target.parent
+        if not parent.exists():
+            return False
+        if system == "Darwin":
+            subprocess.run(["open", str(parent)], check=False, capture_output=True, timeout=10)
+        elif system == "Windows":
+            subprocess.run(
+                ["explorer", str(parent).replace("/", "\\")],
+                check=False,
+                capture_output=True,
+                timeout=10,
+            )
+        else:
+            subprocess.run(
+                ["xdg-open", str(parent)], check=False, capture_output=True, timeout=10
+            )
+        return True
     try:
         if system == "Darwin":
             subprocess.run(
@@ -54,8 +72,18 @@ def reveal_in_finder(path: str | Path) -> bool:
                 timeout=10,
             )
         elif system == "Windows":
+            # **/select 后面的路径必须带引号，而且要用反斜杠。**
+            #
+            # 写成 f"/select,{target}" 的话，路径里有空格时 explorer 解析
+            # 失败，不报错，直接打开「我的文档」——用户看到的就是「点开
+            # 下载目录，跳到了 Documents」。这是 Windows 上 explorer 的
+            # 老毛病：/select, 后面按空格截断。
+            #
+            # 正斜杠也要归一：Windows 的 Path 在字符串里可能留着 "/"，
+            # explorer 只认 "\"。
+            target_win = str(target).replace("/", "\\")
             subprocess.run(
-                ["explorer", f"/select,{target}"],
+                ["explorer", f'/select,"{target_win}"'],
                 check=False,
                 capture_output=True,
                 timeout=10,

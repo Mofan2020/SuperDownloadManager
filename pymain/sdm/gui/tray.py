@@ -16,6 +16,7 @@ import 这个模块不会失败——只是 `available()` 返回 False，
 from __future__ import annotations
 
 import sys
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -42,6 +43,39 @@ except ImportError:  # pragma: no cover
 #: 托盘菜单的规格。**跟 macOS 菜单栏是同一份**（同一个 list 对象），
 #: 所以两边天生一致。
 TRAY_MENU_SPEC = MENU_SPEC
+
+
+#: 托盘看门狗的间隔（秒）。
+#:
+#: 5 秒是权衡：Explorer 重启之后图标消失，用户再注意到并点开程序之前
+#: 一般都要好几秒，5 秒足够早；而一次 `FindWindowW` 是微秒级的，跑
+#: 5 秒一次对性能没有影响。
+TRAY_WATCH_INTERVAL = 5.0
+
+
+def _shell_tray_hwnd() -> int:
+    """任务栏窗口（Shell_TrayWnd）的句柄。**Explorer 重启之后这个值会变。**
+
+    Windows 上托盘图标挂在任务栏上，Explorer 一重启（崩溃、更新、
+    手动重启资源管理器），系统会把所有第三方图标清掉，但进程还在跑、
+    pystray 也以为自己还挂着。用户看到的就是「过一会儿托盘自己没了」。
+
+    拿句柄是判断这件事最便宜的信号：不用轮询图标是不是还在（那要
+    Shell_NotifyIcon，还有副作用），比一次 FindWindowW 就够了。
+
+    非 Windows 或者调用失败都返回 0，看门狗看到 0 就当没事发生。
+    """
+    if sys.platform != "win32":
+        return 0
+    try:
+        import ctypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.FindWindowW.restype = ctypes.c_void_p
+        user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+        return int(user32.FindWindowW("Shell_TrayWnd", None) or 0)
+    except Exception:
+        return 0
 
 
 def available() -> bool:
@@ -75,6 +109,10 @@ class TrayController:
         self._icon: Any = None
         self._status_text = "空闲"
         self._clipboard_checked = False
+        #: 装图标时那块任务栏的句柄。看门狗靠它判断 Explorer 有没有重启。
+        self._tray_hwnd = 0
+        self._watch_stop = threading.Event()
+        self._watch_thread: threading.Thread | None = None
 
     # -- 状态 --------------------------------------------------------
 
@@ -130,6 +168,8 @@ class TrayController:
             # **run_detached 而不是 run。** run() 会占住当前线程不返回，
             # GUI 主线程就停在那儿了。pystray 自己起一个线程跑循环。
             self._icon.run_detached()
+            self._tray_hwnd = _shell_tray_hwnd()
+            self._start_watchdog()
             return True
         except Exception as err:
             log.warning(CAT_GUI, f"托盘图标安装失败: {err}")
@@ -138,6 +178,7 @@ class TrayController:
 
     def remove(self) -> None:
         """把托盘图标摘掉。"""
+        self._stop_watchdog()
         if self._icon is None:
             return
         try:
@@ -145,6 +186,61 @@ class TrayController:
         except Exception:
             pass
         self._icon = None
+
+    # -- 看门狗 ------------------------------------------------------
+
+    def _start_watchdog(self) -> None:
+        """起一个后台线程盯着任务栏有没有被重建。
+
+        **为什么需要它。** 托盘图标是挂在任务栏上的，Explorer 一重启，
+        系统会把第三方图标全清掉，而进程还在跑、pystray 也以为自己还
+        挂着。用户那边的表现就是「用一会儿托盘自己没了」，而且关掉
+        窗口之后应用就再也找不回来。
+        """
+        if self._watch_thread is not None:
+            return
+        self._watch_stop.clear()
+        thread = threading.Thread(
+            target=self._watch_loop, name="sdm-tray-watchdog", daemon=True
+        )
+        self._watch_thread = thread
+        thread.start()
+
+    def _stop_watchdog(self) -> None:
+        self._watch_stop.set()
+        self._watch_thread = None
+
+    def _watch_loop(self) -> None:
+        while not self._watch_stop.wait(TRAY_WATCH_INTERVAL):
+            self._watch_tick()
+
+    def _watch_tick(self) -> None:
+        """看门狗的一拍：任务栏换了就把图标重新挂上。
+
+        单独拆出来是为了能直接测——不用真起线程、也不用等 5 秒。
+        """
+        if self._icon is None:
+            return
+        hwnd = _shell_tray_hwnd()
+        hwnd = _shell_tray_hwnd()
+        if hwnd == 0 or hwnd == self._tray_hwnd:
+            return
+        self._tray_hwnd = hwnd
+        self._readd()
+
+    def _readd(self) -> None:
+        """重新把图标挂到（新的）任务栏上。
+
+        pystray 的 `visible` 走的是 Shell_NotifyIcon：置 False 发
+        NIM_DELETE，置 True 发 NIM_ADD。任务栏重建之后旧图标已经不在了，
+        NIM_DELETE 失败无所谓，NIM_ADD 才是真正把它挂回去的那一步。
+        """
+        try:
+            self._icon.visible = False
+            self._icon.visible = True
+            log.info(CAT_GUI, "任务栏重建过，托盘图标已重新挂上")
+        except Exception as err:
+            log.warning(CAT_GUI, f"托盘图标重新挂上失败: {err}")
 
     # -- 内部 --------------------------------------------------------
 
