@@ -293,13 +293,19 @@ jobs:
           # 那次是 18 KB、14 个版本）。
           VERSION="v${{ steps.ver.outputs.version }}"
           SECTION="release-notes-${{ steps.ver.outputs.version }}.md"
+          # 标题的写法是「## 项目名 vX.Y.Z - 类型」，版本号不在行首，
+          # 所以这里匹配「以 ## 开头、中间带这个版本号、版本号后面是
+          # 空格或行尾」的标题行。旧版那种「## vX.Y.Z」也一样能匹配。
           awk -v ver="$VERSION" '
-            $0 == "## " ver { found = 1; print; next }
+            $0 ~ "^## .*" ver "([[:space:]]|$)" { found = 1; print; next }
             found && /^## / { exit }
             found { print }
           ' release-notes.md > "$SECTION"
           if [ ! -s "$SECTION" ]; then
-            echo "## $VERSION" > "$SECTION"
+            # 不许静默发一个只有标题的版本页。段没切出来就是日志写错了
+            # 标题（或者压根没写这一版），当场红。
+            echo "::error::release-notes.md 里找不到 $VERSION 这一段"
+            exit 1
           fi
           echo "--- release body ---"
           cat "$SECTION"
