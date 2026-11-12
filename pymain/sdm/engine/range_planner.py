@@ -243,6 +243,27 @@ class DynamicPlanner:
                 self._pending.append(chunk_id)
             return result
 
+    def pending_count(self) -> int:
+        """队列里还有几个**没人领**的分片。
+
+        「空闲连接有没有现成的活」看这个。分片数的增长以前完全靠
+        worker 抢不到活时才去切——所有连接在同一个瞬间开工、分片
+        大小又一样的时候，它们会几乎同时收工，整段下载里一次都没人
+        切，分片数就停在连接数上，长尾那套（空闲连接切走最大分片的
+        一半）根本没机会发生。
+
+        在途的分片不算：它们已经有人在下，切了也不会多出一份能立刻
+        被接手的活。
+        """
+        with self._lock:
+            return sum(
+                1
+                for chunk_id in self._pending
+                if chunk_id in self._chunks
+                and not self._chunks[chunk_id].complete
+                and chunk_id not in self._inflight
+            )
+
     def split_largest(self) -> SplitResult | None:
         """把当前**最大的未完成分片**对半拆开。
 

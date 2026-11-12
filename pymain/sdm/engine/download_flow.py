@@ -872,6 +872,27 @@ class DownloadFlow:
                 # 才占。这样「连接数」限制的是**同时在传输的连接数**，
                 # 不是「已经分好片的数量」。
                 chunk = planner.take_pending()
+
+                # 手上有活、但队列空了 —— 先切一份备着。
+                #
+                # 分片数以前只靠「worker 抢不到活」来增长。所有连接
+                # 同时开工、分片大小又一样时它们几乎同时收工，整段
+                # 下载里一次都没人切，分片数停在连接数上，长尾失效。
+                # 留一份备着，空闲连接随时有活接。
+                #
+                # **必须走下面那段记账。** 分裂会把源分片的末尾改短，
+                # 不告诉 assembler 的话合并时报「分片长度不对」——
+                # 切分的目标很可能就是手上这块（take_pending 不标在途）。
+                if chunk is not None and planner.pending_count() == 0:
+                    spare = planner.split_largest()
+                    if spare is not None:
+                        if spare.was_inflight:
+                            assembler.shrink_chunk(spare.source.id, spare.split_at)
+                        else:
+                            assembler.set_chunk_length(
+                                spare.source.id, spare.split_at
+                            )
+
                 if chunk is None:
                     split = planner.split_largest()
                     if split is not None:
