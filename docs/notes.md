@@ -2238,3 +2238,50 @@ timeout 立刻把连接数减半、停 5 秒不加。那才是对付异常服务
 - `initial_connections`（默认 2）没改。前 100 毫秒只要 2 条连接是刻意的。
 - 分片领取仍然不占名额。「已分好片」和「正在传」是两件事，混起来的话
   连接数限制会变成「能开几个分片」，长尾反而更糟。
+
+## CI 上的两个坑（v2.2.7 发版时踩到）
+
+### 1. CI 装的 ruff 是「最新版」，不是 requirements 里钉的那个
+
+`ci-python.yml` 里是 `pip install pytest ruff pyinstaller` —— **没钉版本**。
+所以 CI 那份 ruff（0.13+）比 `requirements-dev.txt` 里钉的范围新，会报
+本地跑不出来的规则。
+
+这次撞的是 **RUF059**（解包出来的变量没用）：本地 0.12.12 说「All checks
+passed」，CI 直接红在 `tests/test_scheduler_handoff.py:122`。
+
+**教训：lint「绿」只有在版本对齐时才算数。** 推之前用两个版本各跑一遍：
+仓库钉的那个版本 + 最新版。本地同时装两份：
+
+```bash
+python3.11 -m venv /tmp/rufflatest && /tmp/rufflatest/bin/pip -q install ruff
+/tmp/rufflatest/bin/ruff check sdm tests scripts
+```
+
+顺手值得做但这次没做：把 workflow 里的 `ruff` 钉到跟 `requirements-dev.txt`
+一致，否则这条坑会一直踩。
+
+### 2. 扩展的 manifest 版本要跟着 version.py 走
+
+`test_extension_manifest_versions_match` 会把四个扩展的 `manifest.json`
+版本跟 `version.py` 对齐。改版本号时**五个地方**都要改：
+
+- `pymain/sdm/version.py`（`__version__` + `BUILD_NUMBER`）
+- `pymain/pyproject.toml`
+- `Extensions/{Chrome,Edge,Firefox,Safari}/manifest.json`
+
+用脚本批量改 json 会把格式重排（`["a"]` 变成多行数组），diff 立刻变成
+几十行噪声。**只改那一行**——用定点替换，别 `json.dump` 整份写回去。
+
+### 3. `test_chunk_layout_exceeds_target` 是台敏感的
+
+这条（`chunks > CONNECTIONS`）在这个仓库里是个**绝对阈值**，同文件里其他
+用例早就改成差分比较了，就它还留着绝对值。
+
+v2.2.7 第一次跑 CI 时它红了（chunks 正好 8，要求 > 8），本地跑 4 次全绿；
+同一份代码重新推一次就过了。**它本身是 flaky 的**，跟我改的爬坡没有确定
+关系——我甚至把它改成「一步开满」在本地跑，它照样绿。
+
+真要治的话，把它改成跟同文件其他用例一样的差分比较（跟
+`legacy_cap=True` 那一档比）。这次没动，因为那要先确认差分比较在这种
+快服务器下分母稳不稳，属于另一件事。
