@@ -1046,10 +1046,16 @@ class DownloadFlow:
         初始连接数保守（默认 2）。服务器健康就放开一个，一直到上限；
         出现错误就收回来——服务器在报错的时候继续加连接只会让它更糟。
 
-        **间隔 0.1 秒，不是「几秒一级」。** 用户在设置里把线程数
-        调到 32，等 8 秒才开满 32 条连接，用起来会以为是设置没生效。
-        0.1 秒一级意味着 32 条连接 3 秒开满——保守只体现在最开始
-        那 100 毫秒（2 条连接），足够服务器认出「这不是 DDoS」。
+        **间隔 0.1 秒，而且每级翻倍，不是每条 +1。**
+
+        用户把线程数调到 32，要的是 32 条连接。每 100 毫秒只放一条
+        的话，32 条要 3 秒——这 3 秒里分片已经被 worker 领走、
+        显示「排队中」，用户看到的就是「还有线程在排队好一会」。
+
+        翻倍爬坡保留「一开始只开 2 条」的克制（服务器认得出这不是
+        连接风暴），但 2→4→8→16→32 只要 0.4 秒。128 条也只要 0.6 秒。
+        真出问题由错误冷却兜底（429/5xx 立刻减半并停 5 秒），
+        不需要靠「加得慢」来保护服务器。
 
         **要有进度才放开。** 字节卡住不动的时候加连接只会让情况更糟，
         所以「最近有进度」是放开的前提。
@@ -1074,7 +1080,11 @@ class DownloadFlow:
                 # 硬上限 = min(parallelism_cap, _slot_limit)
                 effective_max = min(self.parallelism_cap, self._slot_limit)
                 if self._governor.limit < effective_max:
-                    self._governor.set_limit(self._governor.limit + 1)
+                    # 翻倍而不是加一：见上面 docstring。加一让 32 个
+                    # 线程等 3 秒才用上，用户看到的是「有线程一直排队」。
+                    self._governor.set_limit(
+                        min(effective_max, max(1, self._governor.limit) * 2)
+                    )
             except Exception as err:
                 # **后台任务不能静默死掉。** 之前这里抛过一次
                 # AttributeError（属性名写错），任务当场没了，

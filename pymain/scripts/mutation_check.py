@@ -64,6 +64,48 @@ MUTATIONS: list[tuple[str, str, str, str]] = [
         "        self._error_backoff_until = now  # 变异：没有冷却期\n",
         "错误之后没有冷却期",
     ),
+    (
+        "sdm/engine/download_flow.py",
+        "                    self._governor.set_limit(\n"
+        "                        min(effective_max, max(1, self._governor.limit) * 2)\n"
+        "                    )\n",
+        "                    self._governor.set_limit(self._governor.limit + 1)\n",
+        "连接爬坡退回每条 +1（32 线程要等 3 秒）",
+    ),
+    (
+        "sdm/engine/download_flow.py",
+        "                if self._governor.limit < effective_max:\n"
+        "                    # 翻倍而不是加一：见上面 docstring。加一让 32 个\n"
+        "                    # 线程等 3 秒才用上，用户看到的是「有线程一直排队」。\n"
+        "                    self._governor.set_limit(\n"
+        "                        min(effective_max, max(1, self._governor.limit) * 2)\n"
+        "                    )\n",
+        "                if self._governor.limit < effective_max:\n"
+        "                    self._governor.set_limit(effective_max)\n",
+        "连接爬坡一步到位（连接风暴）",
+    ),
+    (
+        "sdm/engine/download_flow.py",
+        "                if self._last_progress_at < time.monotonic() - 2.0:\n"
+        "                    continue\n",
+        "                if False:\n"
+        "                    continue  # 变异：没有进度也加连接\n",
+        "卡住的时候还继续加连接",
+    ),
+    (
+        "sdm/engine/download_flow.py",
+        "                if time.monotonic() < self._error_backoff_until:\n"
+        "                    continue\n",
+        "                if False:\n"
+        "                    continue  # 变异：冷却期内也加连接\n",
+        "错误冷却期内还继续加连接",
+    ),
+    (
+        "sdm/engine/download_flow.py",
+        "                effective_max = min(self.parallelism_cap, self._slot_limit)\n",
+        "                effective_max = self.parallelism_cap  # 变异：忽略份额\n",
+        "连接数越过任务份额上限",
+    ),
 ]
 
 
@@ -75,6 +117,7 @@ def _run_tests() -> tuple[bool, str]:
             "-m",
             "pytest",
             "tests/test_shared_budget.py",
+            "tests/test_scheduler_handoff.py",
             "-q",
             "--no-header",
             "-p",
