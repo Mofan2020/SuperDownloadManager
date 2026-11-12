@@ -119,7 +119,7 @@ def test_the_slot_is_not_handed_over_twice(tmp_path, monkeypatch):
 
     并把上限守住——修「交接太慢」最省事的错法是把计数直接减到 0。
     """
-    engine, started = _engine(tmp_path, monkeypatch, concurrency=1)
+    engine, _started = _engine(tmp_path, monkeypatch, concurrency=1)
 
     async def _inner() -> None:
         await engine.start([_spec(tmp_path, i) for i in range(3)])
