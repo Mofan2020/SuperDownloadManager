@@ -178,8 +178,11 @@ def test_engine_cancel_cleans_partials_even_when_unlink_is_locked(
     from tests.range_server import RangeServer
 
     async def _inner() -> None:
-        total = 4 * 1024 * 1024
-        srv = RangeServer(total_bytes=total, chunk_delay=0.02)
+        # 文件要够大、块要够慢，保证取消的时候它确实还在下。
+        # 连接爬坡改快之后（v2.2.7），4MB / 0.02s 的配置 0.35 秒就下完了，
+        # 分片被正常清理掉，这两个用例连删除路径都走不到。
+        total = 32 * 1024 * 1024
+        srv = RangeServer(total_bytes=total, chunk_delay=0.05)
         try:
             engine = DownloadEngine()
             ids = await engine.start([
@@ -225,8 +228,11 @@ def test_engine_cancel_deletes_while_unlink_always_fails(
     from tests.range_server import RangeServer
 
     async def _inner() -> None:
-        total = 4 * 1024 * 1024
-        srv = RangeServer(total_bytes=total, chunk_delay=0.02)
+        # 文件要够大、块要够慢，保证取消的时候它确实还在下。
+        # 连接爬坡改快之后（v2.2.7），4MB / 0.02s 的配置 0.35 秒就下完了，
+        # 分片被正常清理掉，这两个用例连删除路径都走不到。
+        total = 32 * 1024 * 1024
+        srv = RangeServer(total_bytes=total, chunk_delay=0.05)
         try:
             engine = DownloadEngine()
             ids = await engine.start([
