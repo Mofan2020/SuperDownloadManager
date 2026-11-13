@@ -1,4 +1,4 @@
-## Super Download Manager v2.3.0 - Pre-release
+## Super Download Manager v2.3.1 - Pre-release
 
 ### 本次更新中添加了下列功能：
 
@@ -13,6 +13,7 @@
 ### 本次更新中修复了下列问题：
 
 - Windows 上命令行工具一个都没装上，终端里始终没有 `sdm` 这个命令
+- 装好之后再打开一次程序，会把自己装坏：命令行还在，后台服务却起不来
 
 ## Super Download Manager v2.2.9 - Pre-release
 

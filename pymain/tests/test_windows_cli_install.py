@@ -320,3 +320,58 @@ def test_running_from_source_adds_no_install_check(monkeypatch: pytest.MonkeyPat
     gui_main._check_windows_install(check)
 
     assert checks == []
+
+
+def test_the_zip_signature_does_not_depend_on_the_clock(tmp_path: Path) -> None:
+    """**这条是 CI 上那次失败的根因。**
+
+    onefile 每次启动把内嵌文件解到新的临时目录，同一个 zip 的 mtime 在不同
+    进程里可能不一样。指纹里带 mtime，就会「每次启动都判定变了」→ 去替换
+    正在运行、被锁住的 sdmd.exe → 解包失败 → 整个安装提前退出，报 not_bundle。
+    """
+    archive = tmp_path / "sdm-cli.zip"
+    _make_zip(archive, "sdm.exe", "payload")
+    first = bootstrap._zip_signature(archive)
+
+    import os
+
+    stamp = time.time() + 3600
+    os.utime(archive, (stamp, stamp))
+
+    assert bootstrap._zip_signature(archive) == first, "mtime 不该影响指纹"
+
+
+def test_a_locked_daemon_does_not_take_the_cli_down_with_it(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """daemon 解不出包（exe 锁着）时，CLI 那部分必须照常装完并如实上报。"""
+    layout = {
+        "base": tmp_path,
+        "runtime": tmp_path / "runtime",
+        "cli_exe": tmp_path / "runtime" / "sdm" / "sdm.exe",
+        "daemon_exe": tmp_path / "runtime" / "sdmd" / "sdmd.exe",
+        "shim_dir": tmp_path / "bin",
+        "shim": tmp_path / "bin" / "sdm.cmd",
+    }
+    (layout["runtime"] / "sdm").mkdir(parents=True)
+    layout["cli_exe"].write_bytes(b"MZ")
+    monkeypatch.setattr(bootstrap, "windows_install_paths", lambda: layout)
+    monkeypatch.setattr(bootstrap, "install_native_host_windows",
+                        lambda exe: {"ok": True, "path": ""})
+    monkeypatch.setattr(bootstrap, "_add_to_user_path",
+                        lambda path: {"ok": True, "reason": "installed", "in_path": True})
+
+    def fake_extract(archive: Path, dest: Path, stop=None) -> bool:
+        return archive.name == "sdm-cli.zip"
+
+    monkeypatch.setattr(bootstrap, "_extract_zip_once", fake_extract)
+    monkeypatch.setattr(bootstrap.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(bootstrap.sys, "_MEIPASS", str(tmp_path / "meipass"), raising=False)
+    monkeypatch.setattr(bootstrap, "subprocess", type("S", (), {
+        "run": staticmethod(lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()),
+    })())
+
+    result = bootstrap._ensure_windows()
+
+    assert result["cli"]["ok"] is True, "CLI 不该被 daemon 的失败连累"
+    assert result["cli"]["in_path"] is True
+    assert result["daemon"]["reason"] == "daemon_extract_failed"

@@ -447,17 +447,23 @@ def install_native_host_windows(executable: Path) -> dict:
 
 
 def _zip_signature(archive: Path) -> str:
-    """zip 的「这一份是哪一份」指纹：大小 + 修改时间。
+    """zip 的「这一份是哪一份」指纹：应用版本 + 大小 + 文件名。
 
-    不用版本号：daemon 和 native-host 的 zip 跟 GUI 不是同一个构建产物，
-    也没人保证它们的版本号会跟着改。大小 + mtime 只能靠重新打包来变，
-    而重新打包正是「该换一份了」的判据。
+    **不能用 mtime。** onefile 每次启动都会把内嵌文件解到新的临时目录，
+    同一个 zip 在不同进程里 mtime 可能不一样——于是每次启动都判定「变了」，
+    去替换正在运行、被锁住的 `sdmd.exe`，解包失败、整个安装提前退出。
+    CI 上就是这么炸的：第一次装好了，第二次报 not_bundle。
+
+    版本号 + 大小在同一个构建里恒定，换个版本必然变，正好是「该换一份了」
+    的判据。
     """
     try:
         stat = archive.stat()
     except OSError:
         return ""
-    return f"{stat.st_size}:{int(stat.st_mtime)}"
+    from ..version import __version__
+
+    return f"{__version__}:{stat.st_size}:{archive.name}"
 
 
 def _needs_extract(archive: Path, dest: Path) -> bool:
@@ -546,14 +552,30 @@ def _ensure_windows() -> dict:
             return
         try:
             subprocess.run(["schtasks", "/End", "/TN", task], capture_output=True)
-            time.sleep(0.6)
+            # `/End` 只是让调度器停止任务；进程有时还赖着（任务被人手动起过、
+            # 或者是从别的途径起的），所以再按镜像名补一刀。
+            subprocess.run(["taskkill", "/IM", "sdmd.exe", "/F"], capture_output=True)
+            time.sleep(1.0)
         except OSError:
             pass
 
     if not _extract_zip_once(cli_zip, runtime / "sdm"):
+        result["cli"] = {
+            "ok": False,
+            "reason": "cli_extract_failed",
+            "path": str(layout["cli_exe"]),
+            "in_path": False,
+        }
         return result
+    # **daemon 解不出来不挡 CLI。** 它可能正跑着、exe 被锁住；那份旧的是能
+    # 用的，而把整个函数提前 return 会把已经装好的 CLI 结果也一起丢掉——
+    # CI 上看到的就是「shim 和 exe 都在，却报 not_bundle」。
     if not _extract_zip_once(daemon_zip, runtime / "sdmd", stop=_stop_running_daemon):
-        return result
+        result["daemon"] = {
+            "ok": False,
+            "reason": "daemon_extract_failed",
+            "path": str(layout["daemon_exe"]),
+        }
     # 原生消息宿主（规格 §3.1）。浏览器按清单里的 path 拉起它，
     # 解不出来就装不了清单——但这不影响下载功能，所以失败只记
     # 下来，不中断启动。
