@@ -177,6 +177,54 @@ jobs:
           if (-not (Test-Path $exe)) { throw "exe 没生成：$exe" }
           Write-Host "exe size: $((Get-Item $exe).Length) bytes"
 
+      - name: Verify the CLI install chain
+        shell: pwsh
+        run: |
+          # **这一段是真机验证。** 单元测试里 winreg、schtasks、解包全是替身，
+          # 装得上装不上只有真 Windows 说得准。以前这条链整个是死代码：
+          # 函数返回 not_bundle，谁都不报错，用户只是发现终端里没有 sdm。
+          $exe = "pymain/dist/windows/SuperDownloadManager.exe"
+          $report = Join-Path $env:TEMP "sdm-selftest.json"
+          $p = Start-Process -FilePath $exe -ArgumentList '--self-test','--report',$report -Wait -PassThru
+          if (-not (Test-Path $report)) { throw "自检没写报告：$report" }
+          Get-Content $report
+          if ($p.ExitCode -ne 0) { throw "自检退出码 $($p.ExitCode)" }
+
+          $local = Join-Path $env:LOCALAPPDATA "SuperDownloadManager"
+          $shim = Join-Path $local "bin\sdm.cmd"
+          $cli = Join-Path $local "runtime\sdm\sdm.exe"
+          $daemon = Join-Path $local "runtime\sdmd\sdmd.exe"
+          foreach ($f in @($shim, $cli, $daemon)) {
+            if (-not (Test-Path $f)) { throw "没解出来：$f" }
+            Write-Host "OK $f"
+          }
+
+          $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+          if ($userPath -notlike "*SuperDownloadManager\bin*") {
+            throw "用户 PATH 里没有 CLI 目录：$userPath"
+          }
+          Write-Host "OK 用户 PATH 含 CLI 目录"
+
+          schtasks /Query /TN SuperDownloadManagerDaemon | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "daemon 计划任务没注册" }
+          Write-Host "OK 计划任务已注册"
+
+          # shim 能不能真的跑起来。daemon 可能还没起，所以只要求它**不是**
+          # 「找不到命令」——那才是 shim 写坏了的样子。
+          $out = & cmd.exe /c "`"$shim`" list" 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host "sdm list -> exit $code"
+          Write-Host $out
+          if ($out -match "不是内部或外部命令|is not recognized") { throw "shim 跑不起来" }
+
+          # 幂等：再跑一次不能报错，也不能把同一个目录往 PATH 里塞第二遍。
+          $again = Start-Process -FilePath $exe -ArgumentList '--self-test','--report',$report -Wait -PassThru
+          if ($again.ExitCode -ne 0) { throw "第二次自检失败" }
+          $after = [Environment]::GetEnvironmentVariable("Path", "User")
+          $hits = @($after.Split(';') | Where-Object { $_ -like "*SuperDownloadManager\bin*" })
+          if ($hits.Count -ne 1) { throw "PATH 里出现了 $($hits.Count) 条 CLI 目录：$after" }
+          Write-Host "OK 幂等（PATH 里仍然只有一条）"
+
       - name: Verify exe icon
         shell: pwsh
         run: |

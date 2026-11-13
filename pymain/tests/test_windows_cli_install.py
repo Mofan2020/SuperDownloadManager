@@ -239,3 +239,84 @@ def test_an_already_present_directory_does_not_broadcast(
     bootstrap._add_to_user_path(Path(r"C:\SDM\bin"))
 
     assert broadcasts == []
+
+
+# ------------------------------------------------ 5. 自检要真的核对文件
+
+
+def _collect() -> tuple[list, object]:
+    checks: list[tuple[str, bool, str]] = []
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        checks.append((name, ok, detail))
+
+    return checks, check
+
+
+def test_the_self_test_fails_when_the_cli_is_not_on_disk(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """安装函数说 ok 不算数，文件真的在才算。
+
+    这条链曾经整个是死代码：`ensure_installed()` 一直返回 not_bundle，
+    界面和日志都不报错，用户只是发现终端里没有 `sdm`。
+    """
+    from sdm.gui import main as gui_main
+
+    layout = {
+        "shim": tmp_path / "bin" / "sdm.cmd",
+        "cli_exe": tmp_path / "runtime" / "sdm" / "sdm.exe",
+        "daemon_exe": tmp_path / "runtime" / "sdmd" / "sdmd.exe",
+    }
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(bootstrap, "windows_install_paths", lambda: layout)
+    monkeypatch.setattr(bootstrap, "ensure_installed", lambda: {
+        "cli": {"ok": True, "path": str(layout["shim"]), "in_path": True},
+        "daemon": {"ok": True, "reason": "task_registered"},
+    })
+    checks, check = _collect()
+
+    gui_main._check_windows_install(check)
+
+    names = {name: ok for name, ok, _ in checks}
+    assert names["命令行工具"] is False, "文件不在却报 ok 就是假绿"
+    assert names["后台服务"] is False
+
+
+def test_the_self_test_passes_once_the_files_are_there(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from sdm.gui import main as gui_main
+
+    layout = {
+        "shim": tmp_path / "bin" / "sdm.cmd",
+        "cli_exe": tmp_path / "runtime" / "sdm" / "sdm.exe",
+        "daemon_exe": tmp_path / "runtime" / "sdmd" / "sdmd.exe",
+    }
+    for key in ("shim", "cli_exe", "daemon_exe"):
+        layout[key].parent.mkdir(parents=True, exist_ok=True)
+        layout[key].write_bytes(b"MZ")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(bootstrap, "windows_install_paths", lambda: layout)
+    monkeypatch.setattr(bootstrap, "ensure_installed", lambda: {
+        "cli": {"ok": True, "path": str(layout["shim"]), "in_path": True},
+        "daemon": {"ok": True, "reason": "task_registered"},
+    })
+    checks, check = _collect()
+
+    gui_main._check_windows_install(check)
+
+    assert {name: ok for name, ok, _ in checks} == {"命令行工具": True, "后台服务": True}
+
+
+def test_running_from_source_adds_no_install_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """源码运行时不该往开发机的 PATH 里塞东西，也就不该有这个检查项。"""
+    from sdm.gui import main as gui_main
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    checks, check = _collect()
+
+    gui_main._check_windows_install(check)
+
+    assert checks == []

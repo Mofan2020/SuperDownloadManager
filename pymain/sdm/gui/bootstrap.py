@@ -297,6 +297,24 @@ def _windows_appdata() -> Path:
     return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "SuperDownloadManager"
 
 
+def windows_install_paths() -> dict[str, Path]:
+    """Windows 上这些东西应该落在哪。
+
+    自检、测试和安装代码本身都用这一份，别各算一遍：路径算歪一处，
+    「装好了」的判断就会看着通过而实际什么都没装。
+    """
+    base = _windows_appdata()
+    runtime = base / "runtime"
+    return {
+        "base": base,
+        "runtime": runtime,
+        "cli_exe": runtime / "sdm" / "sdm.exe",
+        "daemon_exe": runtime / "sdmd" / "sdmd.exe",
+        "shim_dir": base / "bin",
+        "shim": base / "bin" / "sdm.cmd",
+    }
+
+
 def _normalize_path_entry(entry: str) -> str:
     """比较 PATH 里的目录时用的规范形。
 
@@ -510,8 +528,8 @@ def _ensure_windows() -> dict:
     if not meipass:
         return result
 
-    base = _windows_appdata()
-    runtime = base / "runtime"
+    layout = windows_install_paths()
+    runtime = layout["runtime"]
     cli_zip = Path(meipass) / "sdm-cli.zip"
     daemon_zip = Path(meipass) / "sdmd-daemon.zip"
     host_zip = Path(meipass) / "sdmd-native-host.zip"
@@ -550,13 +568,13 @@ def _ensure_windows() -> dict:
         installed = install_native_host_windows(host_exe)
         result["native_host"] = installed
 
-    cli_exe = runtime / "sdm" / "sdm.exe"
-    daemon_exe = runtime / "sdmd" / "sdmd.exe"
+    cli_exe = layout["cli_exe"]
+    daemon_exe = layout["daemon_exe"]
 
     # .cmd shim 放到 PATH 上——Windows 没软链，shim 是最稳的
-    shim_dir = base / "bin"
+    shim_dir = layout["shim_dir"]
     shim_dir.mkdir(parents=True, exist_ok=True)
-    shim = shim_dir / "sdm.cmd"
+    shim = layout["shim"]
     # 相对路径：%~dp0..\runtime\sdm\sdm.exe
     # %~dp0 = shim 所在目录（以 \ 结尾），后面接相对路径，全程纯 ASCII
     rel = r"..\runtime\sdm\sdm.exe"

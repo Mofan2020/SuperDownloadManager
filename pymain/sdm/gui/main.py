@@ -71,6 +71,41 @@ def _check_applescript_dict(check, is_macos: bool) -> None:
         check("AppleScript 字典", False, str(err))
 
 
+def _check_windows_install(check) -> None:
+    """Windows 打包版：安装链到底有没有落盘。
+
+    **只在 frozen 上跑。** 源码运行时 ``ensure_installed()`` 本来就什么都
+    不做（不该往开发机的 PATH 里塞东西）。
+
+    判断**不能只看函数返回的 ok**：这条链曾经整个是死代码——函数返回的一直
+    是 not_bundle，界面和日志都不报错，用户只是发现终端里没有 ``sdm``。
+    所以这里落到「文件真的在不在」上。
+    """
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+    try:
+        from .bootstrap import ensure_installed, windows_install_paths
+
+        install = ensure_installed()
+        layout = windows_install_paths()
+        cli = install.get("cli") or {}
+        shim = Path(str(cli.get("path") or layout["shim"]))
+        check(
+            "命令行工具",
+            bool(cli.get("ok")) and shim.is_file() and layout["cli_exe"].is_file(),
+            f"shim={shim.exists()} exe={layout['cli_exe'].exists()} "
+            f"in_path={cli.get('in_path')} reason={cli.get('reason')}",
+        )
+        daemon = install.get("daemon") or {}
+        check(
+            "后台服务",
+            bool(daemon.get("ok")) and layout["daemon_exe"].is_file(),
+            f"exe={layout['daemon_exe'].exists()} reason={daemon.get('reason')}",
+        )
+    except Exception as err:
+        check("命令行工具", False, str(err))
+
+
 def run_self_test(report_path: str | None = None) -> int:
     """无界面自检：检查依赖、路径、引擎能否起来。
 
@@ -245,6 +280,17 @@ def run_self_test(report_path: str | None = None) -> int:
         )
     except Exception as err:
         check("文案键一致", False, str(err))
+
+    # Windows：第一次启动要做的安装链（解包 CLI/daemon、写 shim、进 PATH、
+    # 注册计划任务）。
+    #
+    # **只在打包版上跑。** 源码运行时 ensure_installed() 本来就什么都不做
+    # （不该往开发机的 PATH 里塞东西），所以这里必须用 frozen 把它挡开。
+    #
+    # 而且判断**不能只看函数返回的 ok**：这条链曾经整个是死代码——函数返回
+    # 的一直是 not_bundle，界面和日志都不报错，用户只是发现终端里没有 sdm。
+    # 所以这里落到「文件真的在不在」上。
+    _check_windows_install(check)
 
     ok = all(passed for _, passed, _ in checks)
     for name, passed, detail in checks:
