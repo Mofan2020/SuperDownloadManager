@@ -27,6 +27,8 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 LAUNCH_AGENT_LABEL = "com.skyc8266.superdownloadmanager.daemon"
@@ -295,6 +297,102 @@ def _windows_appdata() -> Path:
     return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "SuperDownloadManager"
 
 
+def _normalize_path_entry(entry: str) -> str:
+    """比较 PATH 里的目录时用的规范形。
+
+    尾部分隔符、引号、正斜杠、大小写——这四样在注册表里都可能和写进去的
+    不一样。不归一化的话「已经在 PATH 里了」永远判不出来，每次启动都往里
+    追加一条，PATH 越滚越长直到超过上限。
+    """
+    text = str(entry or "").strip().strip('"').replace("/", "\\")
+    return text.rstrip("\\").lower()
+
+
+def _broadcast_environment_change() -> bool:
+    """告诉资源管理器「环境变量变了」。
+
+    注册表写完，**已经在运行的进程看不到新 PATH**，而且新开的终端也看不到
+    ——除非有人在广播 `WM_SETTINGCHANGE`。没有这一步，用户装完打开终端敲
+    `sdm` 得到的是「不是内部或外部命令」，只有注销重登才好，那个体验跟
+    「没装」没有区别。
+
+    失败不报错：看不到的就是要重开终端，比抛异常打断启动强。
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return False
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        send = user32.SendMessageTimeoutW
+        send.argtypes = [
+            wintypes.HWND,        # hWnd
+            wintypes.UINT,        # Msg
+            wintypes.WPARAM,      # wParam
+            ctypes.c_void_p,      # lParam（指向 "Environment" 的指针）
+            wintypes.UINT,        # fuFlags
+            wintypes.UINT,        # uTimeout
+            ctypes.POINTER(wintypes.DWORD),  # lpdwResult
+        ]
+        send.restype = wintypes.LPARAM
+        text = ctypes.c_wchar_p("Environment")
+        result = wintypes.DWORD(0)
+        # HWND_BROADCAST=0xFFFF, WM_SETTINGCHANGE=0x001A, SMTO_ABORTIFHUNG=0x0002
+        sent = send(0xFFFF, 0x001A, 0, ctypes.cast(text, ctypes.c_void_p),
+                    0x0002, 5000, ctypes.byref(result))
+        return bool(sent)
+    except Exception:  # 广播失败只影响「要不要重开终端」，不该打断启动
+        return False
+
+
+def _add_to_user_path(directory: Path) -> dict:
+    """把目录加进**用户**的 PATH（HKCU\\Environment），不需要管理员。
+
+    用 winreg 而不是 ``setx``：setx 在 1024 个字符处截断，而一台装了很多
+    开发工具的老机器，PATH 早就超过那个长度了——用 setx 会把人家整条 PATH
+    砍掉一半。
+
+    返回 ``{"ok", "reason", "in_path"}``。
+    """
+    try:
+        import winreg
+    except ImportError as err:  # 只可能发生在非 Windows 上
+        return {"ok": False, "reason": f"no_winreg: {err}"}
+    target = _normalize_path_entry(str(directory))
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, r"Environment", 0,
+            winreg.KEY_READ | winreg.KEY_WRITE,
+        )
+    except OSError as err:
+        return {"ok": False, "reason": f"open_failed: {err}"}
+    try:
+        try:
+            raw, _kind = winreg.QueryValueEx(key, "Path")
+        except OSError:
+            raw = ""
+        parts = [str(part) for part in str(raw or "").split(";") if str(part).strip()]
+        if target in [_normalize_path_entry(part) for part in parts]:
+            return {"ok": True, "reason": "already", "in_path": True}
+        parts.append(str(directory))
+        # **必须写 REG_EXPAND_SZ。** 老 PATH 里常有 %USERPROFILE%、
+        # %SystemRoot% 这类变量；写成 REG_SZ 它们会变成字面量，
+        # 用户整条 PATH 就废了。
+        winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(parts))
+        # 写完读回来核对：SetValueEx 不保证值真的落进去了。
+        check, _kind2 = winreg.QueryValueEx(key, "Path")
+        if target not in [_normalize_path_entry(part)
+                          for part in str(check or "").split(";")]:
+            return {"ok": False, "reason": "verify_failed", "in_path": False}
+    except OSError as err:
+        return {"ok": False, "reason": f"write_failed: {err}"}
+    finally:
+        winreg.CloseKey(key)
+    _broadcast_environment_change()
+    return {"ok": True, "reason": "installed", "in_path": True}
+
+
 def install_native_host(resources: Path) -> dict:
     """把浏览器原生消息宿主装上（规格 §3.1）。
 
@@ -330,15 +428,53 @@ def install_native_host_windows(executable: Path) -> dict:
         return {"ok": False, "reason": f"install_failed: {err}", "path": ""}
 
 
-def _extract_zip_once(archive: Path, dest: Path) -> bool:
-    """把 zip 解到 dest。已解过（dest 里有标记文件）就跳过。"""
+def _zip_signature(archive: Path) -> str:
+    """zip 的「这一份是哪一份」指纹：大小 + 修改时间。
+
+    不用版本号：daemon 和 native-host 的 zip 跟 GUI 不是同一个构建产物，
+    也没人保证它们的版本号会跟着改。大小 + mtime 只能靠重新打包来变，
+    而重新打包正是「该换一份了」的判据。
+    """
+    try:
+        stat = archive.stat()
+    except OSError:
+        return ""
+    return f"{stat.st_size}:{int(stat.st_mtime)}"
+
+
+def _needs_extract(archive: Path, dest: Path) -> bool:
+    """这份 zip 需不需要（重新）解出来。"""
+    if not archive.is_file():
+        return False
     marker = dest / ".extracted"
-    if marker.exists():
+    try:
+        return marker.read_text(encoding="utf-8").strip() != _zip_signature(archive)
+    except OSError:
         return True
+
+
+def _extract_zip_once(archive: Path, dest: Path, *, stop: Callable[[], None] | None = None) -> bool:
+    """把 zip 解到 dest；内容没变就跳过。
+
+    **以前标记文件里只写一个 ``ok``**，于是升级之后解出来的还是上一版：
+    GUI 换了新 exe，跑在后台的 daemon 和 ``sdm`` 命令还是旧的，用户完全
+    看不出来。现在标记里存 zip 的指纹，换了就整目录换掉。
+
+    ``stop`` 在**真的要重新解**之前调用一次：Windows 上旧 daemon 正跑着
+    的时候，它的 exe 是锁住的，删不掉也覆盖不了。调用方用它先把任务停掉。
+    """
     import zipfile
 
     if not archive.is_file():
         return False
+    marker = dest / ".extracted"
+    signature = _zip_signature(archive)
+    if not _needs_extract(archive, dest):
+        return True
+    if stop is not None:
+        stop()
+    # 整目录换掉，别让旧 exe 混在新版目录里。
+    shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
     try:
         with zipfile.ZipFile(archive) as zf:
@@ -346,7 +482,10 @@ def _extract_zip_once(archive: Path, dest: Path) -> bool:
     except (OSError, zipfile.BadZipFile):
         shutil.rmtree(dest, ignore_errors=True)
         return False
-    marker.write_text("ok", encoding="utf-8")
+    try:
+        marker.write_text(signature, encoding="utf-8")
+    except OSError:
+        return False
     return True
 
 
@@ -376,16 +515,32 @@ def _ensure_windows() -> dict:
     cli_zip = Path(meipass) / "sdm-cli.zip"
     daemon_zip = Path(meipass) / "sdmd-daemon.zip"
     host_zip = Path(meipass) / "sdmd-native-host.zip"
+    task = "SuperDownloadManagerDaemon"
+
+    def _stop_running_daemon() -> None:
+        """升级时先把旧的 daemon 停掉。
+
+        它正跑着的时候，`sdmd.exe` 是**锁住的**：删不掉，也覆盖不了。
+        不先停，重新解包要么失败、要么留下一半新一半旧的目录，然后
+        计划任务拉起来的还是那个旧 exe——升级看上去成功了，实际没变。
+        """
+        if not _needs_extract(daemon_zip, runtime / "sdmd"):
+            return
+        try:
+            subprocess.run(["schtasks", "/End", "/TN", task], capture_output=True)
+            time.sleep(0.6)
+        except OSError:
+            pass
 
     if not _extract_zip_once(cli_zip, runtime / "sdm"):
         return result
-    if not _extract_zip_once(daemon_zip, runtime / "sdmd"):
+    if not _extract_zip_once(daemon_zip, runtime / "sdmd", stop=_stop_running_daemon):
         return result
     # 原生消息宿主（规格 §3.1）。浏览器按清单里的 path 拉起它，
     # 解不出来就装不了清单——但这不影响下载功能，所以失败只记
     # 下来，不中断启动。
     host_exe: Path | None = None
-    if _extract_zip_once(host_zip, runtime / "sdmd-native-host"):
+    if _extract_zip_once(host_zip, runtime / "sdmd-native-host", stop=_stop_running_daemon):
         candidate = runtime / "sdmd-native-host" / "sdmd-native-host.exe"
         if candidate.is_file():
             host_exe = candidate
@@ -438,39 +593,27 @@ def _ensure_windows() -> dict:
     # **失败不能提前 return。** PATH 没配上只是命令行要手敲全路径，
     # 后面的 daemon 计划任务注册跟它无关——之前这里 return 掉了，
     # 用户的 daemon 永远注册不上，命令行和后台下载两个都废了。
-    path_ok = True
-    try:
-        import winreg
-
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Environment",
-            0,
-            winreg.KEY_READ | winreg.KEY_WRITE,
-        )
-        try:
-            raw, _ = winreg.QueryValueEx(key, "Path")
-            parts = [p for p in (raw or "").split(";") if p]
-            if str(shim_dir).lower() not in [p.lower() for p in parts]:
-                parts.append(str(shim_dir))
-                winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(parts))
-        finally:
-            winreg.CloseKey(key)
-    except (OSError, ImportError) as err:
-        path_ok = False
+    path_state = _add_to_user_path(shim_dir)
+    if path_state.get("ok"):
         result["cli"] = {
             "ok": True,
-            "reason": f"shim_ok_path_failed: {err}",
+            "reason": str(path_state.get("reason") or "installed"),
+            "path": str(shim),
+            "in_path": bool(path_state.get("in_path")),
+        }
+    else:
+        # 失败**不能提前 return**：PATH 没配上只是命令行要手敲全路径，
+        # 后面的 daemon 计划任务跟它无关。以前这里 return 掉了，用户的
+        # daemon 永远注册不上，命令行和后台下载两个都废了。
+        result["cli"] = {
+            "ok": True,
+            "reason": f"shim_ok_path_failed: {path_state.get('reason')}",
             "path": str(shim),
             "in_path": False,
         }
 
-    if path_ok:
-        result["cli"] = {"ok": True, "reason": "installed", "path": str(shim), "in_path": True}
-
     # daemon 计划任务：幂等注册，不杀正在跑的 daemon
     if daemon_exe.is_file():
-        task = "SuperDownloadManagerDaemon"
         try:
             # 先查现有任务：如果存在且指向同一个 exe，就别动它
             if _windows_task_mentions_daemon(task, daemon_exe):
@@ -521,6 +664,13 @@ def ensure_installed() -> dict:
 
     源码运行时什么都不做——开发的时候不该往用户的 /usr/local/bin
     里塞软链。
+
+    **Windows 必须在 `bundle_resources()` 之前分出去。** 那个函数只认得
+    macOS `.app` 的 `Contents/Resources`，Windows 的 onefile 里没有这么个
+    目录，它返回 `None`。以前平台判断写在它后面，于是 Windows 上永远直接
+    return——`:func:`_ensure_windows` 是**死代码**，CLI 的 shim、PATH、
+    daemon 计划任务、原生消息宿主一个都没装上，而且一句错误都不报：用户只
+    是发现终端里没有 `sdm` 这个命令。
     """
     result = {
         "platform": sys.platform,
@@ -528,6 +678,9 @@ def ensure_installed() -> dict:
         "daemon": {"ok": False, "reason": "not_bundle", "path": ""},
         "native_host": {"ok": False, "reason": "not_bundle", "path": ""},
     }
+    if _is_windows():
+        return _ensure_windows()
+
     resources = bundle_resources()
     if resources is None:
         return result

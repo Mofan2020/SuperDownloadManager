@@ -2368,3 +2368,45 @@ explorer 的 `/select,` 后面按空格截断：路径里有空格就解析失�
 
 守卫不能少：句柄没变时**什么都别做**，否则每 5 秒抖一下图标。
 
+
+
+## Windows 的命令行工具从来没装上过（v2.3.0）
+
+不是没写，是**死代码**。`ensure_installed()` 的第一句是
+
+```python
+resources = bundle_resources()
+if resources is None:
+    return result          # ← Windows 永远走到这里
+```
+
+`bundle_resources()` 只认得 macOS `.app` 的 `Contents/Resources`：它靠
+`sys.executable` 往上两级再拼 `Resources`。Windows 的 onefile 里没有这么个
+目录，`sys._MEIPASS` 才是解包处，所以它返回 `None`，平台判断写在它后面
+就永远轮不到——shim、PATH、daemon 计划任务、原生消息宿主一个都没执行，
+**而且一句错误都不报**：用户看到的现象只是「终端里没有 sdm 这个命令」。
+
+测试为什么没抓到：所有用例都直接调 `_ensure_windows()`，绕开了入口函数。
+现在有一条用例从 `ensure_installed()` 进去，并且把 `bundle_resources` 钉成
+`None`（Windows 的真实样子）。
+
+## 升级不换文件（v2.3.0）
+
+`_extract_zip_once()` 的标记文件里以前只写一个 `ok`：解过一次就永远跳过。
+于是 GUI 换成新 exe 之后，`%LOCALAPPDATA%\...\runtime` 里的 CLI 和 daemon
+还是上一版——用户升级完发现命令行行为没变，谁也想不到是这里。
+
+现在标记里存 zip 的**大小 + mtime**（重新打包才会变），指纹变了就整目录
+换掉。重新解之前会先 `schtasks /End` 停掉正在跑的 daemon：它的 exe 是锁住
+的，不停就删不掉、也覆盖不了，最后留下一半新一半旧的目录，计划任务拉起来
+的还是那个旧 exe。
+
+## PATH 写完要广播（v2.3.0）
+
+注册表写完，**已经运行的进程和新开的终端都看不到新 PATH**，除非有人广播
+`WM_SETTINGCHANGE`。没有这一步，用户装完打开终端敲 `sdm` 得到「不是内部或
+外部命令」，只有注销重登才好——那个体验跟「没装」没有区别。现在写完就广播
+（`SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment")`）。
+
+另外 PATH 比较做了归一化（尾部分隔符、引号、正斜杠、大小写），否则「已经
+在里面了」永远判不出来，每次启动都往里追加一条，PATH 越滚越长。

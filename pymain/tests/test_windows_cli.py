@@ -55,7 +55,8 @@ def _write_shim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     monkeypatch.setattr(bootstrap, "_windows_appdata", lambda: base)
     # zip 都当成「已经解过」——这里只关心 shim 和计划任务。
-    monkeypatch.setattr(bootstrap, "_extract_zip_once", lambda archive, dest: True)
+    monkeypatch.setattr(bootstrap, "_extract_zip_once",
+                    lambda archive, dest, stop=None: True)
     monkeypatch.setattr(bootstrap, "install_native_host_windows", lambda exe: {"ok": True, "path": ""})
     monkeypatch.setattr(bootstrap, "subprocess", _FakeSubprocess())
     # winreg 在 macOS 上没有——PATH 那段直接跳过。
@@ -86,7 +87,8 @@ def test_shim_survives_a_non_ascii_install_path(
     (runtime / "sdmd" / "sdmd.exe").write_bytes(b"MZ")
 
     monkeypatch.setattr(bootstrap, "_windows_appdata", lambda: base)
-    monkeypatch.setattr(bootstrap, "_extract_zip_once", lambda archive, dest: True)
+    monkeypatch.setattr(bootstrap, "_extract_zip_once",
+                    lambda archive, dest, stop=None: True)
     monkeypatch.setattr(bootstrap, "install_native_host_windows", lambda exe: {"ok": True, "path": ""})
     monkeypatch.setattr(bootstrap, "subprocess", _FakeSubprocess())
     monkeypatch.setitem(sys.modules, "winreg", None)
@@ -150,7 +152,8 @@ def _run_ensure_windows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake) -
     (runtime / "sdmd" / "sdmd.exe").write_bytes(b"MZ")
 
     monkeypatch.setattr(bootstrap, "_windows_appdata", lambda: base)
-    monkeypatch.setattr(bootstrap, "_extract_zip_once", lambda archive, dest: True)
+    monkeypatch.setattr(bootstrap, "_extract_zip_once",
+                    lambda archive, dest, stop=None: True)
     monkeypatch.setattr(bootstrap, "install_native_host_windows", lambda exe: {"ok": True, "path": ""})
     monkeypatch.setattr(bootstrap, "subprocess", fake)
     monkeypatch.setitem(sys.modules, "winreg", None)
