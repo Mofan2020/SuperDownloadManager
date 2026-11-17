@@ -348,6 +348,37 @@ def test_hand_over_url_without_a_url_is_a_no_op(lock_file: Path) -> None:
 # ------------------------------------------------------------------ 工具
 
 
+def test_without_psutil_the_lock_falls_back_to_the_pid(
+    lock_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没装 psutil 的时候，守卫退回「只信进程号」。
+
+    **这是降级，不是等价。** 分不出被回收的进程号，那个「双击没反应」
+    的 bug 就会回来，所以 psutil 在 requirements.txt 里是必需依赖而不是
+    可选。这条用例钉的是「降级之后仍然能工作」，不是「降级没问题」。
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_psutil(name: str, *args: object, **kwargs: object) -> object:
+        if name == "psutil":
+            raise ImportError("psutil is not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_psutil)
+
+    mine = SingleInstance(lock_file)
+    assert single_instance._process_start_time(1) is None
+    # 写锁的时候不写启动时间，只写进程号。
+    mine.acquire()
+    try:
+        text = lock_file.read_text(encoding="utf-8").strip()
+        assert text == str(os.getpid())
+    finally:
+        mine.release()
+
+
 def _start_time(pid: int) -> float | None:
     return single_instance._process_start_time(pid)
 
