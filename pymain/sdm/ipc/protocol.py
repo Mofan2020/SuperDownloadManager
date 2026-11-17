@@ -33,6 +33,11 @@ METHOD_CANCEL = "cancel"
 METHOD_CONFIG = "config"
 METHOD_RELINK = "relink"
 METHOD_PING = "ping"
+#: 请已经在跑的那个 GUI 把窗口叫到前面来。
+#:
+#: **双击 exe 时用。** 第二个进程不该自己再开一个窗口（那会多一个
+#: 托盘图标、多一份引擎、多一份下载任务表），而是把已有的那个叫出来。
+METHOD_SHOW_WINDOW = "showWindow"
 
 # -- 浏览器派单的扩展字段 --------------------------------------------
 #

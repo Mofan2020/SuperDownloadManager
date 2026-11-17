@@ -65,17 +65,36 @@ def _shell_tray_hwnd() -> int:
 
     非 Windows 或者调用失败都返回 0，看门狗看到 0 就当没事发生。
     """
-    if sys.platform != "win32":
-        return 0
-    try:
-        import ctypes
+    from . import win32_tray
 
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        user32.FindWindowW.restype = ctypes.c_void_p
-        user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
-        return int(user32.FindWindowW("Shell_TrayWnd", None) or 0)
-    except Exception:
-        return 0
+    return win32_tray.shell_tray_hwnd()
+
+
+def _icon_present(icon: Any) -> bool | None:
+    """问系统：这个图标现在还挂在通知区域里吗。
+
+    **为什么光看句柄不够。** Explorer 重启只是图标消失的一种原因。
+    另一种更常见：Explorer 好好地跑着，图标被系统回收了（Windows 11
+    会把新图标塞进折叠区，看起来就是「不见了」）。这两种情况下
+    ``Shell_TrayWnd`` 的句柄都没变，只盯句柄的看门狗永远发现不了。
+
+    **问法有坑。** pystray 挂的图标 ``uID`` 都是 0（它传的是
+    ``hID=id(self)``，而结构体字段叫 ``uID``，ctypes 当成普通属性
+    丢掉了），拿 ``id(icon)`` 去问会得到「不存在」——而图标明明就在
+    眼前。
+
+    问不出来时返回 None，那跟「不在」是两回事，不能混。
+    """
+    from . import win32_tray
+
+    if not win32_tray.is_supported():
+        return None
+
+    hwnd = getattr(icon, "_hwnd", 0) or 0
+    if not hwnd:
+        # pystray 还没建好窗口（或者换了版本，属性名变了）：问不了。
+        return None
+    return win32_tray.notify_icon_present(int(hwnd), 0)
 
 
 def available() -> bool:
@@ -215,30 +234,50 @@ class TrayController:
             self._watch_tick()
 
     def _watch_tick(self) -> None:
-        """看门狗的一拍：任务栏换了就把图标重新挂上。
+        """看门狗的一拍：图标掉了就重新挂上。
 
         单独拆出来是为了能直接测——不用真起线程、也不用等 5 秒。
+
+        **两种掉法都要管。**
+
+        一、Explorer 重启了：任务栏窗口被重建，句柄变了，图标全被清掉。
+        二、Explorer 好好地跑着，但图标被系统回收了（Windows 11 会把
+        新图标塞进折叠区，从外面看就是「不见了」）。这种情况句柄没变，
+        只盯句柄的看门狗永远发现不了——**用户报的就是这种**。
+
+        所以每拍都问一次系统「这个图标还在不在」，问出来不在就重挂。
+        问不出来（None）的时候不动手：分不清「不在」和「问不了」的
+        时候瞎重挂，会让图标每 5 秒闪一次。
         """
         if self._icon is None:
             return
-        hwnd = _shell_tray_hwnd()
-        hwnd = _shell_tray_hwnd()
-        if hwnd == 0 or hwnd == self._tray_hwnd:
-            return
-        self._tray_hwnd = hwnd
-        self._readd()
 
-    def _readd(self) -> None:
+        hwnd = _shell_tray_hwnd()
+        if hwnd and hwnd != self._tray_hwnd:
+            # 任务栏被重建过了。
+            self._tray_hwnd = hwnd
+            self._readd("任务栏重建过")
+            return
+
+        present = _icon_present(self._icon)
+        if present is False:
+            self._readd("图标不在通知区域了")
+
+    def _readd(self, reason: str) -> None:
         """重新把图标挂到（新的）任务栏上。
 
         pystray 的 `visible` 走的是 Shell_NotifyIcon：置 False 发
         NIM_DELETE，置 True 发 NIM_ADD。任务栏重建之后旧图标已经不在了，
         NIM_DELETE 失败无所谓，NIM_ADD 才是真正把它挂回去的那一步。
+
+        **置 False 再置 True，不能只置 True。** pystray 的 `visible`
+        setter 遇到值没变就直接返回（`if self._visible == value: return`），
+        只置 True 等于什么都没做。
         """
         try:
             self._icon.visible = False
             self._icon.visible = True
-            log.info(CAT_GUI, "任务栏重建过，托盘图标已重新挂上")
+            log.info(CAT_GUI, f"{reason}，托盘图标已重新挂上")
         except Exception as err:
             log.warning(CAT_GUI, f"托盘图标重新挂上失败: {err}")
 

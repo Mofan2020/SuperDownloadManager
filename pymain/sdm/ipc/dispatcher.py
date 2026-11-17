@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 from .. import paths
@@ -21,6 +22,7 @@ from .protocol import (
     METHOD_PING,
     METHOD_RELINK,
     METHOD_RESUME,
+    METHOD_SHOW_WINDOW,
     IPCRequest,
     IPCResponse,
 )
@@ -47,6 +49,11 @@ class Dispatcher:
 
     def __init__(self, engine: DownloadEngine | None = None) -> None:
         self.engine = engine or DownloadEngine()
+        #: 「把窗口叫到前面来」的回调。GUI 那头装上，CLI 那头没有。
+        #: **属性而不是构造参数**——构造参数传进来的回调会被这个对象
+        #: 一直持有，GUI 退出时它连着窗口一起走，Dispatcher 是引擎的
+        #: 长期同伴，让它引用窗口就等于让引擎引用窗口。
+        self.on_show_window: Callable[[], None] | None = None
 
     async def handle(self, raw: str | bytes) -> str:
         """处理一条请求，返回响应 JSON。"""
@@ -85,6 +92,19 @@ class Dispatcher:
 
         if method == METHOD_RELINK:
             return await self._relink(request, params)
+
+        if method == METHOD_SHOW_WINDOW:
+            # **这不是引擎调用。** 请求方要的是「把窗口叫到前面来」，
+            # 引擎管不着。回调由 GUI 那头装上。
+            handler = getattr(self, "on_show_window", None)
+            if handler is None:
+                return IPCResponse.failure(request.id, "showWindow: 没有窗口可叫")
+            try:
+                handler()
+            except Exception as err:
+                log.warning(CAT_IPC, f"把窗口叫到前面失败: {err}")
+                return IPCResponse.failure(request.id, f"showWindow: {err}")
+            return IPCResponse.success(request.id, {"shown": True})
 
         return IPCResponse.failure(request.id, f"unknown method '{method}'")
 

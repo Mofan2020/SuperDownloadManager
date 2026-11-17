@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import json
+from collections.abc import Callable
 from typing import Any
 
 from ..ipc.dispatcher import Dispatcher
@@ -52,6 +53,18 @@ class GUIIPCServer:
         self.timeout = timeout
         self._dispatcher = Dispatcher(engine)
         self._server: SocketServer | None = None
+        #: 「把窗口叫到前面来」的回调。由 GUI 那头装上。
+        self.on_show_window: Callable[[], None] | None = None
+
+    def set_show_window_handler(self, handler: Callable[[], None]) -> None:
+        """装上「叫出窗口」的回调。
+
+        **双击 exe 时用。** 第二个进程连上这个端点发一个 showWindow，
+        这个回调负责把主窗口拉到前面。装了它，第二个进程就不用自己
+        再开一个窗口（那是「托盘出现两个图标」的来源）。
+        """
+        self.on_show_window = handler
+        self._dispatcher.on_show_window = handler
 
     # -- 生命周期 ----------------------------------------------------
 

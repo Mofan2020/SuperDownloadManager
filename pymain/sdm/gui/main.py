@@ -572,12 +572,86 @@ def _install_tray(bridge, window, on_quit=None, on_show=None) -> None:
         _tray_controller = controller
 
 
+def resolve_second_instance(instance: object, pending_url: str) -> str:
+    """第二个进程该做什么。
+
+    **这一段是决策，不该埋在 ``main`` 里。** 「已经有一个 GUI 在跑」
+    的时候，第二个进程只有三条路：
+
+    * 把窗口叫到前面来，自己退出——这是最常见的，双击 exe 的本意；
+    * 主人已经不在了，接管锁，自己开窗口；
+    * 主人还活着但叫不醒（界面卡死、webview 线程死了），强制接管。
+
+    第三种最要紧：**不接管的话，这个程序就彻底打不开了。** 用户
+    双击多少次都没用，只有结束任务管理器里的进程才救得回来。
+
+    返回 ``"exit"`` 表示这个进程该结束，``"continue"`` 表示它该自己
+    开窗口。
+
+    抽出来是为了能测：这几条分支各自的条件不同，埋在 ``main`` 里
+    就没有办法单独钉住任何一条。
+    """
+    log = get_logger()
+
+    # **先把地址交出去。** 这个进程可能是被 URL scheme 唤起的，用户
+    # 点了下载链接，指望有东西开始下。地址交不出去就退出的话，链接
+    # 白点了。
+    if pending_url:
+        instance.hand_over_url(pending_url)
+
+    # 再试试让它把窗口叫到前面来。
+    if instance.ask_running_to_show():
+        log.info(CAT_GUI, "已经有一个实例在跑，已让它把窗口叫到前面来")
+        return "exit"
+
+    # 叫不醒。可能主人还活着但界面卡死了，也可能它自己也在退出。
+    # 活着的主人不给接管（两个窗口写同一份设置更糟），但这种情况下
+    # 程序就彻底打不开了——所以强制接管。
+    if instance.owner_alive():
+        log.warning(CAT_GUI, "已运行的实例没有应答，强制接管（可能会有两个图标）")
+    else:
+        log.info(CAT_GUI, "已运行的实例已经不在了，接管")
+    instance.take_over()
+    return "continue"
+
+
 def main(argv: list[str] | None = None) -> int:
     force_utf8_stdio()
     args = parse_args(argv)
 
     if args.self_test:
         return run_self_test(args.report)
+
+    # **只让一个 GUI 进程在跑。**
+    #
+    # 双击 exe 的时候，用户要的是「把开着的那一个叫到前面来」，不是
+    # 「再开一个」。开了第二个会多一个托盘图标、多一份引擎和任务表，
+    # 而且关掉一个另一个还在。
+    #
+    # 这一段必须早于窗口创建——判断完了才知道该不该开窗口。
+    from . import single_instance
+
+    # URL scheme 唤起时，命令行里可能带着一个下载地址
+    # （superdownloadmanager://add?url=...）。这个要先拿出来，
+    # 下面交给已经运行的实例时会用到。
+    pending_url = ""
+    try:
+        from . import url_scheme
+
+        pending_url = url_scheme.parse_scheme_url(args.url)
+        if not pending_url and args.url and not args.url.lower().startswith(
+            "superdownloadmanager://"
+        ):
+            pending_url = args.url.strip()
+    except Exception as exc:
+        log.debug(CAT_GUI, f"命令行地址解析失败: {exc}")
+
+    instance = single_instance.SingleInstance()
+    instance.acquire()
+    # 已经有一个在跑的时候，这一段的判断抽到 resolve_second_instance 里，
+    # 好让每一条分支都能单独测。
+    if not instance.is_first and resolve_second_instance(instance, pending_url) == "exit":
+        return 0
 
     import webview
 
@@ -682,6 +756,23 @@ def main(argv: list[str] | None = None) -> int:
     bridge.set_window(window)
     # 引擎循环交给桥接层——**必须在 set_window 之后**（见上面的说明）。
     bridge.set_loop(engine_loop)
+
+    # 「把窗口叫到前面来」的回调。第二个进程（双击 exe 来的）通过
+    # IPC 端点发 showWindow，走这里把主窗口拉到前面——它自己不开
+    # 第二个窗口，托盘里也就不会出现两个图标。
+    #
+    # **装在窗口创建之后**：回调要操作窗口，窗口还不存在时装了也没用。
+    def _bring_window_forward() -> None:
+        try:
+            window.show()
+            window.restore()
+        except Exception as err:
+            log.debug(CAT_GUI, f"叫出主窗口失败: {err}")
+
+    try:
+        gui_ipc.set_show_window_handler(_bring_window_forward)
+    except Exception as err:
+        log.debug(CAT_GUI, f"装上叫出窗口的回调失败: {err}")
 
     # 启动时同步开机自启状态。
     #
@@ -1060,6 +1151,12 @@ def main(argv: list[str] | None = None) -> int:
             engine_loop.call_soon_threadsafe(engine_loop.stop)
         except RuntimeError:
             pass
+        # **锁要还回去。** 不还的话下次双击会被挡住，而锁里的进程
+        # 号很快会被别的进程复用，判定就乱了（见 single_instance）。
+        try:
+            instance.release()
+        except Exception as err:
+            log.debug(CAT_GUI, f"释放单实例锁失败: {err}")
         logger.stop()
     return 0
 
