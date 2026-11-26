@@ -1,0 +1,47 @@
+# SDM 历史状态快照（归档）
+
+Swift 版（v1.0.x）与「Python 重写版刚起步」（v2.0.0）那两段的状态记录，
+2026-11-26 从 `notes.md` 拆出来。**当前状态看 [notes.md](notes.md)**。
+
+留在这里的是当时的取舍与妥协，行为什么那样定；版本流水本来就在 `notes.md`
+里按节排着，这里只留状态快照。
+
+---
+
+## v1.0.0 状态
+
+仓库里的 v1.0.0 已经由 GitHub Actions 发布为 **Pre-release**：
+
+> https://github.com/Mofan2020/SuperDownloadManager/releases/tag/v1.0.0
+
+asset 是 `SuperDownloadManager.app.zip`（ad-hoc 签名、解压拖 `/Applications` 即可）。按星空喵硬性偏好 **未经手测只发 Pre-release** ——星空喵下载手测通过后，agent 把 `gh release edit v1.0.0 --prerelease=false`。
+
+## v1.0 暂不做
+
+| # | 项 | 原因 |
+|---|---|---|
+| 1 | Live2D 模型接管 | Apple cubism SDK 法律约束；非工程能力 |
+| 2 | 3D 模型预览 | macOS 原生 3D 能力够但渲染工作量大；P2 留口子 |
+| 3 | BT / Magnet 下载 | 与本项目"普通文件下载"定位冲突；上 BT 意味着补 tracker 协议 + DHT + 跨网 NAT，半年工作量 |
+| 4 | 自动解包 zip / 自动挂载 dmg | 安全顾虑 — 自动执行任意归档内容会把用户机器信任半径拉大；v2 视用户呼声决定 |
+| 5 | 公网 URL 上传 / 分享 | 隐私问题 — SDM 持有下载链接 = 私密行为，外泄不可接受 |
+| 6 | 多账号云同步 | 同上，下载历史属私密；本地 SQLite 足够 |
+
+## v1.0 已知的妥协
+
+| # | 项 | 妥协 vs 影响 |
+|---|---|---|
+| 1 | **Safari 浏览器接管能力有限** | macOS 15+ Safari Web Extension 强制"7 天重签"是平台设计，非工程问题；我们交付嗅探+悬停按钮接管入口。**Safari 用户点按钮手动派单** |
+| 2 | **ad-hoc 签名本地跑** | Developer ID 是 v2/v3 目标；v1.0 走 ad-hoc + 用户自信任，DMG 安装需用户手动 "Open Anyway"。等星空喵购入开发者证书再升 |
+| 3 | **动态分段策略激进版** | 初版合并阈值 0.3、分裂阈值 1.5，可通过 GUI 切保守；实测数据后迭代 |
+| 4 | **无 CLI 的 `sdmd` 子进程实际启动** | P0 只声明源码层 stub，`@main` 入口在 P4 真正的 `sdmd` target 上写 |
+| 5 | **GUI 截图实测** | TCC 限制（Screen Recording / Accessibility）下，agent session 无权限截图；GUI 验证落到星空喵手测。CLI 端到端测试 agent 可跑 |
+| 6 | ~~Little Snitch + ad-hoc 签名应用的出站 0 字节~~ → 收回（误判） | 2026-10-19 agent 第一次排查时，把"URLSession 卡 60 s timeout"归因到 Little Snitch 默认拦截 ad-hoc 应用出站；星空喵现场确认 Little Snitch 模式 Silent Allow + SDM 实际请求未被拦截、规则无异样。收回这条，留作未来参考：URLSession 卡死现象 ≠ Little Snitch。**真因见 #7** |
+
+| 7 | **`release-assets.githubusercontent.com` Range 请求在 SDM 里 0 KB/s，curl 直连同 URL 30 s 拿到 1 MB** | 实测（2026-10-19）：`curl -r 0-2097151` 拉用户给的 UCopy.exe URL，30 秒拿到 1,017,794 / 2,097,152 字节（33 KB/s 真实带宽上限，Content-Range = `bytes 0-2097151/13091795`、Content-Length = 2097152）。同一 URL 在 macOS 上 `URLSession.data(for: req)`（专属 session + IgnoreSSLAuthChallengeDelegate bypass）卡 60 s 后 timeout `kCFStreamErrorCodeKey=-2102`。端到端测试 (`Tests/EngineTests/DownloadFlowEndToEndTests.swift`) 只覆盖本地 Python range server，不覆盖公网 HTTPS + Fastly + 大文件 + chunk 并发，所以这条问题在 CI 单测里**完全没人守门**。**v1.1.9 修复路径（已合 main，2026-10-19）**：(a) `DownloadEngine.runFlow/runResume` 的临时 `HTTPDownloader()` 实例化 → `self.downloader`，让 probe 走与 chunk worker 相同的 IgnoreSSL bypass；(b) `HTTPDownloader.downloadChunk` 加 4 个时间点诊断日志（`chunkStartWall`、`headersReceivedWall`、`bodyReceivedWall`、`body received bytes`），用户切到 Console.app 看 `subsystem=com.skyc8266.superdownloadmanager` 即可区分"chunk 没发出去/发了没收头/收头没收 body"；(c) 新增 `Engine/SDMLogger.swift` 集中日志系统（分级 + 文件落盘 + 自动清理）+ Settings → Logs 页（级别切换 / 持久化开关 / 保留天数 / 轮转 KB / 行数上限 / 预览 / 在 Console.app 中打开 / 在访达中显示）；(d) TaskDetailView 加每 chunk 实时 elapsed 列（基于 partial 文件 mtime，> 15 s 不动变红）。**下一步如果还有 0 KB/s**，按 Console.app 输出继续定位：`headers 一直不来`→ 网络层；`headers 来了但 body 卡死`→ `URLSession.data(for:)` 在 HTTP/2 上换 `bytes` 流式；`body 来了但 bytes=0`→ 服务器拒绝 Range |
+
+## v2.0.0 状态
+
+Python 重写版。Swift 实现保留在仓库根目录的 `Engine/` `App/` `CLI/` `Daemon/` `Extensions/`，作为语义对照。Python 版在 `pymain/`，包名 `sdm`。
+
+`docs/functional-inventory.md` 记录了 Swift 版的 191 个功能点与 35 项重构风险，是功能完整性的验收基准。`docs/ui-spec.md` 是 UI 规范。
